@@ -365,6 +365,33 @@ fn init_twice_refuses_the_second_run_and_keeps_the_first_manifest() {
     assert_eq!(snapshot(root.path()), before);
 }
 
+/// init holds an exclusive lock on an existing manifest while extending it. While
+/// another process holds that lock, init refuses and writes nothing.
+#[test]
+fn init_refuses_a_manifest_another_init_is_updating() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("ntnt.toml");
+    std::fs::write(&path, "[lint]\nstrict = true\n").unwrap();
+    let before = snapshot(root.path());
+    let holder = std::fs::File::open(&path).unwrap();
+    holder.try_lock().unwrap();
+    let r = refused(
+        root.path(),
+        &["init", "--engine", "sqlite"],
+        "DB_INIT_CONFLICT",
+    );
+    let message = r["diagnostics"][0]["message"].as_str().unwrap();
+    assert!(message.contains("Another `ntnt db init`"), "{message}");
+    // Windows locks are mandatory: read the files once the lock is released.
+    drop(holder);
+    assert_eq!(
+        snapshot(root.path()),
+        before,
+        "a refused init changed files"
+    );
+    pass(root.path(), &["init", "--engine", "sqlite"]);
+}
+
 #[test]
 fn init_never_replaces_a_non_directory_migrations_path_or_shares_a_directory() {
     let root = tempfile::tempdir().unwrap();

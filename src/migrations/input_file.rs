@@ -28,6 +28,25 @@ pub(super) fn open(path: &Path) -> std::io::Result<File> {
     }
     options.open(path)
 }
+/// `open` for a file the caller locks and then replaces by rename while holding the
+/// lock. Windows keeps Rust's default sharing (read, write and delete): `std::fs::rename`
+/// can replace a file only when every open handle to it shares deletion.
+pub(super) fn open_replaceable(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
 #[cfg(unix)]
 pub(super) fn single_link(_file: &File, metadata: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;

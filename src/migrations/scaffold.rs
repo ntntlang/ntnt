@@ -1,10 +1,12 @@
 //! First-time setup: `ntnt db init` declares one logical database and its secret
 //! names in ntnt.toml; `ntnt db new` creates the next numbered SQL migration.
 //! Neither command reads a secret value, connects to a database or replaces a file.
+use super::input_file;
 use super::inventory::{self, CapturedInputs};
 use super::{Diagnostic, Engine, InitArgs, NewArgs, Result};
 use serde_json::{json, Value};
-use std::io::{ErrorKind, Write};
+use std::fs::{File, TryLockError};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// A scaffolded database keeps its migrations in this directory beside the manifest.
@@ -188,9 +190,60 @@ fn refuse_existing(document: &toml::Value, name: &str, secrets: &[String; 3]) ->
     Ok(())
 }
 
+/// Another writer replaced or edited the manifest after init captured it.
+const CHANGED: &str = "The manifest changed while init was running; it was left unchanged.";
+
+/// Whether `path` still names the open `file`, unchanged (on Unix the same device and
+/// inode; on Windows the same type, size and modification time).
+fn names(path: &Path, file: &File) -> bool {
+    match (file.metadata(), std::fs::symlink_metadata(path)) {
+        (Ok(held), Ok(current)) => input_file::same(&held, &current),
+        _ => false,
+    }
+}
+
+/// Take init's exclusive lock on `file`, the manifest at `path`, without waiting.
+/// Every init holds it from capturing the manifest until its write is complete, so
+/// a concurrent init refuses instead of replacing the manifest with stale bytes.
+fn lock(path: &Path, file: &File) -> Result<()> {
+    let locked = file.try_lock();
+    // A lock on a file that was replaced meanwhile protects nothing.
+    if !names(path, file) {
+        return Err(conflict(CHANGED));
+    }
+    match locked {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(conflict(
+            "Another `ntnt db init` is updating the manifest; it was left unchanged.",
+        )),
+        Err(TryLockError::Error(_)) => Err(io_failure(
+            "Cannot lock the manifest for an exclusive update; it was left unchanged.",
+        )),
+    }
+}
+
+/// The locked file's current bytes, read through its own handle: on Windows the
+/// lock also denies reads through every other handle.
+fn reread(mut file: &File) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.seek(SeekFrom::Start(0)).ok()?;
+    file.take(inventory::MAX_INPUT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
+}
+
 /// Create a file that must not exist yet. `create_new` never truncates or replaces a
-/// file, including one created concurrently. A partially written new file is removed.
-fn create_new(path: &Path, contents: &[u8], exists: Diagnostic, label: &str) -> Result<()> {
+/// file, including one created concurrently. `opened` runs on the new, still empty
+/// file before anything is written; if it fails, the file is left as it is (init's
+/// lock may be held by another init). A partially written new file is removed.
+fn create_new(
+    path: &Path,
+    contents: &[u8],
+    exists: Diagnostic,
+    label: &str,
+    opened: impl FnOnce(&File) -> Result<()>,
+) -> Result<()> {
     let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -200,6 +253,7 @@ fn create_new(path: &Path, contents: &[u8], exists: Diagnostic, label: &str) -> 
         Err(error) if error.kind() == ErrorKind::AlreadyExists => return Err(exists),
         Err(_) => return Err(io_failure(&format!("Cannot create {label}."))),
     };
+    opened(&file)?;
     if file
         .write_all(contents)
         .and_then(|()| file.sync_all())
@@ -214,10 +268,17 @@ fn create_new(path: &Path, contents: &[u8], exists: Diagnostic, label: &str) -> 
     Ok(())
 }
 
-/// Replace an existing manifest with `combined` (its exact captured bytes plus the
-/// new section) by renaming a synced sibling file over it, so a failure leaves the
-/// original intact. A concurrent edit or a manifest the caller cannot write aborts.
-fn replace_manifest(path: &Path, original: &[u8], combined: &[u8]) -> Result<()> {
+/// Replace the manifest locked through `held` with `combined` (its exact captured
+/// bytes plus the new section) by renaming a synced sibling file over it, so a
+/// failure leaves the original intact. The caller keeps the lock until this returns.
+/// A manifest the caller cannot write, or one replaced or edited since capture, aborts.
+fn replace_manifest(
+    path: &Path,
+    held: &File,
+    original: &[u8],
+    combined: &[u8],
+    before_write: impl FnOnce(),
+) -> Result<()> {
     let failed =
         || io_failure("Cannot write the extended manifest; the original was left unchanged.");
     // Opening for append writes nothing; it refuses a file the caller may not modify.
@@ -242,14 +303,24 @@ fn replace_manifest(path: &Path, original: &[u8], combined: &[u8]) -> Result<()>
         .and_then(|()| temp.as_file().set_permissions(permissions))
         .and_then(|()| temp.as_file().sync_all())
         .map_err(|_| failed())?;
-    // Replace only the exact bytes that were validated; never lose a concurrent edit.
-    if inventory::file_bytes(path)? != original {
-        return Err(conflict(
-            "The manifest changed while init was running; it was left unchanged.",
-        ));
+    // From here the synced copy is removed by hand on failure; `keep` also clears the
+    // temporary-file attribute Windows gives it.
+    let temp = temp.into_temp_path().keep().map_err(|_| failed())?;
+    let replaced = (|| {
+        // The lock excludes other inits, not an editor that ignores it. Replace only
+        // the locked file, still at `path`, with exactly the bytes that were validated.
+        if !names(path, held) || reread(held).as_deref() != Some(original) {
+            return Err(conflict(CHANGED));
+        }
+        before_write();
+        // Unlike tempfile's persist, std's rename also replaces a file that is still
+        // open (here through the lock) on Windows.
+        std::fs::rename(&temp, path).map_err(|_| failed())
+    })();
+    if replaced.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    temp.persist(path).map_err(|_| failed())?;
-    Ok(())
+    replaced
 }
 
 /// Render a scaffolding result like the other db commands: a versioned JSON report
@@ -296,6 +367,12 @@ pub(super) fn init(args: &InitArgs) -> anyhow::Result<()> {
 }
 
 fn initialize(args: &InitArgs) -> Result<(Value, Vec<String>)> {
+    initialize_with(args, || {})
+}
+
+/// `initialize`, calling `before_write` just before the manifest is written (tests
+/// run a concurrent init at that boundary).
+fn initialize_with(args: &InitArgs, before_write: impl FnOnce()) -> Result<(Value, Vec<String>)> {
     let name = args.database.as_str();
     if !valid_database_name(name) {
         return Err(Diagnostic::new(
@@ -309,13 +386,19 @@ fn initialize(args: &InitArgs) -> Result<(Value, Vec<String>)> {
     };
     let (section, secrets) = section(args.engine, name);
     let manifest = args.manifest.as_path();
-    // An existing manifest is captured under the same file rules as every db command.
-    let original = match std::fs::symlink_metadata(manifest) {
+    // An existing manifest is locked, then captured under the same file rules as
+    // every db command; the lock is held until the extended copy has replaced it.
+    let held = match std::fs::symlink_metadata(manifest) {
         Err(error) if error.kind() == ErrorKind::NotFound => None,
-        _ => Some(inventory::file_bytes(manifest)?),
+        _ => Some(inventory::capture(
+            manifest,
+            input_file::open_replaceable,
+            |file| lock(manifest, file),
+        )?),
     };
+    let appended = held.is_some();
     let mut combined = Vec::new();
-    if let Some(bytes) = &original {
+    if let Some((_, bytes)) = &held {
         refuse_existing(&CapturedInputs::parse(bytes)?, name, &secrets)?;
         combined.extend_from_slice(bytes);
         if !bytes.is_empty() {
@@ -359,15 +442,23 @@ fn initialize(args: &InitArgs) -> Result<(Value, Vec<String>)> {
             io_failure("Cannot create the migrations directory; the manifest was not changed.")
         })?;
     }
-    let written = match &original {
+    let written = match &held {
+        // A new manifest is locked before it is written, so a concurrent init that
+        // finds it never extends a partially written file.
         None => create_new(
             manifest,
             &combined,
             conflict("The manifest was created by another process while init was running; it was left unchanged."),
             "the manifest",
+            |file| {
+                lock(manifest, file)?;
+                before_write();
+                Ok(())
+            },
         ),
-        Some(bytes) => replace_manifest(manifest, bytes, &combined),
+        Some((file, bytes)) => replace_manifest(manifest, file, bytes, &combined, before_write),
     };
+    drop(held);
     if let Err(diagnostic) = written {
         if create_dir {
             // remove_dir removes only an empty directory; a concurrently used one stays.
@@ -389,7 +480,7 @@ fn initialize(args: &InitArgs) -> Result<(Value, Vec<String>)> {
     }
     let steps = next_steps(args.engine, name, &secrets, &flags);
     let mut lines = vec![
-        if original.is_some() {
+        if appended {
             format!(
                 "Appended [databases.{name}] ({engine}) to {}.",
                 manifest.display()
@@ -428,7 +519,7 @@ fn initialize(args: &InitArgs) -> Result<(Value, Vec<String>)> {
         "engine": engine,
         "manifest": {
             "path": manifest.display().to_string(),
-            "action": if original.is_some() { "appended" } else { "created" },
+            "action": if appended { "appended" } else { "created" },
         },
         "migrations_dir": {
             "path": migrations.display().to_string(),
@@ -506,6 +597,7 @@ fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
             "The next migration file already exists.",
         ),
         "the migration file",
+        |_| Ok(()),
     )?;
     let mut shown = project_dir(&args.manifest)
         .map(Path::to_path_buf)
@@ -547,6 +639,7 @@ mod tests {
             b"-- replacement\n",
             Diagnostic::new("DB_MIGRATION_EXISTS", "exists"),
             "the migration file",
+            |_| Ok(()),
         )
         .unwrap_err();
         assert_eq!(error.code, "DB_MIGRATION_EXISTS");
@@ -556,15 +649,29 @@ mod tests {
         );
     }
 
+    /// The manifest locked and captured as init does it.
+    fn capture_locked(path: &Path) -> (File, Vec<u8>) {
+        inventory::capture(path, input_file::open_replaceable, |file| lock(path, file)).unwrap()
+    }
+
     #[test]
     fn manifest_replacement_never_loses_a_concurrent_edit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ntnt.toml");
         // init validated "[lint]\n"; the file now holds a different edit.
         std::fs::write(&path, "[lint]\nstrict = true\n").unwrap();
-        let error = replace_manifest(&path, b"[lint]\n", b"[lint]\n\n[secrets.APP_DATABASE]\n")
-            .unwrap_err();
+        let (held, _) = capture_locked(&path);
+        let error = replace_manifest(
+            &path,
+            &held,
+            b"[lint]\n",
+            b"[lint]\n\n[secrets.APP_DATABASE]\n",
+            || {},
+        )
+        .unwrap_err();
         assert_eq!(error.code, "DB_INIT_CONFLICT");
+        // Windows locks are mandatory: read the file once the lock is released.
+        drop(held);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "[lint]\nstrict = true\n"
@@ -576,6 +683,51 @@ mod tests {
         );
     }
 
+    /// A lock on a file that is no longer the manifest protects nothing: an editor
+    /// saved by renaming a new file over the manifest after init captured it.
+    #[test]
+    fn manifest_replacement_aborts_when_the_locked_file_was_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ntnt.toml");
+        std::fs::write(&path, "[lint]\n").unwrap();
+        let (held, original) = capture_locked(&path);
+        let saved = dir.path().join("saved.toml");
+        std::fs::write(&saved, "[lint]\nstrict = true\n").unwrap();
+        std::fs::rename(&saved, &path).unwrap();
+        let error = replace_manifest(
+            &path,
+            &held,
+            &original,
+            b"[lint]\n\n[secrets.APP_DATABASE]\n",
+            || {},
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "DB_INIT_CONFLICT");
+        drop(held);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[lint]\nstrict = true\n"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "the temporary file is removed"
+        );
+    }
+
+    /// Another writer replaced the manifest between init opening and locking it.
+    #[test]
+    fn a_lock_on_a_replaced_manifest_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ntnt.toml");
+        std::fs::write(&path, "[lint]\n").unwrap();
+        let opened = input_file::open_replaceable(&path).unwrap();
+        let saved = dir.path().join("saved.toml");
+        std::fs::write(&saved, "[lint]\nstrict = true\n").unwrap();
+        std::fs::rename(&saved, &path).unwrap();
+        assert_eq!(lock(&path, &opened).unwrap_err().code, "DB_INIT_CONFLICT");
+    }
+
     #[cfg(unix)]
     #[test]
     fn manifest_replacement_keeps_the_file_mode() {
@@ -584,7 +736,15 @@ mod tests {
         let path = dir.path().join("ntnt.toml");
         std::fs::write(&path, "[lint]\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
-        replace_manifest(&path, b"[lint]\n", b"[lint]\n\n[secrets.APP_DATABASE]\n").unwrap();
+        let (held, original) = capture_locked(&path);
+        replace_manifest(
+            &path,
+            &held,
+            &original,
+            b"[lint]\n\n[secrets.APP_DATABASE]\n",
+            || {},
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "[lint]\n\n[secrets.APP_DATABASE]\n"
@@ -593,6 +753,54 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o640
         );
+    }
+
+    fn sqlite_init(manifest: &Path, database: &str) -> InitArgs {
+        InitArgs {
+            engine: Engine::Sqlite,
+            database: database.into(),
+            manifest: manifest.to_path_buf(),
+            json: true,
+        }
+    }
+
+    /// Init "analytics" runs to completion while init "app" is about to write the
+    /// same manifest. Whatever each reports, no successful declaration may be lost.
+    fn race(existing: Option<&str>) -> [Result<(Value, Vec<String>)>; 2] {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ntnt.toml");
+        if let Some(text) = existing {
+            std::fs::write(&manifest, text).unwrap();
+        }
+        let mut second = None;
+        let first = initialize_with(&sqlite_init(&manifest, "app"), || {
+            second = Some(initialize(&sqlite_init(&manifest, "analytics")));
+        });
+        let second = second.expect("the second init ran while the first was writing");
+        let document = CapturedInputs::parse(&std::fs::read(&manifest).unwrap()).unwrap();
+        for (name, result) in [("app", &first), ("analytics", &second)] {
+            if result.is_ok() {
+                assert!(
+                    document["databases"].get(name).is_some(),
+                    "the successful init of {name} was discarded:\n{document}"
+                );
+            }
+        }
+        [first, second]
+    }
+
+    #[test]
+    fn concurrent_init_never_discards_a_declaration_appended_to_a_manifest() {
+        let [first, second] = race(Some("[lint]\nstrict = true\n"));
+        assert!(first.is_ok(), "{:?}", first.err());
+        assert_eq!(second.unwrap_err().code, "DB_INIT_CONFLICT");
+    }
+
+    #[test]
+    fn concurrent_init_never_discards_a_declaration_in_a_new_manifest() {
+        let [first, second] = race(None);
+        assert!(first.is_ok(), "{:?}", first.err());
+        assert_eq!(second.unwrap_err().code, "DB_INIT_CONFLICT");
     }
 
     #[test]

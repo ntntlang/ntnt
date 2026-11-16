@@ -2,6 +2,7 @@ use super::{Diagnostic, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -131,6 +132,15 @@ pub(crate) fn identifier(s: &str) -> bool {
 /// Capture one bounded regular file and reject links or detected replacement/mutation.
 /// Callers retain these bytes instead of reopening a validated path during execution.
 pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
+    Ok(capture(path, super::input_file::open, |_| Ok(()))?.1)
+}
+/// `file_bytes` through `open`, running `before_read` on the opened handle (`ntnt db
+/// init` locks the manifest there) and returning the handle with the bytes.
+pub(super) fn capture(
+    path: &Path,
+    open: fn(&Path) -> std::io::Result<File>,
+    before_read: impl FnOnce(&File) -> Result<()>,
+) -> Result<(File, Vec<u8>)> {
     let bad = || {
         Diagnostic::new(
             "DB_INPUT_IO",
@@ -141,7 +151,8 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_INPUT_BYTES as u64 {
         return Err(bad());
     }
-    let file = super::input_file::open(path).map_err(|_| bad())?;
+    let file = open(path).map_err(|_| bad())?;
+    before_read(&file)?;
     let opened = file.metadata().map_err(|_| bad())?;
     if !opened.is_file()
         || opened.file_type().is_symlink()
@@ -164,7 +175,7 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     {
         return Err(bad());
     }
-    Ok(bytes)
+    Ok((file, bytes))
 }
 impl CapturedInputs {
     /// Bind the exact covered source prefix without claiming its SQL was executed.

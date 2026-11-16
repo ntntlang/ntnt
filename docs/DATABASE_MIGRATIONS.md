@@ -39,7 +39,12 @@ and underscores, at most 50 characters) replaces `app`; the secret names and the
 PostgreSQL schema, role and database names derive from it. If `ntnt.toml` exists,
 `init` appends the section and keeps every existing byte. It refuses, changing
 nothing, when the manifest already declares that database or one of those secrets,
-or when another declared database already uses `migrations/`. `new` numbers the
+or when another declared database already uses `migrations/`. `init` locks the
+manifest from reading it until it has written it, so a concurrent `init` refuses
+with `DB_INIT_CONFLICT` instead of overwriting the other's section. Editors do not
+take that lock: `init` also refuses when it sees that the manifest changed, but an
+edit saved just before `init` replaces the file can be lost, so do not run `init`
+while `ntnt.toml` is being edited. `new` numbers the
 file after the highest existing ID, zero-padded to four digits (or wider, to match
 existing files). Migration names use lowercase ASCII letters, digits and
 underscores, and `new` never overwrites a file. Writing the same files by hand
