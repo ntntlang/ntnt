@@ -18,8 +18,13 @@ for a private CA (#344). `verify-ca`, which skips the host-name check, requires 
   (`server_ssl`, which is false behind a TLS-terminating proxy or pooler). A plan
   reviewed over `verify-full` is stale over `require` or `disable`. `require`
   (encrypted, unverified) must be chosen explicitly and is reported as unverified.
-- **Upgrade:** the target identity now includes the transport, so plans made by
-  0.6.1 must be regenerated. `sslmode=disable` secrets keep working unchanged.
+- **Upgrade:** the target identity now includes the transport, so `migrate` needs a
+  plan made by 0.6.2: regenerate plans made by 0.6.1. `sslmode=disable` secrets keep
+  working unchanged. If a 0.6.1 `migrate` stopped during `CREATE INDEX CONCURRENTLY`,
+  `plan` fails with `DB_ATTEMPT_UNRESOLVED` until that attempt is resolved:
+  `ntnt db reconcile --plan <the 0.6.1 plan>` accepts the 0.6.1 plan over
+  `sslmode=disable`, the only transport 0.6.1 used. Then plan, approve and migrate
+  as usual.
 
 See [NTNT v0.6.1](v0.6.1.md) for the published announcement, upgrade guidance,
 known limits and retained implementation measurements.

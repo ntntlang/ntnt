@@ -252,7 +252,10 @@ The transport is part of each session's identity: `sslmode`, the trust source
 `server_ssl` is `false` even though the client's connection is verified TLS. Plans bind
 the target's identity, so a plan reviewed over `verify-full` fails as stale if
 `migrate` connects with `require` or `disable`, and a changed `sslrootcert` file needs
-a new plan. Human output prints a `Transport:` line.
+a new plan. Human output prints a `Transport:` line. Plans saved by ntnt 0.6.1 bind no
+transport: `migrate` reports them as stale, but `reconcile` accepts one over
+`sslmode=disable`, the only transport 0.6.1 used, so an attempt 0.6.1 left
+unresolved can still be resolved after upgrading.
 
 ## Exact-plan authority and execution
 
