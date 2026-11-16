@@ -909,7 +909,7 @@ fn canonical_roles(value: &mut Value, role: &str) {
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
-            "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"reviewed_prefix_checkpoint"},
+            "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"lone_named_create_index_concurrently", "baseline_adoption":"reviewed_prefix_checkpoint"},
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "managed_schema_extensions":"version", "custom_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
@@ -957,6 +957,16 @@ mod tests {
         b["grants"][0]["privilege"] = json!("DELETE");
         assert_ne!(a, b);
     }
+    #[test]
+    fn capabilities_report_concurrent_index_builds_as_supported() {
+        // Shipped in 0.6.1 (ntnt db reconcile); reports must not call it unimplemented.
+        let capabilities = Postgres::capabilities(170_000);
+        assert_eq!(
+            capabilities["operations"]["concurrent_indexes"],
+            "lone_named_create_index_concurrently"
+        );
+    }
+
     #[test]
     #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
     fn target_transaction_is_really_read_only_even_for_superuser() {
