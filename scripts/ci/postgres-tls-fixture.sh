@@ -8,7 +8,8 @@
 # ssl=on on 127.0.0.1:<host-port> (default 5433) and writes the variables the
 # tests read to <state-dir>/env (for `source`) and, in GitHub Actions, to
 # $GITHUB_ENV. Test-only: never reuse this material or password elsewhere.
-# Clean up with `docker rm -f ntnt-db-tls-<major>` and delete <state-dir>.
+# Clean up with `docker rm -fv ntnt-db-tls-<major>` and delete <state-dir>.
+# Needs bash, docker, openssl and GNU coreutils `timeout` (Linux CI).
 set -euo pipefail
 
 version=${1:?usage: postgres-tls-fixture.sh <postgres-major> <state-dir> [host-port]}
@@ -52,21 +53,29 @@ docker run -d --name "$name" -p "127.0.0.1:$port:5432" \
         exec docker-entrypoint.sh postgres -c ssl=on \
             -c ssl_cert_file=/etc/ntnt-tls/server.crt -c ssl_key_file=/etc/ntnt-tls/server.key' >/dev/null
 
+fail() {
+    echo "PostgreSQL $version fixture: $1" >&2
+    docker logs "$name" 2>&1 | tail -20 >&2 || true
+    exit 1
+}
 # The entrypoint's temporary init server listens only on its Unix socket, so a
-# TCP check passes only once the final server is up.
-for _ in $(seq 1 60); do
-    if docker exec "$name" pg_isready -q -h 127.0.0.1 -U postgres; then
+# TCP check passes only once the final server is up. Every check has a hard
+# deadline (GNU timeout), so a server that stops answering fails setup instead
+# of hanging it.
+ready=
+deadline=$((SECONDS + 90))
+while [ "$SECONDS" -lt "$deadline" ]; do
+    if timeout -k 5 10 docker exec "$name" pg_isready -q -t 5 -h 127.0.0.1 -U postgres; then
+        ready=1
         break
     fi
     sleep 1
 done
-ssl=$(docker exec -e PGPASSWORD="$password" "$name" \
-    psql -h 127.0.0.1 -U postgres -d ntnt_tls_control -tAc 'SHOW ssl')
-if [ "$ssl" != "on" ]; then
-    echo "PostgreSQL $version fixture did not start with ssl=on" >&2
-    docker logs "$name" >&2 || true
-    exit 1
-fi
+[ -n "$ready" ] || fail "not ready within 90 seconds"
+ssl=$(timeout -k 5 30 docker exec -e PGPASSWORD="$password" -e PGCONNECT_TIMEOUT=10 "$name" \
+    psql -h 127.0.0.1 -U postgres -d ntnt_tls_control -tAc 'SHOW ssl') \
+    || fail "SHOW ssl failed or did not finish within 30 seconds"
+[ "$ssl" = "on" ] || fail "did not start with ssl=on"
 
 cat > env <<EOF
 export NTNT_DB_TLS_TEST_ADMIN='host=127.0.0.1 port=$port user=postgres password=$password dbname=ntnt_tls_control sslmode=disable'
