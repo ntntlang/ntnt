@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## Unreleased (0.6.2)
 
-No additional changes recorded after the prepared 0.6.1 candidate.
+No changes recorded yet. See [unreleased notes](docs/release-notes/unreleased.md).
 
 ## 0.6.1
 
