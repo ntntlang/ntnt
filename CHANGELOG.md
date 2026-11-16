@@ -2,7 +2,13 @@
 
 ## Unreleased (0.6.2)
 
-No changes recorded yet. See [unreleased notes](docs/release-notes/unreleased.md).
+See [unreleased notes](docs/release-notes/unreleased.md).
+
+### Added
+
+- `ntnt db` PostgreSQL TLS: `sslmode=verify-full`, `verify-ca` and `require` with
+  host-store or `sslrootcert` trust, no plaintext fallback, and the transport bound
+  into plans (#344).
 
 ## 0.6.1
 
