@@ -202,13 +202,23 @@ fn time_limits_are_validated_before_connecting() {
         report["diagnostics"][0].clone()
     };
     // Valid limits pass configuration; the missing secret stops inspection.
-    let d = first_diagnostic("statement_seconds = 86400\nmigrator_wait_seconds = 300");
-    assert_eq!(d["code"], "DB_SECRET", "{d}");
-    for (limits, field) in [
-        ("statement_seconds = 0", "statement_seconds"),
-        ("statement_seconds = 86401", "statement_seconds"),
-        ("migrator_wait_seconds = 0", "migrator_wait_seconds"),
-        ("migrator_wait_seconds = 301", "migrator_wait_seconds"),
+    for limits in [
+        "statement_seconds = 86400\nmigrator_wait_seconds = 300",
+        "statement_seconds = 2\nmigrator_wait_seconds = 1",
+    ] {
+        let d = first_diagnostic(limits);
+        assert_eq!(d["code"], "DB_SECRET", "{limits}: {d}");
+    }
+    let statement_range = "statement_seconds must be from 2 to 86400 seconds";
+    let wait_range = "migrator_wait_seconds must be from 1 to 300 seconds";
+    for (limits, expected) in [
+        ("statement_seconds = 0", statement_range),
+        // One second would end a brief lock wait as a statement timeout,
+        // which is not retried, before the 1-second lock timeout fires.
+        ("statement_seconds = 1", statement_range),
+        ("statement_seconds = 86401", statement_range),
+        ("migrator_wait_seconds = 0", wait_range),
+        ("migrator_wait_seconds = 301", wait_range),
         ("statement_seconds = 1.5", "statement_seconds"),
         (
             "statement_seconds = \"ntnt346_private_canary\"",
@@ -220,15 +230,14 @@ fn time_limits_are_validated_before_connecting() {
         assert_eq!(d["code"], "DB_CONFIG", "{limits}: {d}");
         let message = d["message"].as_str().unwrap();
         assert!(
-            message.contains("[databases.app.limits]") && message.contains(field),
+            message.contains("[databases.app.limits]") && message.contains(expected),
             "{limits}: {d}"
         );
         assert!(!d.to_string().contains("ntnt346_private_canary"), "{d}");
+        let next_action = d["next_action"].as_str().unwrap();
         assert!(
-            d["next_action"]
-                .as_str()
-                .unwrap()
-                .contains("migrator_wait_seconds"),
+            next_action.contains("statement_seconds 2-86400")
+                && next_action.contains("migrator_wait_seconds 1-300"),
             "{d}"
         );
     }

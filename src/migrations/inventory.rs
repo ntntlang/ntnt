@@ -77,10 +77,18 @@ pub(crate) struct Database {
 
 const DEFAULT_STATEMENT_SECONDS: u64 = 90;
 const DEFAULT_MIGRATOR_WAIT_SECONDS: u64 = 5;
+/// A migration statement waits at most 1 second for each lock (the migration
+/// `lock_timeout`); the whole transaction is then retried. The statement limit
+/// counts from the start of the statement, so it must outlast that wait, or a
+/// brief lock ends as a statement timeout, which is not retried.
+/// `own_migrations` keeps its statement limit one second above its lock wait
+/// in the same way.
+pub(super) const MIN_STATEMENT_SECONDS: u64 = 2;
+pub(super) const MIN_MIGRATOR_WAIT_SECONDS: u64 = 1;
 /// A day: longer single statements belong in an operator-supervised build.
-const MAX_STATEMENT_SECONDS: u64 = 86_400;
+pub(super) const MAX_STATEMENT_SECONDS: u64 = 86_400;
 /// Five minutes: a migrator holding the lock longer is stuck or building.
-const MAX_MIGRATOR_WAIT_SECONDS: u64 = 300;
+pub(super) const MAX_MIGRATOR_WAIT_SECONDS: u64 = 300;
 fn default_statement_seconds() -> u64 {
     DEFAULT_STATEMENT_SECONDS
 }
@@ -154,21 +162,23 @@ impl Limits {
                 "{table} applies only to PostgreSQL; SQLite keeps its fixed operation limits."
             )));
         }
-        for (field, value, max) in [
+        for (field, value, min, max) in [
             (
                 "statement_seconds",
                 self.statement_seconds,
+                MIN_STATEMENT_SECONDS,
                 MAX_STATEMENT_SECONDS,
             ),
             (
                 "migrator_wait_seconds",
                 self.migrator_wait_seconds,
+                MIN_MIGRATOR_WAIT_SECONDS,
                 MAX_MIGRATOR_WAIT_SECONDS,
             ),
         ] {
-            if !(1..=max).contains(&value) {
+            if !(min..=max).contains(&value) {
                 return Err(invalid(&format!(
-                    "{table} {field} must be from 1 to {max} seconds."
+                    "{table} {field} must be from {min} to {max} seconds."
                 )));
             }
         }
@@ -693,10 +703,10 @@ role="target_role"
                 86705,
                 87020,
             ),
-            // Lowered limits keep the default deadlines.
+            // The lowest limits keep the default deadlines.
             (
-                "statement_seconds = 1\nmigrator_wait_seconds = 1",
-                (1, 1),
+                "statement_seconds = 2\nmigrator_wait_seconds = 1",
+                (2, 1),
                 100,
                 120,
             ),
@@ -730,11 +740,17 @@ role="target_role"
         for (limits, field) in [
             (
                 "statement_seconds = 0",
-                "statement_seconds must be from 1 to 86400",
+                "statement_seconds must be from 2 to 86400",
+            ),
+            // One second would end a brief lock wait as a statement timeout
+            // before the 1-second lock timeout could retry it.
+            (
+                "statement_seconds = 1",
+                "statement_seconds must be from 2 to 86400",
             ),
             (
                 "statement_seconds = 86401",
-                "statement_seconds must be from 1 to 86400",
+                "statement_seconds must be from 2 to 86400",
             ),
             (
                 "migrator_wait_seconds = 0",

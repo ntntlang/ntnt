@@ -40,7 +40,7 @@ impl Diagnostic {
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the named connection secret under [secrets.<NAME>] in ntnt.toml and make it resolvable through the configured std/secrets provider (development: an environment variable with that exact name; production: NTNT_SECRETS_PROVIDER=unix-socket). Never pass a connection URL on the command line.",
             "DB_CONNECTION_CONFIG" => "Make the failing PostgreSQL connection secret (target or scratch) name exactly one explicit host, the user and dbname declared as that endpoint's role and database, and sslmode=disable on a trusted local transport (loopback or a Unix socket), with no startup options. TLS is not yet supported (see #344); never send credentials over an untrusted network.",
-            "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), give a PostgreSQL [databases.<name>.limits] table only whole seconds (statement_seconds 1-86400, migrator_wait_seconds 1-300), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
+            "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), give a PostgreSQL [databases.<name>.limits] table only whole seconds (statement_seconds 2-86400, migrator_wait_seconds 1-300), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
             "DB_ATTEMPT_UNRESOLVED" => "An earlier migrate stopped during a non-transactional migration. Make sure no migrate or index build is still running, then run `ntnt db reconcile --plan <the same approved plan>`; it records the outcome it observes or rolls the attempt back. Nothing else runs until then.",
             "DB_ATTEMPT_ACTIVE" => "The index build is still running in another session. Wait for it to finish or cancel that backend, then reconcile again.",
             "DB_RECONCILE_INCOMPLETE" => "The planned invalid index was dropped, so the database has changed, but the result did not match the plan's state before the migration and the attempt was kept. Inspect drift with an operator, then reconcile again.",
@@ -467,7 +467,17 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
 mod tests {
     #[test]
     fn configuration_diagnostics_have_specific_next_actions() {
+        use super::inventory::{
+            MAX_MIGRATOR_WAIT_SECONDS, MAX_STATEMENT_SECONDS, MIN_MIGRATOR_WAIT_SECONDS,
+            MIN_STATEMENT_SECONDS,
+        };
         let generic = super::Diagnostic::new("DB_NOT_A_REAL_CODE", "x").next_action;
+        // The next action states the ranges validation actually accepts.
+        let statement_range =
+            format!("statement_seconds {MIN_STATEMENT_SECONDS}-{MAX_STATEMENT_SECONDS}");
+        let wait_range = format!(
+            "migrator_wait_seconds {MIN_MIGRATOR_WAIT_SECONDS}-{MAX_MIGRATOR_WAIT_SECONDS}"
+        );
         for (code, expected) in [
             (
                 "DB_CONNECTION_CONFIG",
@@ -488,8 +498,8 @@ mod tests {
                     "approval_secret",
                     "--adopt-through",
                     "[databases.<name>.limits]",
-                    "statement_seconds 1-86400",
-                    "migrator_wait_seconds 1-300",
+                    statement_range.as_str(),
+                    wait_range.as_str(),
                 ]
                 .as_slice(),
             ),

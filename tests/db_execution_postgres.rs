@@ -499,6 +499,10 @@ fn result_within(mut child: std::process::Child, limit: std::time::Duration) -> 
     result(child)
 }
 fn upgrade_fixture() -> (Fixture, Value) {
+    upgrade_fixture_with_limits(None)
+}
+/// `upgrade_fixture`, planned with a `[databases.app.limits]` table.
+fn upgrade_fixture_with_limits(limits: Option<&str>) -> (Fixture, Value) {
     let f = Fixture::new();
     f.sql(
         "0001_initial.sql",
@@ -516,6 +520,9 @@ fn upgrade_fixture() -> (Fixture, Value) {
         "0002_expand.sql",
         "ALTER TABLE app.t ADD COLUMN label TEXT DEFAULT 'once';",
     );
+    if let Some(limits) = limits {
+        set_limits(&f, limits);
+    }
     let plan = f.plan("upgrade.json");
     (f, plan)
 }
@@ -1294,18 +1301,15 @@ fn migrations_do_not_lock_unrelated_tables() {
     writer.batch_execute("COMMIT").unwrap();
 }
 
-#[test]
-#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
-fn brief_lock_conflicts_are_retried() {
-    // A short lock wait gives up quickly (so queued application writes are not
-    // stalled behind it) and the whole migration transaction is retried.
-    let (mut f, plan) = upgrade_fixture();
+/// Hold `mode` on `app.t` while `migrate` runs the upgrade, release it after
+/// 2.5 seconds and check that the 1-second lock timeout retried through it.
+fn retries_through_a_brief_lock(f: &mut Fixture, plan: &Value, mode: &str) -> Value {
     let mut locker = f.target();
     locker
-        .batch_execute("BEGIN; LOCK TABLE app.t IN ACCESS EXCLUSIVE MODE")
+        .batch_execute(&format!("BEGIN; LOCK TABLE app.t IN {mode} MODE"))
         .unwrap();
-    let child = spawn_apply(&f, &plan);
-    wait_locked(&mut f, 1);
+    let child = spawn_apply(f, plan);
+    wait_locked(f, 1);
     std::thread::sleep(std::time::Duration::from_millis(2500));
     locker.batch_execute("COMMIT").unwrap();
     let r = result(child);
@@ -1315,6 +1319,30 @@ fn brief_lock_conflicts_are_retried() {
         r["progress"][1]["lock_retries"].as_u64().unwrap_or(0) >= 1,
         "{r}"
     );
+    r
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn brief_lock_conflicts_are_retried() {
+    // A short lock wait gives up quickly (so queued application writes are not
+    // stalled behind it) and the whole migration transaction is retried.
+    // ACCESS EXCLUSIVE also blocks the catalog inspection (pg_get_indexdef),
+    // so this wait comes before the script.
+    let (mut f, plan) = upgrade_fixture();
+    retries_through_a_brief_lock(&mut f, &plan, "ACCESS EXCLUSIVE");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn brief_lock_conflicts_are_retried_at_the_lowest_statement_limit() {
+    // An application's SHARE lock lets the inspection reads through, so the
+    // script's ALTER TABLE is what waits. Its 1-second lock timeout must fire
+    // before the statement limit, which counts from the start of the
+    // statement: a statement timeout (57014) is not retried.
+    let (mut f, plan) = upgrade_fixture_with_limits(Some("statement_seconds = 2"));
+    let r = retries_through_a_brief_lock(&mut f, &plan, "SHARE");
+    assert_eq!(r["limits"]["statement_seconds"], 2, "{r}");
 }
 
 #[test]
@@ -2010,25 +2038,26 @@ fn statement_timed_out(r: &Value) -> bool {
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn statement_limit_bounds_scripts_and_a_raised_limit_needs_a_new_plan() {
     // Scaled stand-in for a migration that outgrows the default limit on a
-    // large table: 1 second plays the default, 6 seconds the raised limit.
+    // large table: 2 seconds (the lowest accepted) plays the default, 6
+    // seconds the raised limit.
     let f = Fixture::new();
     f.sql(
         "0001_slow.sql",
-        "CREATE TABLE app.t(id INTEGER); SELECT pg_catalog.pg_sleep(2);",
+        "CREATE TABLE app.t(id INTEGER); SELECT pg_catalog.pg_sleep(3);",
     );
-    set_limits(&f, "statement_seconds = 1");
+    set_limits(&f, "statement_seconds = 2");
     // Replay on the empty scratch database keeps the default limit.
     let low = f.plan("low.json");
     assert_eq!(
         low["plan"]["execution"]["limits"],
-        serde_json::json!({"statement_seconds": 1, "migrator_wait_seconds": 5}),
+        serde_json::json!({"statement_seconds": 2, "migrator_wait_seconds": 5}),
         "{low}"
     );
     let r = f.apply("low.json", low["plan_digest"].as_str());
     assert!(statement_timed_out(&r), "{r}");
     assert_eq!(r["progress"][0]["state"], "failed", "{r}");
     assert_eq!(r["cleanup"], "pass", "{r}");
-    assert_eq!(r["limits"]["statement_seconds"], 1, "{r}");
+    assert_eq!(r["limits"]["statement_seconds"], 2, "{r}");
     // The whole migration transaction rolled back, ledger bootstrap included.
     assert!(f
         .target()
@@ -2059,7 +2088,7 @@ fn statement_limit_bounds_scripts_and_a_raised_limit_needs_a_new_plan() {
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn statement_limit_bounds_a_concurrent_index_build() {
-    // A build that waits on a busy table, scaled: past a 1-second limit it
+    // A build that waits on a busy table, scaled: past a 2-second limit it
     // fails and cleans up as before; with 8 seconds the same wait fits.
     let mut f = Fixture::new();
     f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
@@ -2072,7 +2101,7 @@ fn statement_limit_bounds_a_concurrent_index_build() {
         "0002_index.sql",
         "CREATE INDEX CONCURRENTLY t_id ON app.t(id);",
     );
-    set_limits(&f, "statement_seconds = 1");
+    set_limits(&f, "statement_seconds = 2");
     let low = f.plan("low.json");
     // SHARE conflicts with the build's SHARE UPDATE EXCLUSIVE, so the build
     // waits before it creates anything.
