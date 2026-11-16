@@ -8,7 +8,45 @@
 #![cfg(unix)]
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// Run a child with piped output and a whole-run deadline; a stalled child is
+/// killed and the test fails instead of hanging.
+fn output_within(mut command: Command, deadline: Duration) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let drain = |mut pipe: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("child did not finish within {deadline:?}: {command:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    Output {
+        status,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    }
+}
 
 fn example(engine: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -38,6 +76,15 @@ fn copy_example(engine: &str) -> tempfile::TempDir {
 /// `. ./dev.env && ntnt db <args> --json`, with only the approval (if any)
 /// coming from outside, as the README's `export APP_MIGRATION_APPROVAL=...`.
 fn db(root: &Path, args: &str, approval: Option<&str>) -> Value {
+    // Only commands the README shows, word for word, so the two cannot drift.
+    let readme = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/database-dev/README.md"),
+    )
+    .unwrap();
+    assert!(
+        readme.contains(&format!("ntnt db {args}\n")),
+        "the README does not show `ntnt db {args}`"
+    );
     let mut c = Command::new("sh");
     c.arg("-c")
         .arg(format!(". ./dev.env && \"$NTNT\" db {args} --json"))
@@ -57,7 +104,7 @@ fn db(root: &Path, args: &str, approval: Option<&str>) -> Value {
     if let Some(digest) = approval {
         c.env("APP_MIGRATION_APPROVAL", digest);
     }
-    let output = c.output().unwrap();
+    let output = output_within(c, Duration::from_secs(180));
     serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
         panic!(
             "{}\n{}",
@@ -88,17 +135,21 @@ fn documented_workflow(root: &Path, next_migration: &str) {
     assert_eq!(status["outcome"], "pass", "{status}");
     assert_eq!(status["history"]["pending_count"], 1, "{status}");
 
-    let plan = db(root, "plan --target development --out review.json", None);
+    let plan = db(
+        root,
+        "plan --target development --out review-0001.json",
+        None,
+    );
     assert_eq!(plan["outcome"], "pass", "{plan}");
     let digest = plan["plan_digest"].as_str().unwrap().to_string();
     // The saved plan carries the digest the README extracts with jq.
     let saved: Value =
-        serde_json::from_slice(&std::fs::read(root.join("review.json")).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(root.join("review-0001.json")).unwrap()).unwrap();
     assert_eq!(saved["plan_digest"], digest.as_str());
 
     let unapproved = db(
         root,
-        "migrate --target development --plan review.json",
+        "migrate --target development --plan review-0001.json",
         None,
     );
     assert!(
@@ -107,7 +158,7 @@ fn documented_workflow(root: &Path, next_migration: &str) {
     );
     let applied = db(
         root,
-        "migrate --target development --plan review.json",
+        "migrate --target development --plan review-0001.json",
         Some(&digest),
     );
     assert_eq!(applied["outcome"], "pass", "{applied}");
@@ -116,7 +167,7 @@ fn documented_workflow(root: &Path, next_migration: &str) {
     assert_eq!(verify["outcome"], "pass", "{verify}");
     let rerun = db(
         root,
-        "migrate --target development --plan review.json",
+        "migrate --target development --plan review-0001.json",
         Some(&digest),
     );
     assert_eq!(rerun["outcome"], "pass", "{rerun}");
@@ -125,13 +176,17 @@ fn documented_workflow(root: &Path, next_migration: &str) {
     // Next change: a new numbered file, a new plan and a new digest. The old
     // approval does not apply to it.
     std::fs::write(root.join("migrations/0002_names.sql"), next_migration).unwrap();
-    let next = db(root, "plan --target development --out review-2.json", None);
+    let next = db(
+        root,
+        "plan --target development --out review-0002.json",
+        None,
+    );
     assert_eq!(next["outcome"], "pass", "{next}");
     let next_digest = next["plan_digest"].as_str().unwrap().to_string();
     assert_ne!(next_digest, digest);
     let stale_approval = db(
         root,
-        "migrate --target development --plan review-2.json",
+        "migrate --target development --plan review-0002.json",
         Some(&digest),
     );
     assert!(
@@ -140,7 +195,7 @@ fn documented_workflow(root: &Path, next_migration: &str) {
     );
     let applied = db(
         root,
-        "migrate --target development --plan review-2.json",
+        "migrate --target development --plan review-0002.json",
         Some(&next_digest),
     );
     assert_eq!(applied["outcome"], "pass", "{applied}");
@@ -162,8 +217,58 @@ fn sqlite_development_setup_runs_as_documented() {
     );
 }
 
+/// `docker compose <args>` for the example's own stack, bounded.
+fn compose(args: &[&str]) {
+    let mut c = Command::new("docker");
+    c.arg("compose")
+        .arg("-f")
+        .arg(example("postgresql").join("compose.yml"))
+        .args(args);
+    let output = output_within(c, Duration::from_secs(180));
+    assert!(
+        output.status.success(),
+        "docker compose {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Run one SQL statement as the development owner from dev.env, bounded.
+fn development_sql(root: &Path, sql: &str) -> Result<i64, String> {
+    let mut c = Command::new("sh");
+    c.arg("-c")
+        .arg(". ./dev.env && printf %s \"$APP_DATABASE\"")
+        .current_dir(root);
+    let secret = String::from_utf8(output_within(c, Duration::from_secs(30)).stdout).unwrap();
+    let sql = sql.to_string();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            tokio::time::timeout(Duration::from_secs(30), async move {
+                let (client, connection) = secret
+                    .parse::<tokio_postgres::Config>()
+                    .unwrap()
+                    .connect(tokio_postgres::NoTls)
+                    .await
+                    .unwrap();
+                let task = tokio::spawn(connection);
+                let value = client
+                    .query_one(&sql, &[])
+                    .await
+                    .map(|row| row.get::<_, i64>(0))
+                    .map_err(|e| format!("{e:?}"));
+                drop(client);
+                let _ = task.await;
+                value
+            })
+            .await
+            .expect("development PostgreSQL did not answer within the deadline")
+        })
+}
+
 #[test]
-#[ignore = "requires `docker compose up -d --wait` in examples/database-dev/postgresql; CI db catalog lane"]
+#[ignore = "requires docker and `docker compose up -d --wait` in examples/database-dev/postgresql; CI db catalog lane"]
 fn postgresql_development_setup_runs_as_documented() {
     let root = copy_example("postgresql");
     let status = db(root.path(), "status --target development", None);
@@ -175,4 +280,25 @@ fn postgresql_development_setup_runs_as_documented() {
         root.path(),
         "ALTER TABLE public.accounts ADD COLUMN name TEXT;\n",
     );
+    // An ordinary `docker compose down` keeps the databases; only `down -v`
+    // deletes them.
+    let inserted = development_sql(
+        root.path(),
+        "WITH row AS (INSERT INTO public.accounts (email, name) VALUES ('kept@example.test', 'Kept') RETURNING id) SELECT count(*) FROM row",
+    );
+    assert_eq!(inserted, Ok(1));
+    compose(&["down"]);
+    compose(&["up", "-d", "--wait"]);
+    let kept = development_sql(
+        root.path(),
+        "SELECT count(*) FROM public.accounts WHERE email = 'kept@example.test'",
+    );
+    assert_eq!(
+        kept,
+        Ok(1),
+        "the migrated row did not survive `docker compose down`"
+    );
+    let verify = db(root.path(), "verify --target development", None);
+    assert_eq!(verify["outcome"], "pass", "{verify}");
+    assert_eq!(verify["history"]["applied_count"], 2, "{verify}");
 }

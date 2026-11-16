@@ -3,6 +3,7 @@
 # (initdb/10-ntnt-db.sql). Loopback only, throwaway passwords. Not for production.
 #
 #   docker compose up -d --wait     # start (waits for the healthcheck)
+#   docker compose down             # stop; the data stays in the `data` volume
 #   docker compose down -v          # stop and delete the data
 name: ntnt-db-dev
 services:
@@ -13,10 +14,15 @@ services:
     network_mode: bridge
     environment:
       POSTGRES_PASSWORD: dev-only-superuser
+      # The cluster lives in the named volume below. A subdirectory works with
+      # the 16 and 17 image layouts and with 18 (which also adds an unused
+      # anonymous volume at /var/lib/postgresql; `down -v` removes it).
+      PGDATA: /var/lib/postgresql/data/pgdata
     ports:
       - "127.0.0.1:55432:5432"
     volumes:
       - ./initdb:/docker-entrypoint-initdb.d:ro
+      - data:/var/lib/postgresql/data
     healthcheck:
       # TCP, not the Unix socket: the entrypoint's temporary init server only
       # listens on the socket, so this passes once the real server is up.
@@ -24,3 +30,5 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
+volumes:
+  data:

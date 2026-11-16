@@ -8,7 +8,8 @@ database, a separate disposable scratch database and an approval step.
 - **PostgreSQL:** one `docker compose up -d --wait` starts PostgreSQL 17 on
   `127.0.0.1:55432`. An init script creates the target and scratch databases, each
   owned by its own unprivileged role, with matching settings. A `dev.env` sets the
-  development secrets.
+  development secrets. The data lives in a named volume: `docker compose down`
+  keeps it, and `down -v` resets it.
 - **SQLite:** `. ./dev.env` creates the empty target and scratch files once and sets
   their absolute paths.
 - **Approval stays explicit.** Development supplies the plan digest through the

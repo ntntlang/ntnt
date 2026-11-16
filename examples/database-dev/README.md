@@ -12,10 +12,10 @@ docker compose up -d --wait   # PostgreSQL 17 on 127.0.0.1:55432
 . ./dev.env
 
 ntnt db status --target development
-ntnt db plan --target development --out review.json
-# Review review.json and the SQL. Then approve exactly this plan:
-export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review.json)"
-ntnt db migrate --target development --plan review.json
+ntnt db plan --target development --out review-0001.json
+# Review review-0001.json and the SQL. Then approve exactly this plan:
+export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review-0001.json)"
+ntnt db migrate --target development --plan review-0001.json
 ntnt db verify --target development
 ```
 
@@ -25,9 +25,10 @@ unprivileged role, from the same template so their settings match. The manifest
 manages the `public` schema. `dev.env` holds the throwaway development
 credentials and selects the development environment provider.
 
-`docker compose down -v` deletes everything, scratch included; the next
-`docker compose up -d --wait` starts empty. Set `NTNT_DB_DEV_IMAGE` to use another
-PostgreSQL 16–18 image.
+The databases live in the `data` volume: `docker compose down` and
+`docker compose up -d --wait` keep them. `docker compose down -v` deletes
+everything, scratch included, and the next start is empty. Set `NTNT_DB_DEV_IMAGE`
+to use another PostgreSQL 16–18 image.
 
 ## SQLite
 
@@ -36,9 +37,9 @@ cd examples/database-dev/sqlite
 . ./dev.env   # creates empty data/app.sqlite and data/replay.sqlite once
 
 ntnt db status --target development
-ntnt db plan --target development --out review.json
-export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review.json)"
-ntnt db migrate --target development --plan review.json
+ntnt db plan --target development --out review-0001.json
+export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review-0001.json)"
+ntnt db migrate --target development --plan review-0001.json
 ntnt db verify --target development
 ```
 
@@ -47,10 +48,19 @@ ntnt db verify --target development
 ## Next changes
 
 Add the next numbered file to `migrations/` (for example `0002_names.sql`), then
-plan, review, approve and migrate again. Each plan has its own digest, and an
-approval applies only to the plan it names: `migrate` without
-`APP_MIGRATION_APPROVAL`, or with another plan's digest, changes nothing.
-Rerunning an applied plan reports `already_applied`.
+plan, review, approve and migrate again. `ntnt db` never overwrites a saved plan,
+so give each plan its own file:
+
+```sh
+ntnt db plan --target development --out review-0002.json
+export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review-0002.json)"
+ntnt db migrate --target development --plan review-0002.json
+ntnt db verify --target development
+```
+
+Each plan has its own digest, and an approval applies only to the plan it names:
+`migrate` without `APP_MIGRATION_APPROVAL`, or with another plan's digest, changes
+nothing. Rerunning an applied plan reports `already_applied`.
 
 Production uses its own targets, the Unix-socket secrets provider and a
 separately protected approval. See
