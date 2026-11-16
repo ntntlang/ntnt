@@ -328,8 +328,14 @@ async fn inspect_observed(
                     applied
                 };
                 for (index, migration) in inputs.migrations.iter().take(count).enumerate() {
+                    // Configured limits size work on the target's data. Replay
+                    // runs on an empty database and keeps the default limit.
                     scratch
-                        .execute_captured(migration, &inputs.config.schema)
+                        .execute_captured(
+                            migration,
+                            &inputs.config.schema,
+                            super::inventory::Limits::default().statement(),
+                        )
                         .await?;
                     let step = scratch
                         .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
@@ -422,7 +428,12 @@ async fn inspect_observed(
     };
     report["binding"] = binding.clone();
     if command == "plan" {
-        let mut plan = json!({"execution":{"format":if adoption.is_some() {super::adoption::format(&inputs.config.engine)} else {adapter::execution_format(&inputs.config.engine)},"prefix_fingerprints":fingerprints},"binding":binding,"pending":pending,"candidate":{"outcome":candidate_outcome,"fingerprint":candidate.as_ref().map(json_digest)},
+        let mut execution = json!({"format":if adoption.is_some() {super::adoption::format(&inputs.config.engine)} else {adapter::execution_format(&inputs.config.engine)},"prefix_fingerprints":fingerprints});
+        // The limits migrate will use are part of what is reviewed and approved.
+        if let Some(limits) = inputs.plan_limits() {
+            execution["limits"] = limits;
+        }
+        let mut plan = json!({"execution":execution,"binding":binding,"pending":pending,"candidate":{"outcome":candidate_outcome,"fingerprint":candidate.as_ref().map(json_digest)},
             "authorized":false,"executable":false,"automatic_safe":false,"classification":if report["outcome"]=="pass" && candidate_outcome=="pass" {"requires_review"} else {"blocked"},"required_authority":"migrate requires this exact digest from the separately protected approval_secret provider, then revalidates under ownership. This digest alone grants no authority.",
             "data_checks":{"outcome":"not_run","reason":"Constraints, casts, nulls, duplicates, orphans and deployed-client compatibility require later data/behavior evidence."}});
         if let Some(action) = adoption {

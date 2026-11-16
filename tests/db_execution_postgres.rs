@@ -448,8 +448,11 @@ fn rollback_disconnect_discards_connection_and_reports_unknown_cleanup() {
 }
 
 fn spawn_apply(f: &Fixture, plan: &Value) -> std::process::Child {
+    spawn_plan(f, "upgrade.json", plan)
+}
+fn spawn_plan(f: &Fixture, path: &str, plan: &Value) -> std::process::Child {
     f.process("migrate")
-        .args(["--plan", "upgrade.json"])
+        .args(["--plan", path])
         .env("DB_APPROVAL", plan["plan_digest"].as_str().unwrap())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -481,6 +484,19 @@ fn result(child: std::process::Child) -> Value {
     let out = child.wait_with_output().unwrap();
     serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)))
+}
+/// `result`, but kill the process and fail if it runs longer than `limit`.
+fn result_within(mut child: std::process::Child, limit: std::time::Duration) -> Value {
+    let until = std::time::Instant::now() + limit;
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= until {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("migrate still running after {limit:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    result(child)
 }
 fn upgrade_fixture() -> (Fixture, Value) {
     let f = Fixture::new();
@@ -1974,4 +1990,155 @@ fn concurrent_builds_refuse_custom_casts() {
     let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
     assert!(code(&r, "DB_CHECK_UNSUPPORTED"), "{r}");
     assert_eq!(index_state(&f, "t_id"), None);
+}
+
+/// Replace the manifest's `[databases.app.limits]` table, which stays last.
+fn set_limits(f: &Fixture, limits: &str) {
+    let path = f.root.path().join("ntnt.toml");
+    let manifest = std::fs::read_to_string(&path).unwrap();
+    let base = manifest.split("[databases.app.limits]").next().unwrap();
+    std::fs::write(&path, format!("{base}[databases.app.limits]\n{limits}\n")).unwrap();
+}
+/// PostgreSQL cancelled a statement at its time limit (SQLSTATE 57014).
+fn statement_timed_out(r: &Value) -> bool {
+    r["diagnostics"].as_array().unwrap().iter().any(|d| {
+        d["code"] == "DB_POSTGRES" && d["message"].as_str().is_some_and(|m| m.contains("57014"))
+    })
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn statement_limit_bounds_scripts_and_a_raised_limit_needs_a_new_plan() {
+    // Scaled stand-in for a migration that outgrows the default limit on a
+    // large table: 1 second plays the default, 6 seconds the raised limit.
+    let f = Fixture::new();
+    f.sql(
+        "0001_slow.sql",
+        "CREATE TABLE app.t(id INTEGER); SELECT pg_catalog.pg_sleep(2);",
+    );
+    set_limits(&f, "statement_seconds = 1");
+    // Replay on the empty scratch database keeps the default limit.
+    let low = f.plan("low.json");
+    assert_eq!(
+        low["plan"]["execution"]["limits"],
+        serde_json::json!({"statement_seconds": 1, "migrator_wait_seconds": 5}),
+        "{low}"
+    );
+    let r = f.apply("low.json", low["plan_digest"].as_str());
+    assert!(statement_timed_out(&r), "{r}");
+    assert_eq!(r["progress"][0]["state"], "failed", "{r}");
+    assert_eq!(r["cleanup"], "pass", "{r}");
+    assert_eq!(r["limits"]["statement_seconds"], 1, "{r}");
+    // The whole migration transaction rolled back, ledger bootstrap included.
+    assert!(f
+        .target()
+        .query_one(
+            "SELECT to_regclass('app.t') IS NULL AND to_regnamespace('_ntnt') IS NULL",
+            &[]
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+    // A changed limit is a changed policy: the reviewed plan is stale.
+    set_limits(&f, "statement_seconds = 6");
+    let stale = f.apply("low.json", low["plan_digest"].as_str());
+    assert!(code(&stale, "DB_PLAN_STALE"), "{stale}");
+    let against = f.command_args("verify", &["--against", "low.json"]);
+    assert_eq!(against["plan_validation"]["outcome"], "fail", "{against}");
+    let raised = f.plan("raised.json");
+    let r = f.apply("raised.json", raised["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+    assert_eq!(
+        r["limits"],
+        serde_json::json!({"statement_seconds": 6, "migrator_wait_seconds": 5,
+            "work_deadline_seconds": 100, "total_deadline_seconds": 120}),
+        "{r}"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn statement_limit_bounds_a_concurrent_index_build() {
+    // A build that waits on a busy table, scaled: past a 1-second limit it
+    // fails and cleans up as before; with 8 seconds the same wait fits.
+    let mut f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0002_index.sql",
+        "CREATE INDEX CONCURRENTLY t_id ON app.t(id);",
+    );
+    set_limits(&f, "statement_seconds = 1");
+    let low = f.plan("low.json");
+    // SHARE conflicts with the build's SHARE UPDATE EXCLUSIVE, so the build
+    // waits before it creates anything.
+    let mut holder = f.target();
+    holder
+        .batch_execute("BEGIN; LOCK TABLE app.t IN SHARE MODE")
+        .unwrap();
+    // Well under the 90-second default the build would otherwise wait for.
+    let r = result_within(
+        spawn_plan(&f, "low.json", &low),
+        std::time::Duration::from_secs(8),
+    );
+    assert!(statement_timed_out(&r), "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    assert_eq!(r["progress"][1]["cleanup"], "pass", "{r}");
+    assert_eq!(index_state(&f, "t_id"), None);
+    assert_eq!(ledger_rows(&f), 1, "the failed attempt is removed");
+    set_limits(&f, "statement_seconds = 8");
+    let raised = f.plan("raised.json");
+    let start = std::time::Instant::now();
+    let child = spawn_plan(&f, "raised.json", &raised);
+    wait_locked(&mut f, 1);
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    holder.batch_execute("COMMIT").unwrap();
+    let r = result(child);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["progress"][1]["state"], "committed", "{r}");
+    assert!(start.elapsed() >= std::time::Duration::from_secs(3));
+    assert_eq!(index_state(&f, "t_id"), Some(true));
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn migrator_wait_bounds_the_wait_for_a_competing_migrator() {
+    let mut f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
+    let mut other = f.target();
+    other
+        .batch_execute("SELECT pg_advisory_lock(1853124212,245)")
+        .unwrap();
+    // Shorter than the 5-second default: give up after about a second.
+    set_limits(&f, "migrator_wait_seconds = 1");
+    let short = f.plan("short.json");
+    let start = std::time::Instant::now();
+    let r = f.apply("short.json", short["plan_digest"].as_str());
+    assert!(code(&r, "DB_LOCK_CONFLICT"), "{r}");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(r["progress"][0]["state"], "not_run", "{r}");
+    // Longer than the default: outwait a competitor that keeps the lock for
+    // more than 5 seconds.
+    set_limits(&f, "migrator_wait_seconds = 10");
+    let patient = f.plan("patient.json");
+    let start = std::time::Instant::now();
+    let child = spawn_plan(&f, "patient.json", &patient);
+    wait_locked(&mut f, 1);
+    std::thread::sleep(std::time::Duration::from_millis(6500).saturating_sub(start.elapsed()));
+    other
+        .batch_execute("SELECT pg_advisory_unlock_all()")
+        .unwrap();
+    let r = result(child);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+    assert!(start.elapsed() >= std::time::Duration::from_secs(6));
 }

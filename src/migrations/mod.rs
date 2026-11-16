@@ -40,7 +40,7 @@ impl Diagnostic {
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the named connection secret under [secrets.<NAME>] in ntnt.toml and make it resolvable through the configured std/secrets provider (development: an environment variable with that exact name; production: NTNT_SECRETS_PROVIDER=unix-socket). Never pass a connection URL on the command line.",
             "DB_CONNECTION_CONFIG" => "Make the failing PostgreSQL connection secret (target or scratch) name exactly one explicit host, the user and dbname declared as that endpoint's role and database, and sslmode=disable on a trusted local transport (loopback or a Unix socket), with no startup options. TLS is not yet supported (see #344); never send credentials over an untrusted network.",
-            "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
+            "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), give a PostgreSQL [databases.<name>.limits] table only whole seconds (statement_seconds 1-86400, migrator_wait_seconds 1-300), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
             "DB_ATTEMPT_UNRESOLVED" => "An earlier migrate stopped during a non-transactional migration. Make sure no migrate or index build is still running, then run `ntnt db reconcile --plan <the same approved plan>`; it records the outcome it observes or rolls the attempt back. Nothing else runs until then.",
             "DB_ATTEMPT_ACTIVE" => "The index build is still running in another session. Wait for it to finish or cancel that backend, then reconcile again.",
             "DB_RECONCILE_INCOMPLETE" => "The planned invalid index was dropped, so the database has changed, but the result did not match the plan's state before the migration and the attempt was kept. Inspect drift with an operator, then reconcile again.",
@@ -126,13 +126,16 @@ pub struct Options {
 
 /// Run one database operation with an outer deadline and bounded runtime teardown.
 /// Dedicated sessions are discarded; uncancellable resolver work cannot keep the CLI alive.
-fn database_runtime<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+fn database_runtime<T>(
+    deadline: std::time::Duration,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| Diagnostic::new("DB_RUNTIME", "Cannot create database I/O runtime."))?;
     let result = runtime.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(120), future)
+        tokio::time::timeout(deadline, future)
             .await
             .map_err(|_| {
                 Diagnostic::new(
@@ -230,10 +233,14 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             let saved = serde_json::from_slice(&bytes).map_err(|_| {
                 Diagnostic::new("DB_PLAN_INVALID", "Invalid saved execution plan JSON.")
             })?;
+            let deadline = inputs.limits().total_deadline();
             if command == "reconcile" {
-                database_runtime(execution::reconcile_attempt(&inputs, &saved, &mut progress))
+                database_runtime(
+                    deadline,
+                    execution::reconcile_attempt(&inputs, &saved, &mut progress),
+                )
             } else {
-                database_runtime(execution::migrate(&inputs, &saved, &mut progress))
+                database_runtime(deadline, execution::migrate(&inputs, &saved, &mut progress))
             }
         });
         if let Err(d) = work {
@@ -272,7 +279,10 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                         }
                     }
                 }
-                database_runtime(report::inspect(inputs, command, adopt_through))
+                // Inspection keeps the default bounds: its replay runs on an
+                // empty scratch database, not the target's large tables.
+                let deadline = inventory::Limits::default().total_deadline();
+                database_runtime(deadline, report::inspect(inputs, command, adopt_through))
             })
             .unwrap_or_else(|d| report::failure(command, d))
     };
@@ -477,6 +487,9 @@ mod tests {
                     "migrations_dir",
                     "approval_secret",
                     "--adopt-through",
+                    "[databases.<name>.limits]",
+                    "statement_seconds 1-86400",
+                    "migrator_wait_seconds 1-300",
                 ]
                 .as_slice(),
             ),
@@ -519,9 +532,21 @@ mod tests {
     }
 
     #[test]
+    fn the_outer_deadline_is_the_one_supplied() {
+        let start = std::time::Instant::now();
+        let error = super::database_runtime(std::time::Duration::from_millis(50), async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "DB_TIMEOUT");
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
     fn runtime_cleanup_does_not_wait_for_uncancellable_resolver_work() {
         let start = std::time::Instant::now();
-        super::database_runtime(async {
+        super::database_runtime(std::time::Duration::from_secs(120), async {
             let (started, wait) = tokio::sync::oneshot::channel();
             tokio::task::spawn_blocking(move || {
                 let _ = started.send(());

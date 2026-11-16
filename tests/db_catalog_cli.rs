@@ -133,6 +133,58 @@ fn unsupported_metadata_and_unsafe_paths_are_explicit_errors() {
 }
 
 #[test]
+fn time_limits_are_validated_before_connecting() {
+    let root = project();
+    let manifest = std::fs::read_to_string(root.path().join("ntnt.toml")).unwrap();
+    let first_diagnostic = |limits: &str| {
+        std::fs::write(
+            root.path().join("ntnt.toml"),
+            format!("{manifest}[databases.app.limits]\n{limits}\n"),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["db", "status", "--target", "local", "--json"])
+            .env_remove("DB_TARGET")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        report["diagnostics"][0].clone()
+    };
+    // Valid limits pass configuration; the missing secret stops inspection.
+    let d = first_diagnostic("statement_seconds = 86400\nmigrator_wait_seconds = 300");
+    assert_eq!(d["code"], "DB_SECRET", "{d}");
+    for (limits, field) in [
+        ("statement_seconds = 0", "statement_seconds"),
+        ("statement_seconds = 86401", "statement_seconds"),
+        ("migrator_wait_seconds = 0", "migrator_wait_seconds"),
+        ("migrator_wait_seconds = 301", "migrator_wait_seconds"),
+        ("statement_seconds = 1.5", "statement_seconds"),
+        (
+            "statement_seconds = \"ntnt346_private_canary\"",
+            "statement_seconds",
+        ),
+        ("deadline_seconds = 600", "migrator_wait_seconds"),
+    ] {
+        let d = first_diagnostic(limits);
+        assert_eq!(d["code"], "DB_CONFIG", "{limits}: {d}");
+        let message = d["message"].as_str().unwrap();
+        assert!(
+            message.contains("[databases.app.limits]") && message.contains(field),
+            "{limits}: {d}"
+        );
+        assert!(!d.to_string().contains("ntnt346_private_canary"), "{d}");
+        assert!(
+            d["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("migrator_wait_seconds"),
+            "{d}"
+        );
+    }
+}
+
+#[test]
 fn original_source_migrate_command_remains_available() {
     let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
         .args(["migrate", "--help"])

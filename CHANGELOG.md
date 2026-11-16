@@ -2,7 +2,14 @@
 
 ## Unreleased (0.6.2)
 
-No changes recorded yet. See [unreleased notes](docs/release-notes/unreleased.md).
+See [unreleased notes](docs/release-notes/unreleased.md).
+
+### Added
+
+- PostgreSQL `[databases.<name>.limits]` for `ntnt db`: configurable
+  `statement_seconds` (scripts and concurrent index builds) and
+  `migrator_wait_seconds`, bounded, bound into plans, with deadlines that fit
+  them (#346).
 
 ## 0.6.1
 
