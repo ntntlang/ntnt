@@ -1,9 +1,13 @@
 //! `ntnt db init` and `ntnt db new` scaffold first-time database setup through
 //! the built CLI. They declare names, never secret values, and never replace files.
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
+use bounded_output::BoundedOutput;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 const SQLITE_SECRETS: [&str; 3] = [
     "APP_DATABASE_FILE",
@@ -42,7 +46,7 @@ fn report(output: &Output) -> Value {
 }
 
 fn pass(root: &Path, args: &[&str]) -> Value {
-    let output = db(root).args(args).arg("--json").output().unwrap();
+    let output = db(root).args(args).arg("--json").bounded_output();
     let report = report(&output);
     assert!(output.status.success(), "{report}");
     assert_eq!(report["outcome"], "pass", "{report}");
@@ -50,7 +54,7 @@ fn pass(root: &Path, args: &[&str]) -> Value {
 }
 
 fn refused(root: &Path, args: &[&str], code: &str) -> Value {
-    let output = db(root).args(args).arg("--json").output().unwrap();
+    let output = db(root).args(args).arg("--json").bounded_output();
     let report = report(&output);
     assert!(!output.status.success(), "{report}");
     assert_eq!(report["outcome"], "fail", "{report}");
@@ -63,8 +67,7 @@ fn status_code(root: &Path, args: &[&str]) -> Value {
     let output = db(root)
         .args(["status", "--target", "development", "--json"])
         .args(args)
-        .output()
-        .unwrap();
+        .bounded_output();
     assert!(!output.status.success());
     report(&output)["diagnostics"][0]["code"].clone()
 }
@@ -238,8 +241,7 @@ fn init_human_output_lists_secret_names_and_next_steps_without_values() {
     let root = tempfile::tempdir().unwrap();
     let output = db(root.path())
         .args(["init", "--engine", "postgresql", "--database", "shop"])
-        .output()
-        .unwrap();
+        .bounded_output();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     for expected in [
@@ -460,7 +462,7 @@ fn new_creates_sequential_migration_files_without_secrets_or_a_connection() {
     assert_eq!(after.len(), 2);
     assert_eq!(after["0001_initial.sql"], before["0001_initial.sql"]);
 
-    let output = db(root.path()).args(["new", "add_index"]).output().unwrap();
+    let output = db(root.path()).args(["new", "add_index"]).bounded_output();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("0003_add_index.sql"));
 }
@@ -609,7 +611,7 @@ fn sqlite_scaffold_runs_the_documented_plan_approve_migrate_loop() {
         if let Some(digest) = approval {
             command.env("APP_MIGRATION_APPROVAL", digest);
         }
-        let output = command.output().unwrap();
+        let output = command.bounded_output();
         let r = report(&output);
         assert_eq!(r["outcome"], "pass", "{r}");
         assert!(output.status.success());
@@ -623,4 +625,31 @@ fn sqlite_scaffold_runs_the_documented_plan_approve_migrate_loop() {
     run(&["verify"], None);
     let next = pass(root.path(), &["new", "add_timezone"]);
     assert_eq!(next["migration"]["source"], "0002_add_timezone.sql");
+}
+
+/// init and new run outside the db commands' runtime deadline, so every child in
+/// this file is bounded: a stalled `ntnt` process fails its test at the deadline
+/// (killed and reaped) instead of hanging the suite.
+#[test]
+fn a_stalled_cli_child_is_stopped_at_its_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("stall.tnt"),
+        "import { sleep } from \"std/time\"\nsleep(20000)\n",
+    )
+    .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ntnt"));
+    command
+        .args(["run", "stall.tnt"])
+        .env_remove("NTNT_ENV")
+        .current_dir(root.path());
+    let started = Instant::now();
+    let result = bounded_output::output_within(&mut command, Duration::from_secs(1));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the stalled child was not stopped at its deadline ({elapsed:?})"
+    );
+    let failure = result.expect_err("a child past its deadline fails the test");
+    assert!(failure.contains("did not exit within"), "{failure}");
 }
