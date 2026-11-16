@@ -234,12 +234,17 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: db-catalog
+      # A second, TLS-enabled server (throwaway CA, certificate for 127.0.0.1 only).
+      # The service above stays plaintext-only.
+      - name: Start TLS PostgreSQL fixture
+        run: scripts/ci/postgres-tls-fixture.sh "${{ matrix.postgres }}" "$RUNNER_TEMP/postgres-tls" 5433
       - name: Run real inspection, execution, adoption, contracts and commit recovery
         run: |
           cargo test --locked --test db_catalog_postgres -- --ignored --test-threads=2 --nocapture
           cargo test --locked --test db_execution_postgres -- --ignored --test-threads=2 --nocapture
           cargo test --locked --test db_migration_conformance -- --include-ignored --test-threads=2 --nocapture
           cargo test --locked --lib migrations::postgres::tests::target_transaction_is_really_read_only_even_for_superuser -- --ignored --exact --nocapture
+          cargo test --locked --test db_tls_postgres -- --ignored --test-threads=2 --nocapture
         env:
           RUST_MIN_STACK: 8388608
           NTNT_DB_TEST_ADMIN: host=127.0.0.1 user=postgres password=ntnt_db_fixture dbname=ntnt_db_catalog_control sslmode=disable
