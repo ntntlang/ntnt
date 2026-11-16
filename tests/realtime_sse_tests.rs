@@ -896,9 +896,13 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1", "realtime": map {
         assert_eq!(reset.next().await, Some(Frame::Retry));
         // Once its window is full the server holds that stream's next events
         // and the bus keeps those it has not read, until the budget runs out.
+        // Events hyper has not yet written can still fit the window, which
+        // frees their budget, so fill again until the budget stays exhausted.
         let budget = "realtime payload budget exhausted";
-        assert_eq!(get_text(addr, "/fill/r").await, budget);
-        assert_eq!(get_text(addr, "/probe").await, budget);
+        eventually("the stalled stream never held the budget", async || {
+            get_text(addr, "/fill/r").await == budget && get_text(addr, "/probe").await == budget
+        })
+        .await;
         // Both stream permits and every topic are in use.
         let refused = h2_get(&mut connection, addr, "/events").await;
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
