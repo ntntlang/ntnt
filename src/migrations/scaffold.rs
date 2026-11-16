@@ -226,11 +226,14 @@ fn names(path: &Path, file: &File) -> bool {
     }
 }
 
+/// How init attempts the manifest lock: `File::try_lock`, replaced in tests.
+type TryLock = fn(&File) -> std::result::Result<(), TryLockError>;
+
 /// Take init's exclusive lock on `file`, the manifest at `path`, without waiting.
 /// Every init holds it from capturing the manifest until its write is complete, so
 /// a concurrent init refuses instead of replacing the manifest with stale bytes.
-fn lock(path: &Path, file: &File) -> Result<()> {
-    let locked = file.try_lock();
+fn lock(path: &Path, file: &File, try_lock: TryLock) -> Result<()> {
+    let locked = try_lock(file);
     // A lock on a file that was replaced meanwhile protects nothing.
     if !names(path, file) {
         return Err(conflict(CHANGED));
@@ -428,7 +431,7 @@ pub(super) fn init(args: &InitArgs) -> anyhow::Result<()> {
 }
 
 fn initialize(args: &InitArgs) -> Result<(Value, Vec<String>)> {
-    initialize_with(args, |_| {})
+    initialize_with(args, File::try_lock, |_| {})
 }
 
 /// A race boundary in `initialize_with`.
@@ -440,8 +443,13 @@ enum Step {
     Write,
 }
 
-/// `initialize`, calling `pause` at each `Step` (tests run a concurrent init there).
-fn initialize_with(args: &InitArgs, mut pause: impl FnMut(Step)) -> Result<(Value, Vec<String>)> {
+/// `initialize`, taking the manifest lock with `try_lock` and calling `pause` at each
+/// `Step` (tests fail the lock or run a concurrent init there).
+fn initialize_with(
+    args: &InitArgs,
+    try_lock: TryLock,
+    mut pause: impl FnMut(Step),
+) -> Result<(Value, Vec<String>)> {
     let name = args.database.as_str();
     if !valid_database_name(name) {
         return Err(Diagnostic::new(
@@ -462,7 +470,7 @@ fn initialize_with(args: &InitArgs, mut pause: impl FnMut(Step)) -> Result<(Valu
         _ => Some(inventory::capture(
             manifest,
             input_file::open_replaceable,
-            |file| lock(manifest, file),
+            |file| lock(manifest, file, try_lock),
         )?),
     };
     let appended = held.is_some();
@@ -511,9 +519,15 @@ fn initialize_with(args: &InitArgs, mut pause: impl FnMut(Step)) -> Result<(Valu
                 "the manifest",
             )?;
             // A new manifest is locked before it is written, so a concurrent init that
-            // finds it never extends a partially written file. If locking fails, the file
-            // is left as it is: another init that found it may hold the lock.
-            lock(manifest, &file)?;
+            // finds it never extends a partially written file.
+            if let Err(error) = lock(manifest, &file, try_lock) {
+                // On a conflict, another init that found the file holds its lock and
+                // extends it. Otherwise the empty file is still this init's own.
+                if error.code != "DB_INIT_CONFLICT" {
+                    remove_created(manifest, &file);
+                }
+                return Err(error);
+            }
             with_migrations_dir(&migrations, || {
                 pause(Step::Write);
                 write_new(manifest, &file, &combined, "the manifest")
@@ -707,7 +721,10 @@ mod tests {
 
     /// The manifest locked and captured as init does it.
     fn capture_locked(path: &Path) -> (File, Vec<u8>) {
-        inventory::capture(path, input_file::open_replaceable, |file| lock(path, file)).unwrap()
+        inventory::capture(path, input_file::open_replaceable, |file| {
+            lock(path, file, File::try_lock)
+        })
+        .unwrap()
     }
 
     #[test]
@@ -781,7 +798,10 @@ mod tests {
         let saved = dir.path().join("saved.toml");
         std::fs::write(&saved, "[lint]\nstrict = true\n").unwrap();
         std::fs::rename(&saved, &path).unwrap();
-        assert_eq!(lock(&path, &opened).unwrap_err().code, "DB_INIT_CONFLICT");
+        assert_eq!(
+            lock(&path, &opened, File::try_lock).unwrap_err().code,
+            "DB_INIT_CONFLICT"
+        );
     }
 
     #[cfg(unix)]
@@ -830,7 +850,7 @@ mod tests {
             std::fs::write(&manifest, text).unwrap();
         }
         let mut second = None;
-        let first = initialize_with(&sqlite_init(&manifest, "app"), |at| {
+        let first = initialize_with(&sqlite_init(&manifest, "app"), File::try_lock, |at| {
             if at == step {
                 second = Some(initialize(&sqlite_init(&manifest, "analytics")));
             }
@@ -876,6 +896,30 @@ mod tests {
         assert_eq!(first.unwrap_err().code, "DB_INIT_CONFLICT");
         let (report, _) = second.unwrap();
         assert_eq!(report["migrations_dir"]["action"], "created");
+    }
+
+    /// A lock call that fails outright (a filesystem answering `flock` with `ENOLCK`)
+    /// leaves nothing behind: the manifest init just created is still its own, empty
+    /// file. Only contention keeps it: the other init holding the lock extends it.
+    #[test]
+    fn a_failed_lock_on_a_new_manifest_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ntnt.toml");
+        let unsupported = |_: &File| Err(TryLockError::Error(ErrorKind::Unsupported.into()));
+        let error =
+            initialize_with(&sqlite_init(&manifest, "app"), unsupported, |_| {}).unwrap_err();
+        assert_eq!(error.code, "DB_SCAFFOLD_IO");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "a failed init left files behind"
+        );
+
+        let held = |_: &File| Err(TryLockError::WouldBlock);
+        let error = initialize_with(&sqlite_init(&manifest, "app"), held, |_| {}).unwrap_err();
+        assert_eq!(error.code, "DB_INIT_CONFLICT");
+        assert!(manifest.is_file(), "the lock holder's manifest was removed");
+        assert!(!dir.path().join(MIGRATIONS_DIR).exists());
     }
 
     #[test]
