@@ -330,6 +330,12 @@ lazy_static::lazy_static! {
     static ref CALLBACKS: Mutex<Option<CallbackSender>> = Mutex::new(None);
 }
 
+/// Callback jobs holding an admission permit in this process.
+#[cfg(test)]
+pub(crate) fn admitted_callback_jobs() -> usize {
+    MAX_CALLBACK_JOBS - ADMISSION.available_permits()
+}
+
 /// Register an endpoint's configuration. Every worker registers the same
 /// name; a different configuration is a startup error. `replace` is for
 /// development hot reload, which re-evaluates setup with new code.

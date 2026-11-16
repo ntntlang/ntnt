@@ -1,5 +1,5 @@
 //! Real HTTP/WebSocket worker-failure tests with an explicit native panic.
-//! This entire module and its builtin are absent from normal library/CLI builds.
+//! This entire module and its builtins are absent from normal library/CLI builds.
 use super::{Interpreter, Value};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
@@ -15,7 +15,8 @@ type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub(super) fn install(interpreter: &mut Interpreter) {
-    interpreter.environment.borrow_mut().define(
+    let mut environment = interpreter.environment.borrow_mut();
+    environment.define(
         "test_worker_panic".into(),
         Value::NativeFunction {
             name: "test_worker_panic".into(),
@@ -23,6 +24,19 @@ pub(super) fn install(interpreter: &mut Interpreter) {
             max_arity: 0,
             requires: None,
             func: |_| panic!("injected HTTP worker failure"),
+        },
+    );
+    environment.define(
+        "test_admitted_callbacks".into(),
+        Value::NativeFunction {
+            name: "test_admitted_callbacks".into(),
+            arity: 0,
+            max_arity: 0,
+            requires: None,
+            func: |_| {
+                let jobs = crate::stdlib::websocket::admitted_callback_jobs();
+                Ok(Value::Int(jobs as i64))
+            },
         },
     );
 }
@@ -402,6 +416,8 @@ fn gated(conn, message, state) {
 let ep = ws_endpoint("gated", gated, map { "callback_timeout_ms": 120000 })
 get("/ws", fn(req) { websocket(ep) })
 get("/health", fn(req) { text("ok") })
+// Admitted callback jobs. This builtin exists only in the Rust unit-test binary.
+get("/admitted", fn(req) { text(str(test_admitted_callbacks())) })
 get("/hold", fn(req) {
     if primary {
         return status(409, "primary worker")
@@ -507,18 +523,13 @@ async fn saturated_callbacks_recover_from_worker_loss_without_starving() {
         replies.push(read_in_background(reader));
     }
     // Keep one secondary worker in an HTTP request, so the first two
-    // callbacks start on the other two workers.
+    // callbacks start on the other two workers. The primary refuses /hold;
+    // each attempt's deadline includes its body.
     let hold = tokio::spawn(async move {
         for _ in 0..20 {
-            let response = tokio::time::timeout(
-                Duration::from_secs(10),
-                reqwest::get(format!("http://{addr}/hold")),
-            )
-            .await
-            .expect("no response within 10s")
-            .expect("request failed");
-            if response.status() != 409 {
-                return response.text().await.unwrap();
+            let body = get_body(addr, "/hold").await;
+            if body != "primary worker" {
+                return body;
             }
         }
         panic!("no secondary worker took /hold");
@@ -536,8 +547,25 @@ async fn saturated_callbacks_recover_from_worker_loss_without_starving() {
     .await;
     // Released, the held worker answers HTTP while both slots are busy.
     std::fs::remove_file(&hold_block).unwrap();
-    assert_eq!(hold.await.unwrap(), "held");
+    let held = tokio::time::timeout(Duration::from_secs(10), hold)
+        .await
+        .expect("/hold did not finish within 10s")
+        .unwrap();
+    assert_eq!(held, "held");
     assert_eq!(get_body(addr, "/health").await, "ok");
+    // A message is admitted when its connection owner reads it, which can be
+    // after the send completes. While this worker is free for HTTP, wait until
+    // every message holds an admission permit: none is returned before a
+    // callback gate opens, so the overload check below cannot take one.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while get_body(addr, "/admitted").await != admitted.to_string() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "not every message was admitted: {}",
+            server.stdout()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(begun(&server).len(), 2, "{}", server.stdout());
     // It is the only free worker, so it takes /crash.
     let crash = tokio::time::timeout(
