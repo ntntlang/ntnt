@@ -257,39 +257,76 @@ fn reread(mut file: &File) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Create a file that must not exist yet. `create_new` never truncates or replaces a
-/// file, including one created concurrently. `opened` runs on the new, still empty
-/// file before anything is written; if it fails, the file is left as it is (init's
-/// lock may be held by another init). A partially written new file is removed.
-fn create_new(
-    path: &Path,
-    contents: &[u8],
-    exists: Diagnostic,
-    label: &str,
-    opened: impl FnOnce(&File) -> Result<()>,
-) -> Result<()> {
-    let mut file = match std::fs::OpenOptions::new()
+/// Create a file that must not exist yet, open for writing. `create_new` never
+/// truncates or replaces a file, including one created concurrently.
+fn create_new(path: &Path, exists: Diagnostic, label: &str) -> Result<File> {
+    std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Err(exists),
-        Err(_) => return Err(io_failure(&format!("Cannot create {label}."))),
-    };
-    opened(&file)?;
+        .map_err(|error| match error.kind() {
+            ErrorKind::AlreadyExists => exists,
+            _ => io_failure(&format!("Cannot create {label}.")),
+        })
+}
+
+/// Write and sync `contents` to `file`, the new file `create_new` opened at `path`.
+/// A partially written file is removed while `file`, and any lock on it, is held.
+fn write_new(path: &Path, mut file: &File, contents: &[u8], label: &str) -> Result<()> {
     if file
         .write_all(contents)
         .and_then(|()| file.sync_all())
         .is_err()
     {
-        drop(file);
         let _ = std::fs::remove_file(path);
         return Err(io_failure(&format!(
             "Cannot write {label}; the incomplete new file was removed."
         )));
     }
     Ok(())
+}
+
+/// Remove the manifest init created at `path`, open as `file`, while it is still empty
+/// and still at `path`; a file another writer has put there is kept.
+fn remove_created(path: &Path, file: &File) {
+    if names(path, file) && file.metadata().is_ok_and(|metadata| metadata.len() == 0) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Whether the migrations directory exists. Init never replaces a migrations path
+/// that is not a directory.
+fn existing_dir(migrations: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(migrations) {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(conflict(
+            "The migrations path exists but is not a directory; init never replaces it.",
+        )),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(io_failure("Cannot inspect the migrations directory.")),
+    }
+}
+
+/// Run `write` with the migrations directory in place: create it if it is missing and
+/// remove it again if `write` fails. Init calls this only while it holds the manifest
+/// lock, so the inits of one manifest create, report and remove the directory one at
+/// a time, and an init that fails never removes a directory another one reported.
+/// Returns whether the directory was created.
+fn with_migrations_dir(migrations: &Path, write: impl FnOnce() -> Result<()>) -> Result<bool> {
+    let created = !existing_dir(migrations)?;
+    if created {
+        std::fs::create_dir(migrations).map_err(|_| {
+            io_failure("Cannot create the migrations directory; the manifest was not changed.")
+        })?;
+    }
+    if let Err(diagnostic) = write() {
+        if created {
+            // remove_dir removes only an empty directory: a file added meanwhile stays.
+            let _ = std::fs::remove_dir(migrations);
+        }
+        return Err(diagnostic);
+    }
+    Ok(created)
 }
 
 /// Replace the manifest locked through `held` with `combined` (its exact captured
@@ -391,12 +428,20 @@ pub(super) fn init(args: &InitArgs) -> anyhow::Result<()> {
 }
 
 fn initialize(args: &InitArgs) -> Result<(Value, Vec<String>)> {
-    initialize_with(args, || {})
+    initialize_with(args, |_| {})
 }
 
-/// `initialize`, calling `before_write` just before the manifest is written (tests
-/// run a concurrent init at that boundary).
-fn initialize_with(args: &InitArgs, before_write: impl FnOnce()) -> Result<(Value, Vec<String>)> {
+/// A race boundary in `initialize_with`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// No manifest existed; init is about to create it.
+    Create,
+    /// Init holds the manifest lock and is about to write the manifest.
+    Write,
+}
+
+/// `initialize`, calling `pause` at each `Step` (tests run a concurrent init there).
+fn initialize_with(args: &InitArgs, mut pause: impl FnMut(Step)) -> Result<(Value, Vec<String>)> {
     let name = args.database.as_str();
     if !valid_database_name(name) {
         return Err(Diagnostic::new(
@@ -451,45 +496,33 @@ fn initialize_with(args: &InitArgs, before_write: impl FnOnce()) -> Result<(Valu
         || PathBuf::from(MIGRATIONS_DIR),
         |dir| dir.join(MIGRATIONS_DIR),
     );
-    let create_dir = match std::fs::symlink_metadata(&migrations) {
-        Ok(metadata) if metadata.is_dir() => false,
-        Ok(_) => {
-            return Err(conflict(
-                "The migrations path exists but is not a directory; init never replaces it.",
-            ))
+    // Refuse a migrations path that is not a directory before writing anything. The
+    // directory itself is created only once init holds the manifest lock.
+    existing_dir(&migrations)?;
+    let created_dir = match &held {
+        Some((file, bytes)) => with_migrations_dir(&migrations, || {
+            replace_manifest(manifest, file, bytes, &combined, || pause(Step::Write))
+        })?,
+        None => {
+            pause(Step::Create);
+            let file = create_new(
+                manifest,
+                conflict("The manifest was created by another process while init was running; it was left unchanged."),
+                "the manifest",
+            )?;
+            // A new manifest is locked before it is written, so a concurrent init that
+            // finds it never extends a partially written file. If locking fails, the file
+            // is left as it is: another init that found it may hold the lock.
+            lock(manifest, &file)?;
+            with_migrations_dir(&migrations, || {
+                pause(Step::Write);
+                write_new(manifest, &file, &combined, "the manifest")
+            })
+            .inspect_err(|_| remove_created(manifest, &file))?
         }
-        Err(error) if error.kind() == ErrorKind::NotFound => true,
-        Err(_) => return Err(io_failure("Cannot inspect the migrations directory.")),
     };
-    if create_dir {
-        std::fs::create_dir(&migrations).map_err(|_| {
-            io_failure("Cannot create the migrations directory; the manifest was not changed.")
-        })?;
-    }
-    let written = match &held {
-        // A new manifest is locked before it is written, so a concurrent init that
-        // finds it never extends a partially written file.
-        None => create_new(
-            manifest,
-            &combined,
-            conflict("The manifest was created by another process while init was running; it was left unchanged."),
-            "the manifest",
-            |file| {
-                lock(manifest, file)?;
-                before_write();
-                Ok(())
-            },
-        ),
-        Some((file, bytes)) => replace_manifest(manifest, file, bytes, &combined, before_write),
-    };
+    // Any cleanup above ran under the lock; release it only now.
     drop(held);
-    if let Err(diagnostic) = written {
-        if create_dir {
-            // remove_dir removes only an empty directory; a concurrently used one stays.
-            let _ = std::fs::remove_dir(&migrations);
-        }
-        return Err(diagnostic);
-    }
 
     let declared = document
         .get("databases")
@@ -511,7 +544,7 @@ fn initialize_with(args: &InitArgs, before_write: impl FnOnce()) -> Result<(Valu
         },
         format!(
             "{} {}{}.",
-            if create_dir {
+            if created_dir {
                 "Created"
             } else {
                 "Using existing"
@@ -541,7 +574,7 @@ fn initialize_with(args: &InitArgs, before_write: impl FnOnce()) -> Result<(Valu
         },
         "migrations_dir": {
             "path": migrations.display().to_string(),
-            "action": if create_dir { "created" } else { "existing" },
+            "action": if created_dir { "created" } else { "existing" },
         },
         "secrets": secrets,
         "next_steps": steps,
@@ -607,16 +640,16 @@ fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
          -- never edit or renumber it; add a new migration instead.\n",
         engine = config.engine
     );
-    create_new(
-        &dir.join(&source),
-        header.as_bytes(),
+    let path = dir.join(&source);
+    let file = create_new(
+        &path,
         Diagnostic::new(
             "DB_MIGRATION_EXISTS",
             "The next migration file already exists.",
         ),
         "the migration file",
-        |_| Ok(()),
     )?;
+    write_new(&path, &file, header.as_bytes(), "the migration file")?;
     let mut shown = project_dir(&args.manifest)
         .map(Path::to_path_buf)
         .unwrap_or_default();
@@ -661,10 +694,8 @@ mod tests {
         std::fs::write(&path, "CREATE TABLE kept (id INTEGER);\n").unwrap();
         let error = create_new(
             &path,
-            b"-- replacement\n",
             Diagnostic::new("DB_MIGRATION_EXISTS", "exists"),
             "the migration file",
-            |_| Ok(()),
         )
         .unwrap_err();
         assert_eq!(error.code, "DB_MIGRATION_EXISTS");
@@ -789,25 +820,33 @@ mod tests {
         }
     }
 
-    /// Init "analytics" runs to completion while init "app" is about to write the
-    /// same manifest. Whatever each reports, no successful declaration may be lost.
-    fn race(existing: Option<&str>) -> [Result<(Value, Vec<String>)>; 2] {
+    /// Init "analytics" runs to completion when init "app" reaches `step` on the same
+    /// manifest. Whatever each reports, no successful declaration may be lost, and the
+    /// migrations directory a successful init reports must still exist.
+    fn race(existing: Option<&str>, step: Step) -> [Result<(Value, Vec<String>)>; 2] {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("ntnt.toml");
         if let Some(text) = existing {
             std::fs::write(&manifest, text).unwrap();
         }
         let mut second = None;
-        let first = initialize_with(&sqlite_init(&manifest, "app"), || {
-            second = Some(initialize(&sqlite_init(&manifest, "analytics")));
+        let first = initialize_with(&sqlite_init(&manifest, "app"), |at| {
+            if at == step {
+                second = Some(initialize(&sqlite_init(&manifest, "analytics")));
+            }
         });
-        let second = second.expect("the second init ran while the first was writing");
+        let second = second.expect("the second init ran at the race boundary");
         let document = CapturedInputs::parse(&std::fs::read(&manifest).unwrap()).unwrap();
         for (name, result) in [("app", &first), ("analytics", &second)] {
-            if result.is_ok() {
+            if let Ok((report, _)) = result {
                 assert!(
                     document["databases"].get(name).is_some(),
                     "the successful init of {name} was discarded:\n{document}"
+                );
+                assert!(
+                    dir.path().join(MIGRATIONS_DIR).is_dir(),
+                    "the migrations directory the successful init of {name} reported ({}) is gone",
+                    report["migrations_dir"]["action"]
                 );
             }
         }
@@ -816,16 +855,27 @@ mod tests {
 
     #[test]
     fn concurrent_init_never_discards_a_declaration_appended_to_a_manifest() {
-        let [first, second] = race(Some("[lint]\nstrict = true\n"));
+        let [first, second] = race(Some("[lint]\nstrict = true\n"), Step::Write);
         assert!(first.is_ok(), "{:?}", first.err());
         assert_eq!(second.unwrap_err().code, "DB_INIT_CONFLICT");
     }
 
     #[test]
     fn concurrent_init_never_discards_a_declaration_in_a_new_manifest() {
-        let [first, second] = race(None);
+        let [first, second] = race(None, Step::Write);
         assert!(first.is_ok(), "{:?}", first.err());
         assert_eq!(second.unwrap_err().code, "DB_INIT_CONFLICT");
+    }
+
+    /// Init "app" found no manifest; init "analytics" creates the manifest and the
+    /// migrations directory before "app" creates the manifest. "app" loses and must
+    /// leave the directory "analytics" reported.
+    #[test]
+    fn a_losing_init_never_removes_the_migrations_directory_of_the_winner() {
+        let [first, second] = race(None, Step::Create);
+        assert_eq!(first.unwrap_err().code, "DB_INIT_CONFLICT");
+        let (report, _) = second.unwrap();
+        assert_eq!(report["migrations_dir"]["action"], "created");
     }
 
     #[test]
