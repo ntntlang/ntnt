@@ -352,6 +352,24 @@ impl CapturedInputs {
         // Only the selected definition is interpreted. Other stores may use a
         // future adapter, unavailable credentials, or unprovisioned directories.
         let raw = &databases[&database_name];
+        // The configuration is tables. Serde's derived structs would also accept
+        // arrays by position (`limits = [1, 300]`), so reject any other shape.
+        let table = |value: Option<&toml::Value>| value.is_none_or(toml::Value::is_table);
+        if !raw.get("limits").is_none_or(toml::Value::is_table) {
+            return Err(invalid(&format!("[databases.{database_name}.limits] must be a table of statement_seconds and migrator_wait_seconds, each a whole number of seconds.")));
+        }
+        if !raw.is_table()
+            || !table(raw.get("scratch"))
+            || !raw.get("targets").is_none_or(|targets| {
+                targets
+                    .as_table()
+                    .is_some_and(|targets| targets.values().all(toml::Value::is_table))
+            })
+        {
+            return Err(invalid(
+                "Database, target and scratch definitions must be TOML tables.",
+            ));
+        }
         let config: Database = raw.clone().try_into().map_err(|_| {
             // Name the limits table when it is the culprit, never its values.
             if raw

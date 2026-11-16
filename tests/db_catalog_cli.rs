@@ -133,6 +133,56 @@ fn unsupported_metadata_and_unsafe_paths_are_explicit_errors() {
 }
 
 #[test]
+fn configuration_must_be_tables_not_positional_arrays() {
+    let root = project();
+    let manifest = std::fs::read_to_string(root.path().join("ntnt.toml")).unwrap();
+    assert!(manifest.contains("[databases.app]\n"), "{manifest}");
+    let first_diagnostic = |manifest: String| {
+        std::fs::write(root.path().join("ntnt.toml"), manifest).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["db", "status", "--target", "local", "--json"])
+            .env_remove("DB_TARGET")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        report["diagnostics"][0].clone()
+    };
+    // Serde would read these arrays positionally as struct fields.
+    for limits in ["[]", "[90]", "[1, 300]"] {
+        let d = first_diagnostic(manifest.replacen(
+            "[databases.app]\n",
+            &format!("[databases.app]\nlimits = {limits}\n"),
+            1,
+        ));
+        assert_eq!(d["code"], "DB_CONFIG", "{limits}: {d}");
+        assert!(
+            d["message"]
+                .as_str()
+                .unwrap()
+                .contains("[databases.app.limits] must be a table"),
+            "{limits}: {d}"
+        );
+    }
+    // A target entry is a struct too: as an array it would otherwise connect.
+    let target = "[databases.app.targets.local]\nconnection_secret = \"DB_TARGET\"\ndatabase = \"target\"\nrole = \"target_role\"\n";
+    assert!(manifest.contains(target), "{manifest}");
+    let d = first_diagnostic(manifest.replacen(target, "", 1).replacen(
+        "[databases.app]\n",
+        "[databases.app]\ntargets = { local = [\"DB_TARGET\", \"target\", \"target_role\"] }\n",
+        1,
+    ));
+    assert_eq!(d["code"], "DB_CONFIG", "{d}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("must be TOML tables"),
+        "{d}"
+    );
+}
+
+#[test]
 fn time_limits_are_validated_before_connecting() {
     let root = project();
     let manifest = std::fs::read_to_string(root.path().join("ntnt.toml")).unwrap();
