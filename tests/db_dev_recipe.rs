@@ -89,6 +89,8 @@ fn db(root: &Path, args: &str, approval: Option<&str>) -> Value {
     c.arg("-c")
         .arg(format!(". ./dev.env && \"$NTNT\" db {args} --json"))
         .env("NTNT", env!("CARGO_BIN_EXE_ntnt"))
+        // As in an interactive shell, which keeps a symlinked path in PWD.
+        .env("PWD", root)
         .current_dir(root);
     for inherited in [
         "NTNT_ENV",
@@ -112,6 +114,59 @@ fn db(root: &Path, args: &str, approval: Option<&str>) -> Value {
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+/// The README's reset steps, word for word.
+const POSTGRESQL_RESET: &str =
+    "docker compose down -v && rm -f review-*.json\ndocker compose up -d --wait\n";
+const SQLITE_RESET: &str = "rm -rf data review-*.json\n. ./dev.env\n";
+
+fn readme_shows(snippet: &str) {
+    let readme = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/database-dev/README.md"),
+    )
+    .unwrap();
+    assert!(
+        readme.contains(snippet),
+        "the README does not show:\n{snippet}"
+    );
+}
+
+/// Run shell lines in `root`, bounded.
+fn shell(root: &Path, lines: &str) {
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(lines).current_dir(root);
+    let output = output_within(c, Duration::from_secs(30));
+    assert!(
+        output.status.success(),
+        "{lines}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The README's first block on a fresh database: status, plan, approve,
+/// migrate and verify, applying every migration in `migrations/`.
+fn fresh_workflow(root: &Path, migrations: usize) {
+    let status = db(root, "status --target development", None);
+    assert_eq!(status["outcome"], "pass", "{status}");
+    assert_eq!(status["history"]["pending_count"], migrations, "{status}");
+    let plan = db(
+        root,
+        "plan --target development --out review-0001.json",
+        None,
+    );
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let digest = plan["plan_digest"].as_str().unwrap().to_string();
+    let applied = db(
+        root,
+        "migrate --target development --plan review-0001.json",
+        Some(&digest),
+    );
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(states(&applied), vec!["committed"; migrations], "{applied}");
+    let verify = db(root, "verify --target development", None);
+    assert_eq!(verify["outcome"], "pass", "{verify}");
+    assert_eq!(verify["history"]["applied_count"], migrations, "{verify}");
 }
 
 fn has_code(report: &Value, code: &str) -> bool {
@@ -215,6 +270,21 @@ fn sqlite_development_setup_runs_as_documented() {
             .len(),
         0
     );
+    // The README's reset, then its workflow again from the start.
+    readme_shows(SQLITE_RESET);
+    shell(root.path(), SQLITE_RESET);
+    fresh_workflow(root.path(), 2);
+}
+
+/// `ntnt db` refuses a path through a symlink, and a shell that entered the
+/// directory through a link keeps the link in PWD: dev.env must not use it.
+#[test]
+fn sqlite_development_setup_runs_from_a_symlinked_directory() {
+    let root = copy_example("sqlite");
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("project");
+    std::os::unix::fs::symlink(root.path(), &link).unwrap();
+    fresh_workflow(&link, 1);
 }
 
 /// `docker compose <args>` for the example's own stack, bounded.
@@ -301,4 +371,11 @@ fn postgresql_development_setup_runs_as_documented() {
     let verify = db(root.path(), "verify --target development", None);
     assert_eq!(verify["outcome"], "pass", "{verify}");
     assert_eq!(verify["history"]["applied_count"], 2, "{verify}");
+    // The README's reset deletes the volume and the saved plans; the
+    // workflow then runs again from the start.
+    readme_shows(POSTGRESQL_RESET);
+    compose(&["down", "-v"]);
+    shell(root.path(), "rm -f review-*.json");
+    compose(&["up", "-d", "--wait"]);
+    fresh_workflow(root.path(), 2);
 }

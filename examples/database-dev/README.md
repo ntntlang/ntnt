@@ -26,9 +26,15 @@ manages the `public` schema. `dev.env` holds the throwaway development
 credentials and selects the development environment provider.
 
 The databases live in the `data` volume: `docker compose down` and
-`docker compose up -d --wait` keep them. `docker compose down -v` deletes
-everything, scratch included, and the next start is empty. Set `NTNT_DB_DEV_IMAGE`
-to use another PostgreSQL 16–18 image.
+`docker compose up -d --wait` keep them. To start over, delete the volume, scratch
+included, and the saved plans, which belong to the deleted databases:
+
+```sh
+docker compose down -v && rm -f review-*.json
+docker compose up -d --wait
+```
+
+Set `NTNT_DB_DEV_IMAGE` to use another PostgreSQL 16–18 image.
 
 ## SQLite
 
@@ -43,7 +49,13 @@ ntnt db migrate --target development --plan review-0001.json
 ntnt db verify --target development
 ```
 
-`rm -rf data` resets both files.
+To start over, delete both files and the saved plans, then load `dev.env` again
+to create empty files:
+
+```sh
+rm -rf data review-*.json
+. ./dev.env
+```
 
 ## Next changes
 
