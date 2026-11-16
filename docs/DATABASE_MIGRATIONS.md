@@ -227,7 +227,8 @@ export APP_DATABASE="host=10.0.4.12 user=app_owner dbname=app sslmode=verify-ful
 
 A missing `sslmode`, `prefer`/`allow` (which can fall back to plaintext),
 `sslrootcert` with `require` or `disable`, and a relative `sslrootcert` path fail with
-`DB_CONNECTION_CONFIG`. TLS needs a TCP host: a Unix-socket host must use `disable`.
+`DB_CONNECTION_CONFIG`. In key/value secrets a backslash escapes the next character,
+so write Windows paths with forward slashes (`sslrootcert=C:/certs/db-ca.pem`). TLS needs a TCP host: a Unix-socket host must use `disable`.
 Client certificates (`sslcert`/`sslkey`), CRLs and `channel_binding=require` are not
 supported. SCRAM authentication runs without channel binding, so the certificate
 check is what authenticates the server.

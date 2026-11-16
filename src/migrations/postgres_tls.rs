@@ -632,12 +632,22 @@ mod tests {
     fn code(secret: &str) -> String {
         parse(secret).unwrap_err().code
     }
+    /// An absolute path on this platform, written as a connection secret
+    /// would hold it (forward slashes: a backslash escapes in key/value form).
+    fn absolute(name: &str) -> String {
+        if cfg!(windows) {
+            format!("C:/ntnt/{name}")
+        } else {
+            format!("/etc/ntnt/{name}")
+        }
+    }
 
     #[test]
     fn keyword_form_removes_tls_keys_and_keeps_other_bytes() {
-        let (rest, tls) = parse(
-            r"host=db.example.com port=6543 user=app dbname=app password='a b\'c' sslmode=verify-full sslrootcert='/etc/ntnt/ca bundle.pem'",
-        )
+        let (rest, tls) = parse(&format!(
+            r"host=db.example.com port=6543 user=app dbname=app password='a b\'c' sslmode=verify-full sslrootcert='{}'",
+            absolute("ca bundle.pem")
+        ))
         .unwrap();
         assert_eq!(
             rest.as_str(),
@@ -646,7 +656,7 @@ mod tests {
         assert_eq!(tls.mode, Mode::VerifyFull);
         assert_eq!(
             tls.roots,
-            Some(RootSource::File("/etc/ntnt/ca bundle.pem".into()))
+            Some(RootSource::File(absolute("ca bundle.pem").into()))
         );
         let config: tokio_postgres::Config = rest.parse().unwrap();
         assert_eq!(config.get_password(), Some(&b"a b'c"[..]));
@@ -672,16 +682,17 @@ mod tests {
 
     #[test]
     fn url_form_removes_tls_query_parameters() {
-        let (rest, tls) = parse(
-            "postgresql://app:p%40ss@db.example.com:5432/app?application_name=x&sslmode=verify-full&sslrootcert=%2Fetc%2Fntnt%2Fca.pem",
-        )
+        let encoded = absolute("ca.pem").replace(':', "%3A").replace('/', "%2F");
+        let (rest, tls) = parse(&format!(
+            "postgresql://app:p%40ss@db.example.com:5432/app?application_name=x&sslmode=verify-full&sslrootcert={encoded}"
+        ))
         .unwrap();
         assert_eq!(
             rest.as_str(),
             "postgresql://app:p%40ss@db.example.com:5432/app?application_name=x"
         );
         assert_eq!(tls.mode, Mode::VerifyFull);
-        assert_eq!(tls.roots, Some(RootSource::File("/etc/ntnt/ca.pem".into())));
+        assert_eq!(tls.roots, Some(RootSource::File(absolute("ca.pem").into())));
         let (rest, tls) = parse("postgres://app@db/app?sslmode=require").unwrap();
         assert_eq!(rest.as_str(), "postgres://app@db/app");
         assert_eq!(tls.mode, Mode::Require);
