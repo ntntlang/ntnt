@@ -2,7 +2,12 @@
 
 ## Unreleased (0.6.2)
 
-No changes recorded yet. See [unreleased notes](docs/release-notes/unreleased.md).
+See [unreleased notes](docs/release-notes/unreleased.md).
+
+### Added
+
+- `examples/database-dev`: tested local PostgreSQL (Docker Compose) and SQLite
+  setups for `ntnt db`, with matching scratch databases (#345).
 
 ## 0.6.1
 

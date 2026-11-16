@@ -35,6 +35,7 @@ jobs:
               - 'src/**'
               - 'tests/**'
               - 'examples/database-adoption/**'
+              - 'examples/database-dev/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
@@ -253,6 +254,15 @@ jobs:
         env:
           RUST_MIN_STACK: 8388608
           NTNT_AUTH_TEST_POSTGRES_URL: postgres://postgres:ntnt_db_fixture@localhost:5432/ntnt_db_catalog_control
+      # The documented local development setup, run as written: its own Compose
+      # stack, then status, plan, approve, migrate and verify (examples/database-dev).
+      - name: Run the documented PostgreSQL development setup
+        if: matrix.postgres == '17'
+        run: |
+          docker compose -f examples/database-dev/postgresql/compose.yml up -d --wait
+          cargo test --locked --test db_dev_recipe -- --include-ignored --test-threads=1 --nocapture
+        env:
+          NTNT_DB_DEV_IMAGE: mirror.gcr.io/library/postgres:17
 
   dependency-audit:
     name: RustSec audit

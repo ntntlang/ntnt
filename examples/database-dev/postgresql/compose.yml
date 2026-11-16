@@ -1,0 +1,26 @@
+# Local development PostgreSQL for `ntnt db`: a target database and a separate,
+# disposable scratch database, each owned by its own unprivileged login role
+# (initdb/10-ntnt-db.sql). Loopback only, throwaway passwords. Not for production.
+#
+#   docker compose up -d --wait     # start (waits for the healthcheck)
+#   docker compose down -v          # stop and delete the data
+name: ntnt-db-dev
+services:
+  postgres:
+    image: ${NTNT_DB_DEV_IMAGE:-postgres:17}
+    # One service with a published loopback port needs no project network, and
+    # Docker hosts with many projects can run out of network address pools.
+    network_mode: bridge
+    environment:
+      POSTGRES_PASSWORD: dev-only-superuser
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # TCP, not the Unix socket: the entrypoint's temporary init server only
+      # listens on the socket, so this passes once the real server is up.
+      test: ["CMD", "pg_isready", "-q", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
