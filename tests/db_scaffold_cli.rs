@@ -72,6 +72,16 @@ fn status_code(root: &Path, args: &[&str]) -> Value {
     report(&output)["diagnostics"][0]["code"].clone()
 }
 
+/// The `ntnt db ...` commands that printed text quotes in backticks.
+fn commands(text: &str) -> Vec<String> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|command| command.starts_with("ntnt db "))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn manifest(root: &Path) -> toml::Value {
     std::fs::read_to_string(root.join("ntnt.toml"))
         .unwrap()
@@ -601,6 +611,154 @@ role = "analytics_owner"
             .count(),
         0
     );
+}
+
+/// The plan command `new` prints keeps a custom manifest and an explicitly selected
+/// database; followed as printed, it gets past manifest and database selection.
+#[test]
+fn new_prints_a_plan_command_for_the_selected_manifest_and_database() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    std::fs::create_dir_all(config.join("app-migrations")).unwrap();
+    std::fs::create_dir(config.join("analytics-migrations")).unwrap();
+    std::fs::write(
+        config.join("database.toml"),
+        r#"
+[databases.app]
+engine = "sqlite"
+schema = "main"
+migrations_dir = "app-migrations"
+[databases.app.targets.development]
+connection_secret = "APP_DATABASE_FILE"
+
+[databases.analytics]
+engine = "sqlite"
+schema = "main"
+migrations_dir = "analytics-migrations"
+[databases.analytics.targets.development]
+connection_secret = "ANALYTICS_DATABASE_FILE"
+
+[secrets.APP_DATABASE_FILE]
+[secrets.ANALYTICS_DATABASE_FILE]
+"#,
+    )
+    .unwrap();
+    let output = db(root.path())
+        .args(["new", "events", "--manifest", "config/database.toml"])
+        .args(["--database", "analytics"])
+        .bounded_output();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{stdout}");
+    assert!(config
+        .join("analytics-migrations/0001_events.sql")
+        .is_file());
+    let printed = commands(&stdout);
+    assert_eq!(printed.len(), 1, "{stdout}");
+    let command = printed[0].replace("<target>", "development");
+    let words: Vec<&str> = command.split_whitespace().collect();
+    assert_eq!(words[..3], ["ntnt", "db", "plan"], "{command}");
+    let output = db(root.path())
+        .args(&words[2..])
+        .arg("--json")
+        .env_remove("ANALYTICS_DATABASE_FILE")
+        .bounded_output();
+    assert!(!output.status.success());
+    // Selection succeeded: only the unset target secret stops the command.
+    assert_eq!(
+        report(&output)["diagnostics"][0]["code"],
+        "DB_SECRET",
+        "{command}"
+    );
+}
+
+/// Every command init prints for a manifest path that needs shell quoting runs as
+/// printed in a POSIX shell, through migrate, and `new` prints the same plan command.
+#[cfg(unix)]
+#[test]
+fn printed_commands_run_as_printed_for_a_manifest_path_that_needs_quoting() {
+    let root = tempfile::tempdir().unwrap();
+    let project = "team's project $HOME";
+    std::fs::create_dir(root.path().join(project)).unwrap();
+    let r = pass(
+        root.path(),
+        &[
+            "init",
+            "--engine",
+            "sqlite",
+            "--manifest",
+            &format!("{project}/ntnt.toml"),
+        ],
+    );
+    let steps: Vec<&str> = r["next_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step.as_str().unwrap())
+        .collect();
+    let printed = commands(&steps.join("\n"));
+    let [new, status, plan, migrate] = printed.as_slice() else {
+        panic!("{printed:?}");
+    };
+    // Empty files are valid SQLite databases. Use native paths (macOS /private).
+    let native = root.path().canonicalize().unwrap();
+    let target = native.join("app.sqlite");
+    let replay = native.join("replay.sqlite");
+    std::fs::File::create(&target).unwrap();
+    std::fs::File::create(&replay).unwrap();
+    // `ntnt` in a printed command resolves to the binary under test.
+    let binaries = Path::new(env!("CARGO_BIN_EXE_ntnt")).parent().unwrap();
+    let search = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(binaries.to_path_buf()).chain(std::env::split_paths(&search)),
+    )
+    .unwrap();
+    let shell = |command: &str, approval: Option<&str>| {
+        let mut sh = Command::new("sh");
+        // exec: the bounded child is ntnt itself, never an orphaned grandchild.
+        sh.arg("-c")
+            .arg(format!("exec {command}"))
+            .current_dir(root.path())
+            .env("PATH", &path)
+            .env("NTNT_ENV", "development")
+            .env("NTNT_SECRETS_PROVIDER", "env")
+            .env("APP_DATABASE_FILE", &target)
+            .env("APP_REPLAY_FILE", &replay)
+            .env_remove("APP_MIGRATION_APPROVAL");
+        if let Some(digest) = approval {
+            sh.env("APP_MIGRATION_APPROVAL", digest);
+        }
+        let output = sh.bounded_output();
+        assert!(
+            output.status.success(),
+            "{command}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    let output = shell(new, None);
+    assert_eq!(
+        commands(&String::from_utf8_lossy(&output.stdout)),
+        [plan.replace("--target development", "--target <target>")],
+        "new and init print the same plan command"
+    );
+    let migration = root
+        .path()
+        .join(project)
+        .join("migrations")
+        .join("0001_initial.sql");
+    let mut sql = std::fs::read_to_string(&migration).unwrap();
+    sql.push_str("CREATE TABLE accounts (id INTEGER PRIMARY KEY);\n");
+    std::fs::write(&migration, sql).unwrap();
+    let json = |output: Output| -> Value { report(&output) };
+    assert_eq!(
+        json(shell(&format!("{status} --json"), None))["outcome"],
+        "pass"
+    );
+    let reviewed = json(shell(&format!("{plan} --json"), None));
+    let digest = reviewed["plan_digest"].as_str().unwrap();
+    let applied = json(shell(&format!("{migrate} --json"), Some(digest)));
+    assert_eq!(applied["progress"][0]["state"], "committed", "{applied}");
 }
 
 #[test]

@@ -34,7 +34,9 @@ ntnt db new initial             # creates migrations/0001_initial.sql
 
 `init` writes the commented `ntnt.toml` configuration shown below for the chosen
 engine, declares its secret names (never values) and creates `migrations/`. It
-prints the remaining steps. `--database <name>` (lowercase ASCII letters, digits
+prints the remaining steps; their commands, like the `plan` command `new` prints,
+keep any `--manifest` and `--database` selection, quoted for a POSIX shell.
+`--database <name>` (lowercase ASCII letters, digits
 and underscores, at most 50 characters) replaces `app`; the secret names and the
 PostgreSQL schema, role and database names derive from it. If `ntnt.toml` exists,
 `init` appends the section and keeps every existing byte. It refuses, changing

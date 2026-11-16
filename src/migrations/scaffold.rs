@@ -122,6 +122,30 @@ disposable = true
     }
 }
 
+/// `value` as one POSIX shell word: unchanged when no character is special to a
+/// shell, otherwise single-quoted with each `'` written as `'\''`.
+fn shell_word(value: &str) -> String {
+    let plain = |b: u8| b.is_ascii_alphanumeric() || b"_./:@%+=,-".contains(&b);
+    if !value.is_empty() && value.bytes().all(plain) {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
+    }
+}
+
+/// The arguments that keep a printed `ntnt db` command on the same manifest and
+/// logical database, as shell words.
+fn selection_flags(manifest: &Path, database: Option<&str>) -> String {
+    let mut flags = String::new();
+    if manifest != Path::new("ntnt.toml") {
+        flags += &format!(" --manifest {}", shell_word(&manifest.to_string_lossy()));
+    }
+    if let Some(database) = database {
+        flags += &format!(" --database {}", shell_word(database));
+    }
+    flags
+}
+
 /// Local-development steps after init, consistent with the documented quick start.
 fn next_steps(engine: Engine, name: &str, secrets: &[String; 3], flags: &str) -> Vec<String> {
     let [target, replay, approval] = secrets;
@@ -471,13 +495,7 @@ fn initialize_with(args: &InitArgs, before_write: impl FnOnce()) -> Result<(Valu
         .get("databases")
         .and_then(toml::Value::as_table)
         .map_or(0, |databases| databases.len());
-    let mut flags = String::new();
-    if manifest != Path::new("ntnt.toml") {
-        flags.push_str(&format!(" --manifest {}", manifest.display()));
-    }
-    if declared > 1 {
-        flags.push_str(&format!(" --database {name}"));
-    }
+    let flags = selection_flags(manifest, (declared > 1).then_some(name));
     let steps = next_steps(args.engine, name, &secrets, &flags);
     let mut lines = vec![
         if appended {
@@ -604,14 +622,21 @@ fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
         .unwrap_or_default();
     shown.extend(config.migrations_dir.split('/'));
     shown.push(&source);
+    // --database is required whenever several databases are declared; repeat it
+    // whenever it was given.
+    let flags = selection_flags(
+        &args.manifest,
+        args.database.is_some().then_some(database.as_str()),
+    );
     let lines = vec![
         format!(
             "Created {} for database {database} ({}).",
             shown.display(),
             config.engine
         ),
-        "Write its SQL, then review it with `ntnt db plan --target <target> --out review.json`."
-            .to_string(),
+        format!(
+            "Write its SQL, then review it with `ntnt db plan --target <target>{flags} --out review.json`."
+        ),
     ];
     let report = json!({
         "database": database,
@@ -801,6 +826,24 @@ mod tests {
         let [first, second] = race(None);
         assert!(first.is_ok(), "{:?}", first.err());
         assert_eq!(second.unwrap_err().code, "DB_INIT_CONFLICT");
+    }
+
+    #[test]
+    fn printed_arguments_are_single_posix_shell_words() {
+        for (value, word) in [
+            ("ntnt.toml", "ntnt.toml"),
+            ("config/db-1.toml", "config/db-1.toml"),
+            ("my project/ntnt.toml", "'my project/ntnt.toml'"),
+            ("team's $HOME", r"'team'\''s $HOME'"),
+            ("", "''"),
+        ] {
+            assert_eq!(shell_word(value), word);
+        }
+        assert_eq!(selection_flags(Path::new("ntnt.toml"), None), "");
+        assert_eq!(
+            selection_flags(Path::new("a b/ntnt.toml"), Some("analytics")),
+            " --manifest 'a b/ntnt.toml' --database analytics"
+        );
     }
 
     #[test]
