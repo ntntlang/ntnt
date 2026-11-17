@@ -1,4 +1,4 @@
-//! Host CA roots shared by TLS inspection, HTTP probes, and SMTP.
+//! Host CA roots shared by TLS inspection, HTTP probes, SMTP and `ntnt db` PostgreSQL.
 //!
 //! Discovery is local (not an online platform verifier). Cache the result once
 //! per process; restart NTNT after changing the OS store or SSL_CERT_* overrides.
@@ -6,12 +6,12 @@ use rustls::pki_types::CertificateDer;
 use rustls::RootCertStore;
 use std::sync::{Arc, OnceLock};
 
-pub(super) struct HostTrust {
-    pub(super) roots: Arc<RootCertStore>,
-    pub(super) certificates: Vec<CertificateDer<'static>>,
+pub(crate) struct HostTrust {
+    pub(crate) roots: Arc<RootCertStore>,
+    pub(crate) certificates: Vec<CertificateDer<'static>>,
 }
 
-pub(super) fn host_trust() -> Result<&'static HostTrust, String> {
+pub(crate) fn host_trust() -> Result<&'static HostTrust, String> {
     static TRUST: OnceLock<Result<HostTrust, String>> = OnceLock::new();
     TRUST
         .get_or_init(|| load_host_trust(rustls_native_certs::load_native_certs))

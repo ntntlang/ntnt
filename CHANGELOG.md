@@ -8,6 +8,9 @@ See [unreleased notes](docs/release-notes/unreleased.md).
 
 - `examples/database-dev`: tested local PostgreSQL (Docker Compose) and SQLite
   setups for `ntnt db`, with matching scratch databases (#345).
+- `ntnt db` PostgreSQL TLS: `sslmode=verify-full` (host-store or `sslrootcert`
+  trust), `verify-ca` (`sslrootcert` CA file only) and `require`, no plaintext
+  fallback, and the transport bound into plans (#344).
 
 ## 0.6.1
 

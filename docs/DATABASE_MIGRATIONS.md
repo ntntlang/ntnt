@@ -138,11 +138,11 @@ CREATE TABLE app.accounts (
 );
 ```
 
-Connection secrets are libpq key/value strings with exactly one `host`, the declared
-`user` and `dbname`, and **`sslmode=disable`**, with no `options`. For now, use a
-trusted local transport: loopback or a Unix-socket directory. TLS is not yet
-supported; it is tracked in [#344](https://github.com/ntntlang/ntnt/issues/344).
-Add `port=` if the server is not on 5432.
+Connection secrets are libpq key/value strings (or `postgresql://` URLs) with exactly
+one `host`, the declared `user` and `dbname`, an explicit **`sslmode`**, and no
+`options`. This local quick start uses `sslmode=disable` over loopback. For anything
+that crosses a network, use `sslmode=verify-full` (see [TLS](#tls)). Add `port=` if
+the server is not on 5432.
 
 ```sh
 export NTNT_ENV=development NTNT_SECRETS_PROVIDER=env
@@ -156,8 +156,8 @@ ntnt db migrate --target development --plan review.json
 ntnt db verify --target development
 ```
 
-A secret without `sslmode=disable` (or with a different user, database or several
-hosts) fails with `DB_CONNECTION_CONFIG`. An unset or undeclared secret fails with
+A secret without an explicit `sslmode` (or with `sslmode=prefer`, a different user or
+database, or several hosts) fails with `DB_CONNECTION_CONFIG`. An unset or undeclared secret fails with
 `DB_SECRET`. A refused login fails with `DB_POSTGRES` and SQLSTATE `28P01` (wrong
 password) or `28000` (for example `peer`): check `pg_hba.conf` and the secret.
 Add `--json` to any command for the machine-readable report. If the
@@ -201,10 +201,67 @@ required = true
 - Declare logical stores as `[databases.<name>]`. `--database <name>` selects one; omit it only when exactly one database is declared. Unknown or ambiguous selection fails before connection lookup. Names start with an ASCII letter and contain at most 63 ASCII letters, digits, underscores or hyphens.
 - Select a named deployment target with `--target`; it is always required, even for a single database or target. There is no fallback connection, URL argument, `url_env` alias, plaintext manifest credential, or `--force` bypass. Unknown fields in the selected database definition are errors.
 - Connections reuse the existing **`std/secrets` providers and declaration validation**. Development's environment provider reads the exact logical name. Production uses the configured Unix-socket provider; the environment provider remains disabled in production. See [Secrets Agent Protocol](secrets-agent-protocol.md). Declarations are read from the captured manifest, not reopened during replay.
-- A connection secret must specify exactly one host, the declared `user`/`dbname`, and **`sslmode=disable`**, with no startup `options`. This initial adapter reuses the existing NoTLS driver. Use a trusted local Unix socket or a separately secured local transport; do not send credentials over an untrusted plaintext network. TLS transport is not implemented and there is no silent TLS downgrade.
+- A connection secret must specify exactly one host, the declared `user`/`dbname`, an explicit `sslmode`, and no startup `options`. [TLS](#tls) describes the transport rules; there is no silent downgrade to plaintext.
 - Physical database, role and managed-schema names use ASCII letters/digits/underscores, start with a letter, and are at most 63 bytes. SQL object identifiers may be quoted. System schemas and `_ntnt` cannot be the managed schema; `public` is supported and is where most applications keep their tables.
 - The **target managed schema must already exist**. Read-only commands never create it or `_ntnt`. Authorized `migrate` bootstraps its scoped ledger only inside the first migration transaction, after locked validation of an empty recognized base. A nonempty unrecognized scope is never assumed to have empty history.
 - The declared target role is the logical owner for expected owner/grant canonicalization. Scratch uses its separate owner role. Other owners/grantees remain distinct; ownership and grants are never stripped wholesale. Multi-owner histories or additional grants that cannot be reproduced by the supported history will not receive a clean comparison. Target authority/membership facts are also bound into plans.
+
+### TLS
+
+`sslmode` in the PostgreSQL connection secret selects the transport for the target
+and scratch sessions. It must be explicit:
+
+- **`verify-full`** (use it for any network path): TLS, a certificate chain to a
+  trusted CA, and a certificate valid for `host`. Trusted CAs are the host CA store
+  by default (the store NTNT's other TLS clients use; `SSL_CERT_FILE` and
+  `SSL_CERT_DIR` override it), or only the CAs in
+  `sslrootcert=/absolute/path/ca.pem`. `sslrootcert=system` names the host store
+  explicitly. Set `hostaddr=` to connect to an address while `host` stays the name
+  the certificate must match.
+- **`verify-ca`**: the same chain check without the host-name check, for a server
+  reached by a name its certificate does not carry. It needs
+  `sslrootcert=/absolute/path/ca.pem` holding the CA that issues your database's
+  certificates, and never uses the host CA store: without the name check, any
+  certificate a host-store CA issued to anyone, for any name, would pass. Like libpq,
+  `ntnt db` rejects `verify-ca` without `sslrootcert` or with `sslrootcert=system`.
+- **`require`**: TLS without verifying the server. It protects against passive
+  observers only; anyone on the path can impersonate the server. Output and plans
+  report it as unverified.
+- **`disable`**: plaintext, only for a trusted local transport (loopback, a
+  Unix-socket directory or a private container network).
+
+```sh
+export APP_DATABASE="host=db.example.com user=app_owner dbname=app_production sslmode=verify-full password=..."
+export APP_DATABASE="host=10.0.4.12 user=app_owner dbname=app sslmode=verify-full sslrootcert=/etc/ntnt/db-ca.pem password=..."
+```
+
+A missing `sslmode`, `prefer`/`allow` (which can fall back to plaintext), `verify-ca`
+without an `sslrootcert` file, `sslrootcert` with `require` or `disable`, and a
+relative `sslrootcert` path fail with `DB_CONNECTION_CONFIG`. In key/value secrets a
+backslash escapes the next character, so write Windows paths with forward slashes
+(`sslrootcert=C:/certs/db-ca.pem`). TLS needs a TCP host: a Unix-socket host must use `disable`.
+Client certificates (`sslcert`/`sslkey`), CRLs and `channel_binding=require` are not
+supported. SCRAM authentication runs without channel binding, so the certificate
+check is what authenticates the server.
+
+Every TLS mode requires TLS. A server that does not offer it fails with `DB_TLS`,
+and nothing is sent in plaintext. An untrusted, expired or wrongly named
+certificate also fails with `DB_TLS` before any SQL runs. For a managed service whose
+CA is not in the host store (Amazon RDS, for example), download the provider's CA
+bundle and point `sslrootcert` at it; publicly trusted certificates work with the
+default.
+
+The transport is part of each session's identity: `sslmode`, the trust source
+(`system`, or `file` with the file's SHA-256), the TLS version this client negotiated
+(`tls_version`), and whether PostgreSQL reports its own end of the session as SSL
+(`server_ssl`, from `pg_stat_ssl`). Behind a TLS-terminating proxy or pooler,
+`server_ssl` is `false` even though the client's connection is verified TLS. Plans bind
+the target's identity, so a plan reviewed over `verify-full` fails as stale if
+`migrate` connects with `require` or `disable`, and a changed `sslrootcert` file needs
+a new plan. Human output prints a `Transport:` line. Plans saved by ntnt 0.6.1 bind no
+transport: `migrate` reports them as stale, but `reconcile` accepts one over
+`sslmode=disable`, the only transport 0.6.1 used, so an attempt 0.6.1 left
+unresolved can still be resolved after upgrading.
 
 ## Exact-plan authority and execution
 

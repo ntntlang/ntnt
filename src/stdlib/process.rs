@@ -257,8 +257,13 @@ impl MacExitObserver {
             return Err(std::io::Error::last_os_error());
         }
         let queue = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_queue) };
-        // EVFILT_PROC reports an already-pending NOTE_EXIT without reaping the child,
-        // so registration remains safe even when a short-lived child exited first.
+        // XNU refuses to attach EVFILT_PROC to a child that has already exited and
+        // is waiting to be reaped (a zombie), with ESRCH. The child is ours and not
+        // reaped yet, so its PID cannot have been reused: ESRCH means it has exited.
+        let exited_already = |queue| Self {
+            queue,
+            exited: AtomicBool::new(true),
+        };
         let change = libc::kevent {
             ident: child.id() as libc::uintptr_t,
             filter: libc::EVFILT_PROC,
@@ -283,10 +288,18 @@ impl MacExitObserver {
             )
         };
         if result == -1 {
-            return Err(std::io::Error::last_os_error());
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(exited_already(queue));
+            }
+            return Err(error);
         }
         if result == 1 && initial_event.flags & libc::EV_ERROR != 0 {
-            return Err(std::io::Error::from_raw_os_error(initial_event.data as i32));
+            let code = initial_event.data as i32;
+            if code == libc::ESRCH {
+                return Ok(exited_already(queue));
+            }
+            return Err(std::io::Error::from_raw_os_error(code));
         }
         let exited = result == 1
             && initial_event.ident == child.id() as libc::uintptr_t
@@ -2123,6 +2136,61 @@ mod tests {
             .expect("clean up exited process group")
             .expect("child remains available to reap");
         assert!(!status.success());
+    }
+
+    /// Whether a scratch kqueue can watch `pid`'s exit: `Some(errno)` when the kernel
+    /// refuses to attach, `None` when it attaches.
+    #[cfg(target_os = "macos")]
+    fn exit_watch_error(pid: u32) -> Option<i32> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let raw = unsafe { libc::kqueue() };
+        assert!(raw >= 0, "kqueue: {}", std::io::Error::last_os_error());
+        let queue = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        let change = libc::kevent {
+            ident: pid as libc::uintptr_t,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_RECEIPT,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        let mut receipt: libc::kevent = unsafe { std::mem::zeroed() };
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let result =
+            unsafe { libc::kevent(queue.as_raw_fd(), &change, 1, &mut receipt, 1, &timeout) };
+        if result == -1 {
+            return std::io::Error::last_os_error().raw_os_error();
+        }
+        (result == 1 && receipt.flags & libc::EV_ERROR != 0 && receipt.data != 0)
+            .then_some(receipt.data as i32)
+    }
+
+    /// A child that exits before its observer attaches is a zombie, which XNU will
+    /// not attach EVFILT_PROC to (ESRCH). The observer must report it as exited
+    /// instead of failing the start.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exit_observer_accepts_a_child_that_exited_before_attaching() {
+        let mut child = Command::new("/usr/bin/true")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn /usr/bin/true");
+        // Wait for the event, not for time: the kernel refuses to watch the exited,
+        // unreaped child. The guard only stops a hang.
+        let guard = Instant::now() + Duration::from_secs(60);
+        while exit_watch_error(child.id()) != Some(libc::ESRCH) {
+            assert!(Instant::now() < guard, "the child never became a zombie");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let observer =
+            MacExitObserver::new(&child).expect("an exited, unreaped child is observable");
+        assert!(observer.is_exited(&child).expect("observe exit"));
+        assert!(child.wait().expect("reap").success());
     }
 
     #[test]

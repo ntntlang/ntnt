@@ -47,6 +47,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Deliberate existing-database adoption, recognized legacy import and the
   complete transactional foundation, with a populated application rehearsal.
 - [x] Narrow non-transactional concurrent-index execution/recovery (`ntnt db reconcile`).
+- [x] PostgreSQL TLS (`verify-full` with host or `sslrootcert` trust, `verify-ca` with `sslrootcert`, `require`), with the transport bound into plans (#344).
 - [ ] Schema-aware query validation, dependencies and Intent views.
 
 Inspection/planning stays read-only on the selected target; `ntnt db migrate`
