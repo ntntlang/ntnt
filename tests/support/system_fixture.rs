@@ -4,6 +4,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+/// Bounds every wait for a fixture event. Only a hang or a bug reaches it, so
+/// a slow or loaded machine never changes a test's outcome.
+pub const HANG_GUARD: Duration = Duration::from_secs(60);
 pub struct Fixture {
     pub child: Child,
     pub dir: tempfile::TempDir,
@@ -62,7 +65,7 @@ impl Fixture {
         read_bounded(&self.dir.path().join("stderr"))
     }
     pub fn wait(&mut self) -> std::process::ExitStatus {
-        let end = Instant::now() + Duration::from_secs(15);
+        let end = Instant::now() + HANG_GUARD;
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
@@ -77,7 +80,7 @@ impl Fixture {
         }
     }
     pub fn ready(&mut self) -> SocketAddr {
-        let end = Instant::now() + Duration::from_secs(10);
+        let end = Instant::now() + HANG_GUARD;
         loop {
             for line in self.stdout().lines() {
                 if let Some(json) = line.strip_prefix("NTNT_READY ") {

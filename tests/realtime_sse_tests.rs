@@ -399,7 +399,7 @@ attempt("plain", [1])
 /// SSE over HTTP/2 with prior knowledge (h2c) through the real `ntnt run`
 /// listener, which multiplexes streams under explicit HTTP/2 limits.
 mod h2c {
-    use super::fixture;
+    use super::fixture::{self, HANG_GUARD};
     use axum::body::Body;
     use futures_util::{Stream, StreamExt};
     use hyper::body::{Bytes, Incoming};
@@ -415,10 +415,11 @@ mod h2c {
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
     use tokio::sync::mpsc;
 
-    /// Every wait in these tests is bounded by this.
-    const WAIT: Duration = Duration::from_secs(10);
     /// The HTTP/2 default stream window, advertised explicitly.
     const STREAM_WINDOW: u32 = 65_535;
+    /// Every client connection's window: larger than all its stream windows
+    /// together, so unread streams never block the others.
+    const CONNECTION_WINDOW: u32 = 64 * 1024 * 1024;
 
     /// Whether a client connection reads its socket. Closing the gate stalls
     /// the whole connection at the transport, like an unresponsive peer.
@@ -426,11 +427,23 @@ mod h2c {
     struct Gate {
         open: AtomicBool,
         waker: Mutex<Option<Waker>>,
+        /// Every byte the connection read, when a test inspects them.
+        received: Option<Mutex<Vec<u8>>>,
     }
 
     impl Gate {
         fn opened() -> Arc<Self> {
             let gate = Arc::new(Self::default());
+            gate.set(true);
+            gate
+        }
+
+        /// An open gate that also records what the connection reads.
+        fn recording() -> Arc<Self> {
+            let gate = Arc::new(Self {
+                received: Some(Mutex::default()),
+                ..Self::default()
+            });
             gate.set(true);
             gate
         }
@@ -442,6 +455,13 @@ mod h2c {
                     waker.wake();
                 }
             }
+        }
+
+        /// Whether the connection has read `bytes` from its socket.
+        fn has_read(&self, bytes: &[u8]) -> bool {
+            let received = self.received.as_ref().expect("this gate records nothing");
+            let received = received.lock().unwrap();
+            received.windows(bytes.len()).any(|w| w == bytes)
         }
     }
 
@@ -463,7 +483,13 @@ mod h2c {
                     return Poll::Pending;
                 }
             }
-            Pin::new(&mut self.socket).poll_read(cx, buf)
+            let start = buf.filled().len();
+            let read = Pin::new(&mut self.socket).poll_read(cx, buf);
+            if let (Poll::Ready(Ok(())), Some(received)) = (&read, &self.gate.received) {
+                let mut received = received.lock().unwrap();
+                received.extend_from_slice(&buf.filled()[start..]);
+            }
+            read
         }
     }
 
@@ -489,19 +515,29 @@ mod h2c {
     }
 
     /// An HTTP/2 prior-knowledge connection whose streams each advertise
-    /// `stream_window` bytes, released only as a stream is read. The
-    /// connection window is large, so an unread stream cannot exhaust it.
+    /// `stream_window` bytes, released only as a stream is read.
+    /// `receive_buffer` pins the socket's kernel receive buffer.
     async fn h2_connect(
         addr: SocketAddr,
         stream_window: u32,
         gate: Arc<Gate>,
+        receive_buffer: Option<u32>,
     ) -> http2::SendRequest<Body> {
-        let (sender, connection) = tokio::time::timeout(WAIT, async {
-            let socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (sender, connection) = tokio::time::timeout(HANG_GUARD, async {
+            let socket = match addr {
+                SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+                SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+            }
+            .unwrap();
+            if let Some(size) = receive_buffer {
+                // Before connecting, so the advertised TCP window is small too.
+                socket.set_recv_buffer_size(size).unwrap();
+            }
+            let socket = socket.connect(addr).await.unwrap();
             socket.set_nodelay(true).unwrap();
             http2::Builder::new(TokioExecutor::new())
                 .initial_stream_window_size(stream_window)
-                .initial_connection_window_size(64 * 1024 * 1024)
+                .initial_connection_window_size(CONNECTION_WINDOW)
                 .handshake(TokioIo::new(GatedIo { socket, gate }))
                 .await
                 .unwrap()
@@ -521,7 +557,7 @@ mod h2c {
         let request = Request::get(format!("http://{addr}{path}"))
             .body(Body::empty())
             .unwrap();
-        let response = tokio::time::timeout(WAIT, async {
+        let response = tokio::time::timeout(HANG_GUARD, async {
             connection.ready().await.unwrap();
             connection.send_request(request).await.unwrap()
         })
@@ -537,7 +573,7 @@ mod h2c {
             .header("host", addr.to_string())
             .body(Body::empty())
             .unwrap();
-        let response = tokio::time::timeout(WAIT, async {
+        let response = tokio::time::timeout(HANG_GUARD, async {
             let socket = tokio::net::TcpStream::connect(addr).await.unwrap();
             let (mut sender, connection) = http1::handshake(TokioIo::new(socket)).await.unwrap();
             tokio::spawn(connection);
@@ -552,7 +588,7 @@ mod h2c {
     async fn get_text(addr: SocketAddr, path: &str) -> String {
         let response = h1_get(addr, path).await;
         let body = tokio::time::timeout(
-            WAIT,
+            HANG_GUARD,
             axum::body::to_bytes(Body::new(response.into_body()), 1024 * 1024),
         )
         .await
@@ -632,15 +668,15 @@ mod h2c {
         }
 
         async fn next(&mut self) -> Option<Frame> {
-            tokio::time::timeout(WAIT, self.read())
+            tokio::time::timeout(HANG_GUARD, self.read())
                 .await
-                .expect("no frame within the deadline")
+                .expect("no frame within the hang guard")
         }
 
         /// Events up to the frame that ended them, skipping heartbeats.
         async fn events_until_end(&mut self) -> (Vec<u64>, Option<Frame>) {
             let mut events = Vec::new();
-            let ending = tokio::time::timeout(WAIT, async {
+            let ending = tokio::time::timeout(HANG_GUARD, async {
                 loop {
                     match self.read().await {
                         Some(Frame::Event(id)) => events.push(id),
@@ -672,7 +708,7 @@ mod h2c {
 
     /// Wait for the event `id`, skipping heartbeats. Anything else fails.
     async fn expect_event(frames: &mut mpsc::UnboundedReceiver<Frame>, id: u64, name: &str) {
-        let next = tokio::time::timeout(WAIT, async {
+        let next = tokio::time::timeout(HANG_GUARD, async {
             loop {
                 match frames.recv().await {
                     Some(Frame::Heartbeat) => {}
@@ -683,6 +719,15 @@ mod h2c {
         .await
         .unwrap_or_else(|_| panic!("{name}: no event {id}"));
         assert_eq!(next, Some(Frame::Event(id)), "{name}");
+    }
+
+    /// Repeat `attempt` until it returns true. Only a hang reaches the guard.
+    async fn eventually(what: &str, mut attempt: impl AsyncFnMut() -> bool) {
+        let deadline = Instant::now() + HANG_GUARD;
+        while !attempt().await {
+            assert!(Instant::now() < deadline, "{what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn start(source: &str) -> (fixture::Fixture, SocketAddr) {
@@ -715,7 +760,7 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1" })
     async fn streams_sharing_a_connection_get_events_and_a_stalled_one_holds_back_nothing() {
         let (server, addr) = start(SHARED_APP);
         // Three event streams on one HTTP/2 connection, one on HTTP/1.1.
-        let mut connection = h2_connect(addr, STREAM_WINDOW, Gate::opened()).await;
+        let mut connection = h2_connect(addr, STREAM_WINDOW, Gate::opened(), None).await;
         let mut first = Sse::new(h2_get(&mut connection, addr, "/events").await);
         let mut second = Sse::new(h2_get(&mut connection, addr, "/events").await);
         let mut stalled = Sse::new(h2_get(&mut connection, addr, "/events").await);
@@ -759,6 +804,14 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1" })
     }
 
     const ROOMS: usize = 8;
+    /// Padding of each room event; its encoded frame is a few bytes longer.
+    const ROOM_PAD: usize = 16_000;
+    /// Hyper's per-stream send buffer, as `serve_connections` sets it.
+    const SEND_BUFFER: usize = 64 * 1024;
+    /// Each stream's window on the stalled connection. The client sends no
+    /// WINDOW_UPDATE while it reads nothing, so this bounds what the server
+    /// writes for one stream however much the sockets buffer.
+    const STALLED_WINDOW: u32 = 4 * 1024 * 1024;
 
     const ROOMS_APP: &str = r#"
 import { text, sse } from "std/http/server"
@@ -773,7 +826,7 @@ get("/round", fn(req) {
     let n = int(req.query_params["n"] ?? "0") ?? 0
     for i in 0..ROOMS {
         let room = broadcast("room-" + str(i), map { "capacity": 1 })
-        let queued = publish(room, map { "n": n, "pad": repeat("x", 16000) }, map { "id": n }) otherwise {
+        let queued = publish(room, map { "n": n, "pad": repeat("x", ROOM_PAD) }, map { "id": n }) otherwise {
             return text(err)
         }
     }
@@ -785,14 +838,19 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1", "realtime": map { "max
 
     #[tokio::test]
     async fn a_stalled_connection_keeps_each_stream_within_its_send_buffer() {
-        let (server, addr) = start(&ROOMS_APP.replace("ROOMS", &ROOMS.to_string()));
+        let source = ROOMS_APP
+            .replace("ROOMS", &ROOMS.to_string())
+            .replace("ROOM_PAD", &ROOM_PAD.to_string());
+        let (server, addr) = start(&source);
         // Each stream follows its own bus, so what the server holds for one
         // stream is not shared with another and the payload budget sees the
-        // sum. The client then stops reading the connection's socket. Its
-        // windows are large: only the server's per-stream send buffer limits
-        // what it takes from each bus once the socket buffers are full.
+        // sum. The client then stops reading the connection's socket, whose
+        // receive buffer is pinned small. The stream windows are far larger
+        // than a send buffer: once the kernel buffers are full, only the
+        // server's per-stream send buffer limits what it takes from each bus.
         let gate = Gate::opened();
-        let mut connection = h2_connect(addr, 8 * 1024 * 1024, Arc::clone(&gate)).await;
+        let mut connection =
+            h2_connect(addr, STALLED_WINDOW, Arc::clone(&gate), Some(64 * 1024)).await;
         let mut stalled = Vec::new();
         for room in 0..ROOMS {
             let path = format!("/room/{room}");
@@ -802,7 +860,7 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1", "realtime": map { "max
         }
         gate.set(false);
         // Another HTTP/2 connection and an HTTP/1.1 client keep reading.
-        let mut other = h2_connect(addr, STREAM_WINDOW, Gate::opened()).await;
+        let mut other = h2_connect(addr, STREAM_WINDOW, Gate::opened(), None).await;
         let mut h2 = Sse::new(h2_get(&mut other, addr, "/events").await);
         let mut http1 = Sse::new(h1_get(addr, "/events").await);
         for stream in [&mut h2, &mut http1] {
@@ -812,11 +870,17 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1", "realtime": map { "max
             ("other HTTP/2 connection", h2.spawn()),
             ("HTTP/1.1 stream", http1.spawn()),
         ];
+        // A stalled stream takes from its bus no more than its window lets
+        // the server write, its send buffer holds, and one event in hand:
+        // at most `taken` events, whatever the sockets buffer. Two rounds
+        // more overtake every stalled stream on its one-event bus.
+        let taken = (STALLED_WINDOW as usize + SEND_BUFFER) / ROOM_PAD + 4;
+        let rounds = taken as u64 + 2;
         // Each round publishes a 16 KB event to every room. Once the socket
-        // buffers are full, each stalled stream may hold 64 KiB plus two
-        // events, under 1 MiB for all eight, so the 2 MiB budget never runs
+        // is full, each stalled stream holds at most its 64 KiB send buffer
+        // plus three events (one past the buffer, one in hand and one on its
+        // bus): under 1 MiB for all eight, so the 2 MiB budget never runs
         // out. With hyper's 400 KB default the eight hold about 3.5 MiB.
-        let rounds = 128;
         for n in 1..=rounds {
             let queued = get_text(addr, &format!("/round?n={n}")).await;
             assert_eq!(
@@ -829,14 +893,14 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1", "realtime": map { "max
                 expect_event(frames, n, name).await;
             }
         }
-        // Reading again, each stalled stream receives what was buffered for
-        // it, then the overflow event: it fell behind its bus.
+        // Reading again, each stalled stream receives what it took from its
+        // bus, then the overflow event: it fell behind.
         gate.set(true);
         for (room, stream) in stalled.iter_mut().enumerate() {
             let (events, ending) = stream.events_until_end().await;
             assert_eq!(ending, Some(Frame::Overflow), "room {room}: {events:?}");
             assert_eq!(stream.next().await, None);
-            assert!(events.len() < rounds as usize, "room {room}: {events:?}");
+            assert!(events.len() <= taken, "room {room}: {events:?}");
             assert_eq!(events, (1..=events.len() as u64).collect::<Vec<_>>());
         }
     }
@@ -849,14 +913,13 @@ let demo = broadcast("demo")
 let unheard = broadcast("unheard")
 get("/events", fn(req) { sse(demo, map { "retry_ms": 1000 }) })
 get("/room/{id}", fn(req) { sse(broadcast("room-" + req.params["id"]), map { "retry_ms": 1000 }) })
+// An event that needs the whole budget, for the room's stream.
 get("/fill/{id}", fn(req) {
     let room = broadcast("room-" + req.params["id"])
-    for n in 0..100000 {
-        let queued = publish(room, repeat("x", 16000)) otherwise { return text(err) }
-    }
-    return text("budget was not enforced")
+    let queued = publish(room, repeat("x", 65536 - 10)) otherwise { return text(err) }
+    return text("queued")
 })
-// An event that needs the whole budget, on a bus nobody follows.
+// The same on a bus nobody follows: it fits only while nothing else is held.
 get("/probe", fn(req) {
     let queued = publish(unheard, repeat("x", 65536 - 10)) otherwise { return text(err) }
     return text("budget free")
@@ -874,19 +937,11 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1", "realtime": map {
 } })
 "#;
 
-    /// Repeat `attempt` until it returns true, within the deadline.
-    async fn eventually(what: &str, mut attempt: impl AsyncFnMut() -> bool) {
-        let deadline = Instant::now() + WAIT;
-        while !attempt().await {
-            assert!(Instant::now() < deadline, "{what}");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
     #[tokio::test]
     async fn resetting_a_stream_releases_its_permit_subscription_and_buffered_events() {
         let (server, addr) = start(RESET_APP);
-        let mut connection = h2_connect(addr, STREAM_WINDOW, Gate::opened()).await;
+        let gate = Gate::recording();
+        let mut connection = h2_connect(addr, STREAM_WINDOW, Arc::clone(&gate), None).await;
         let mut sibling = Sse::new(h2_get(&mut connection, addr, "/events").await);
         assert_eq!(sibling.next().await, Some(Frame::Retry));
         let mut sibling = sibling.spawn();
@@ -894,15 +949,17 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1", "realtime": map {
         // created, taking the last topic, and is never read.
         let mut reset = Sse::new(h2_get(&mut connection, addr, "/room/r").await);
         assert_eq!(reset.next().await, Some(Frame::Retry));
-        // Once its window is full the server holds that stream's next events
-        // and the bus keeps those it has not read, until the budget runs out.
-        // Events hyper has not yet written can still fit the window, which
-        // frees their budget, so fill again until the budget stays exhausted.
-        let budget = "realtime payload budget exhausted";
-        eventually("the stalled stream never held the budget", async || {
-            get_text(addr, "/fill/r").await == budget && get_text(addr, "/probe").await == budget
+        // Its event needs the whole budget and is larger than the stream's
+        // window: the server sends what fits and keeps the event for this
+        // stream. Once that part arrives the stream has taken the event off
+        // its bus, where a publisher short of budget could evict it.
+        assert_eq!(get_text(addr, "/fill/r").await, "queued");
+        eventually("the stream never took its event", async || {
+            gate.has_read(b"data: \"x")
         })
         .await;
+        let budget = "realtime payload budget exhausted";
+        assert_eq!(get_text(addr, "/probe").await, budget);
         // Both stream permits and every topic are in use.
         let refused = h2_get(&mut connection, addr, "/events").await;
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -917,7 +974,7 @@ listen(0, map { "readiness": "json", "host": "127.0.0.1", "realtime": map {
         // Reset that stream only: its connection stays open.
         drop(reset);
         eventually(
-            "the reset stream kept events charged to the budget",
+            "the reset stream kept its event charged to the budget",
             async || get_text(addr, "/probe").await == "budget free",
         )
         .await;
