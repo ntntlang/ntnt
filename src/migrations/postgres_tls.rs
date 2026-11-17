@@ -699,6 +699,9 @@ fn certificate_error(cause: &(dyn std::error::Error + 'static)) -> Option<Certif
 mod tests {
     use super::*;
 
+    /// Only a hang reaches this; a correct run takes milliseconds.
+    const HANG_GUARD: Duration = Duration::from_secs(60);
+
     fn parse(secret: &str) -> Result<(Zeroizing<String>, Transport)> {
         split(secret)
     }
@@ -873,9 +876,13 @@ mod tests {
     }
 
     /// Like `database_runtime`: a blocked off-thread read cannot hold up shutdown.
+    /// The clock is paused, and a paused clock does not advance while a blocking
+    /// task runs, so `ROOTS_TIMEOUT` never fires on a slow machine: every result
+    /// comes from the trust read itself.
     fn connector(transport: &Transport) -> Result<(Option<MakeRustls>, Value)> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
+            .start_paused(true)
             .build()
             .unwrap();
         let result = runtime.block_on(transport.connector());
@@ -940,16 +947,17 @@ mod tests {
             mode: Mode::VerifyFull,
             roots: Some(RootSource::File(fifo)),
         };
-        // No writer ever opens the FIFO. It must be rejected at once as not a
-        // regular file, not merely cut off by the trust-loading deadline. Run on
-        // a watchdog thread so a regression fails here instead of hanging.
+        // No writer ever opens the FIFO, so a blocking open would never return,
+        // and the paused clock keeps the trust-loading deadline from cutting it
+        // off: only rejecting it as not a regular file produces a result. A
+        // watchdog thread turns a blocking open into a failure at the hang guard.
         let (done, result) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let _ = done.send(connector(&transport).err());
         });
         let error = result
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("loading a FIFO as sslrootcert must not block")
+            .recv_timeout(HANG_GUARD)
+            .expect("loading a FIFO as sslrootcert blocked")
             .expect("a FIFO is not a usable root file");
         assert_eq!(error.code, "DB_CONNECTION_CONFIG");
         assert!(error.message.contains("readable PEM file"), "{error}");

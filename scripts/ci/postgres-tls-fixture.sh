@@ -59,11 +59,13 @@ fail() {
     exit 1
 }
 # The entrypoint's temporary init server listens only on its Unix socket, so a
-# TCP check passes only once the final server is up. Every check has a hard
-# deadline (GNU timeout), so a server that stops answering fails setup instead
-# of hanging it.
+# TCP check passes only once the final server is up. A failed or stalled probe
+# is retried; only the overall hang guard fails setup. The single SHOW ssl call
+# has the same guard (GNU timeout), so a server that stops answering fails setup
+# instead of hanging it.
+hang_guard=90
 ready=
-deadline=$((SECONDS + 90))
+deadline=$((SECONDS + hang_guard))
 while [ "$SECONDS" -lt "$deadline" ]; do
     if timeout -k 5 10 docker exec "$name" pg_isready -q -t 5 -h 127.0.0.1 -U postgres; then
         ready=1
@@ -71,10 +73,11 @@ while [ "$SECONDS" -lt "$deadline" ]; do
     fi
     sleep 1
 done
-[ -n "$ready" ] || fail "not ready within 90 seconds"
-ssl=$(timeout -k 5 30 docker exec -e PGPASSWORD="$password" -e PGCONNECT_TIMEOUT=10 "$name" \
+[ -n "$ready" ] || fail "not ready within $hang_guard seconds"
+ssl=$(timeout -k 5 "$hang_guard" docker exec -e PGPASSWORD="$password" \
+    -e PGCONNECT_TIMEOUT="$hang_guard" "$name" \
     psql -h 127.0.0.1 -U postgres -d ntnt_tls_control -tAc 'SHOW ssl') \
-    || fail "SHOW ssl failed or did not finish within 30 seconds"
+    || fail "SHOW ssl failed or did not finish within $hang_guard seconds"
 [ "$ssl" = "on" ] || fail "did not start with ssl=on"
 
 cat > env <<EOF

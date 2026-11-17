@@ -12,9 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const PASSWORD: &str = "ntnt344_fixture_only";
-/// Every fixture database operation (connect, authenticate, query) gets this
-/// deadline, so a stalled server fails the test instead of hanging it.
-const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
+/// Hang guard for every fixture database operation (connect, authenticate,
+/// query): a stalled server fails the test instead of hanging it. Only a hang
+/// reaches it; CREATE/DROP DATABASE on a busy server stays far below it.
+const HANG_GUARD: Duration = Duration::from_secs(120);
 
 fn env(name: &str) -> String {
     std::env::var(name)
@@ -31,7 +32,7 @@ fn fixture_sql(url: &str, sql: &str, query: bool) -> Option<bool> {
         .build()
         .unwrap()
         .block_on(async move {
-            tokio::time::timeout(FIXTURE_DEADLINE, async move {
+            tokio::time::timeout(HANG_GUARD, async move {
                 let (client, connection) = url
                     .parse::<tokio_postgres::Config>()
                     .unwrap()
@@ -50,7 +51,7 @@ fn fixture_sql(url: &str, sql: &str, query: bool) -> Option<bool> {
                 result
             })
             .await
-            .expect("fixture PostgreSQL did not answer within the deadline")
+            .unwrap_or_else(|_| panic!("fixture PostgreSQL did not answer within {HANG_GUARD:?}"))
         })
 }
 
@@ -168,7 +169,7 @@ impl Drop for TlsFixture {
         for name in [&self.target, &self.scratch] {
             // One statement per call: a multi-statement batch runs as a single
             // implicit transaction, which DROP DATABASE refuses. Each call is
-            // bounded by FIXTURE_DEADLINE.
+            // bounded by HANG_GUARD.
             for sql in [
                 format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"),
                 format!("DROP ROLE IF EXISTS {name}"),

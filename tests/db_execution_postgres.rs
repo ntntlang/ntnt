@@ -1883,16 +1883,19 @@ fn saved_by_0_6_1(f: &Fixture, path: &str) -> String {
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn attempt_interrupted_under_0_6_1_reconciles_with_its_plan() {
+    /// Only a hang reaches this: a terminated backend ends promptly.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
     let (mut f, _, writer) = interrupted_build("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
     f.admin
         .batch_execute(&format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='{}' AND query ILIKE 'CREATE%INDEX%'", f.target))
         .unwrap();
     drop(writer);
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // Wait for the terminated build's session to disappear.
+    let guard = std::time::Instant::now() + HANG_GUARD;
     while build_backends(&mut f) > 0 {
         assert!(
-            std::time::Instant::now() < until,
-            "build backend did not end"
+            std::time::Instant::now() < guard,
+            "build backend did not end within {HANG_GUARD:?}"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

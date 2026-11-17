@@ -1019,6 +1019,8 @@ mod tests {
     #[test]
     fn tls_modes_never_fall_back_to_plaintext() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        /// Only a hang reaches this: the client closes as soon as it reads 'N'.
+        const HANG_GUARD: Duration = Duration::from_secs(60);
         // verify-ca needs a CA file. Any CA will do: no handshake starts below.
         let dir = tempfile::tempdir().unwrap();
         let ca = dir.path().join("ca.pem");
@@ -1047,13 +1049,12 @@ mod tests {
                     let mut request = [0u8; 8];
                     socket.read_exact(&mut request).await.unwrap();
                     socket.write_all(b"N").await.unwrap();
-                    // Anything sent next would be a plaintext StartupMessage.
+                    // Anything sent before the client closes the connection would
+                    // be a plaintext StartupMessage.
                     let mut rest = Vec::new();
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        socket.read_to_end(&mut rest),
-                    )
-                    .await;
+                    let _ = tokio::time::timeout(HANG_GUARD, socket.read_to_end(&mut rest))
+                        .await
+                        .expect("the client kept the connection open after 'N'");
                     (request, rest)
                 });
                 let secret = crate::interpreter::SecretValue::new(
