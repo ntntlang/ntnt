@@ -1617,7 +1617,7 @@ Feature: User Authentication
 
 ## Phase 10: Background Jobs, WebSockets & Real-Time
 
-**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · SSE implemented for v0.6.0 · WebSockets pending (DD-041 Slice B)
+**Status:** Jobs Complete ✅ (DD-037, DD-051, DD-052) · SSE shipped in v0.6.0 · WebSockets shipped in v0.6.1 (DD-041; remaining boundaries in 10.5)
 
 **Goal:** Production-ready background job system with a declarative Job DSL, pluggable backends, and deep IDD integration — plus WebSocket and SSE support for pushing data to clients. Jobs are first-class language constructs — the `Job` keyword is syntax, not a library import — with the runtime and queue management provided by `std/jobs`.
 
@@ -1714,18 +1714,19 @@ ProcessPayment.enqueue_in(3600, map { "order_id": "456", "amount": 29.99 })
 
 ### 10.5 Native SSE and WebSockets
 
-**Status:** Slice A (SSE), configurable process resource caps and initial worker readiness shipped in v0.6.0. The v0.6.1 development line adds exact loaded-source provenance as a generation prerequisite. Slice B (WebSockets) remains unimplemented. [DD-041](design-docs/dd-041-sse-streaming.md) records the design and remaining gates.
+**Status:** Slice A (SSE), configurable process resource caps and initial worker readiness shipped in v0.6.0. Slice B (WebSockets), exact loaded-source provenance and realtime startup source parity shipped in v0.6.1. The design is not fully closed: [DD-041](design-docs/dd-041-sse-streaming.md#production-adoption-and-remaining-boundaries) lists the remaining boundaries.
 
 **Scope:** Support both protocols through the existing Axum/Tokio server, with SSE first and WebSockets second. Ordinary routes and middleware return typed streaming/upgrade responses; idle connections do not retain an interpreter or OS thread.
 
-- [x] Gate 0 feasibility probes and SSE ownership/shutdown checks (#292, #289, #290); WebSocket-specific upgrade/generation/fairness checks remain in Slice B.
+- [x] Gate 0 feasibility probes and SSE ownership/shutdown checks (#292, #289, #290); WebSocket-specific upgrade/generation/fairness checks followed in Slice B.
 - [x] Slice A: bounded native broadcast/publish, ordinary `sse()` response builder, auth/header handling, configurable process connection/topic/byte caps, lag handling and lifecycle cleanup.
-- [x] Initial realtime worker setup completes before bind/readiness; fail-fast initial errors and a shared startup deadline. Source-generation/endpoint compatibility and quarantined rejoin remain separate Slice B work.
-- [x] Exact file-input provenance: main, imports and direct application loaders; source-aware AST handoff, cache identity and mixed/source-less detection. Observed inputs are not a frozen full-program generation; lazy-load/reload coordination and worker admission remain open.
-- [ ] Slice B: setup-registered WebSocket endpoints, `websocket()` response builder, text/binary send/close, explicit connection state, bounded fair worker callbacks and exact-Origin policy.
-- [ ] Prove multi-worker fan-out, slow-client bounds, cancellation/reload/shutdown behavior, and ordinary HTTP performance with real protocol clients.
+- [x] Initial realtime worker setup completes before bind/readiness; fail-fast initial errors and a shared startup deadline. Source-generation/endpoint compatibility and quarantined rejoin followed in v0.6.1 (source-only parity, not full program attestation).
+- [x] Exact file-input provenance: main, imports and direct application loaders; source-aware AST handoff, cache identity and mixed/source-less detection. Observed inputs are not a frozen full-program generation; different-source workers stay out of service (v0.6.1), and coordinated lazy-load/reload remains open (#361).
+- [x] Slice B (v0.6.1): setup-registered WebSocket endpoints, `websocket()` response builder, text/binary send/close, explicit connection state, bounded fair worker callbacks and exact-Origin policy.
+- [ ] Prove multi-worker fan-out, slow-client bounds, cancellation/reload/shutdown behavior, and ordinary HTTP performance with real protocol clients. HTTP/2 SSE and callback saturation during worker loss are tracked in #372.
+- [ ] Coordinated multi-worker development reload (#361).
 
-`broadcast`, `publish` and `sse` exist on main; the WebSocket APIs remain proposed. The scope is process-local live delivery, not durable replay or cross-process job push. No room DSL, separate realtime framework, per-connection generator/scheduler, client SDK, or interpreter-wide async refactor; see DD-041 for the implemented boundary and remaining acceptance checks.
+`broadcast`, `publish`, `sse`, `ws_endpoint`, `websocket`, `ws_send` and `ws_close` are released. The scope is process-local live delivery, not durable replay or cross-process job push. No room DSL, separate realtime framework, per-connection generator/scheduler, client SDK, or interpreter-wide async refactor; see DD-041 for the implemented boundary and remaining acceptance checks.
 
 ### 10.6 IDD Integration & CLI
 
@@ -1775,7 +1776,7 @@ Feature: Welcome Email Job
 - In-memory, PostgreSQL, and Redis/Valkey backends
 - Resilience: heartbeats, retries, dead letter queue, rate limiting, graceful shutdown
 - Job composition: chains (sequential), workflows (DAG), batches (parallel)
-- Native SSE and WebSocket support in two slices, with bounded process-local fan-out and worker callbacks (DD-041; SSE implemented, WebSockets pending)
+- Native SSE and WebSocket support in two slices, with bounded process-local fan-out and worker callbacks (DD-041; SSE in v0.6.0, WebSockets in v0.6.1)
 - IDD integration for testing jobs in `.intent` files
 - `ntnt jobs` CLI commands for monitoring and management
 - Simulation mode for dry-run execution
@@ -2324,7 +2325,7 @@ The HTTP server now uses Axum + Tokio for async request handling:
 | 7 ✅       | Ergonomics & Documentation       | High               | ~95% done  |
 | **8**      | **Intent System Maturity**       | **High**           | **Up Next**|
 | 9          | Reserved                         |                    |            |
-| 10 🟡     | Jobs ✅, WebSockets ❌           | High               | Partial    |
+| 10 🟡     | Jobs ✅, SSE/WebSockets ✅       | High               | Partial    |
 | 11         | Testing Framework                | High               | Not Started|
 | 12         | Tooling & DX (LSP, Debugger)     | Very High          | Not Started|
 | 13         | Static Analysis & Type System    | High               | Not Started|
@@ -2369,7 +2370,7 @@ The HTTP server now uses Axum + Tokio for async request handling:
 - ✅ Resilience: retries, rate limiting, concurrency limits, dead letter queue, pause/resume
 - ✅ Batch system with dynamic adds, callbacks, TTL expiry
 - ✅ `ntnt jobs` CLI for monitoring and management
-- ❌ WebSocket and SSE support (not started)
+- ✅ Process-local SSE (v0.6.0) and WebSockets (v0.6.1), DD-041
 
 ### M6: Developer Ready (End of Phase 12)
 
