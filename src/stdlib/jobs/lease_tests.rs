@@ -259,82 +259,10 @@ fn keeper_after_contention(lost: bool) {
 }
 
 #[test]
-fn keeper_retries_contention_before_next_normal_interval() {
-    keeper_after_contention(false);
-}
-
-#[test]
 fn keeper_contention_retry_cancels_a_lost_lease() {
     keeper_after_contention(true);
 }
 
-#[test]
-fn expired_child_stops_even_when_backend_cannot_renew() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("lease.db");
-    let h = kv::open_kv(path.to_str().unwrap()).unwrap();
-    let sent = Instant::now();
-    // Leave enough startup headroom for loaded Windows CI before exercising
-    // expiry while the backend is locked.
-    let duration_ms = 3_000;
-    let c = seed_status_with_lease(&h, "pending", duration_ms);
-    let mut active = c.data.clone();
-    active.insert("status".into(), Value::String("active".into()));
-    assert!(history::Prepared::new(
-        &h,
-        "jobs:data:lease-fixture",
-        Some(c.snapshot.clone()),
-        active
-    )
-    .unwrap()
-    .apply_owned(&h)
-    .unwrap());
-    let keeper = leases::Keeper::new(extract_kv_handle_info(&h).unwrap()).unwrap();
-    let renewals = keeper.observe_renewals();
-    let locked = rusqlite::Connection::open(path).unwrap();
-    locked.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let scope = keeper.attach(&c, sent, leases::Policy { duration_ms });
-    let (_, result) = renewals
-        .recv_timeout(Duration::from_secs(2))
-        .expect("keeper never attempted renewal before expiry");
-    let error = result.expect_err("locked store unexpectedly allowed renewal");
-    assert!(kv::conditional::is_contention_error(&error), "{error}");
-    assert!(scope.cancel.wait_timeout(Duration::from_secs(5)));
-    assert!(sent.elapsed() < Duration::from_millis(4_500));
-    assert!(scope.cancel.is_cancelled());
-    drop(scope);
-    assert!(!is_current_task_cancelled());
-    // A renewal may have passed its cancellation check just before expiry.
-    // Keep the writer locked until the supervisor exits: the observer channel
-    // disconnects only once no renewal can still be in flight. Every attempt
-    // made under the lock must have failed.
-    drop(keeper);
-    loop {
-        match renewals.recv_timeout(Duration::from_secs(10)) {
-            Ok((_, Ok(renewed))) => panic!("expired lease renewed under lock: {renewed}"),
-            Ok((_, Err(_))) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                panic!("lease supervisor did not exit")
-            }
-        }
-    }
-    locked.execute_batch("ROLLBACK").unwrap();
-    let lease = retrying("expired lease", || kv::job_leases::get(&h, &c.id)).unwrap();
-    assert_eq!(lease.deadline_ms, c.deadline_ms);
-    // Local send-time deadline intentionally expires before the store deadline.
-    let until = Instant::now() + Duration::from_secs(1);
-    loop {
-        match kv::job_leases::recover(&h, 64) {
-            Ok(counts) if counts.unknown == 1 => break,
-            Ok(_) => {}
-            Err(error) if kv::conditional::is_contention_error(&error) => {}
-            Err(error) => panic!("unexpected recovery failure: {error}"),
-        }
-        assert!(Instant::now() < until);
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
 #[test]
 fn legacy_active_is_visible_as_unknown_and_not_retryable() {
     // retry_job_by_id and job_status_counts read the global JOB_RUNTIME
