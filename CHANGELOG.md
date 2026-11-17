@@ -9,6 +9,9 @@ See [unreleased notes](docs/release-notes/unreleased.md).
 - `ntnt db init` declares a SQLite or PostgreSQL database and its secret names in
   `ntnt.toml` and creates `migrations/`; `ntnt db new <name>` creates the next
   numbered migration file. Neither writes secret values or overwrites a file (#348).
+- `ntnt db` PostgreSQL TLS: `sslmode=verify-full` (host-store or `sslrootcert`
+  trust), `verify-ca` (`sslrootcert` CA file only) and `require`, no plaintext
+  fallback, and the transport bound into plans (#344).
 
 ## 0.6.1
 

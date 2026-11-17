@@ -1718,7 +1718,9 @@ neither overwrites a file. Then follow
 [Database Migrations → Quick start](DATABASE_MIGRATIONS.md#quick-start) for local
 target/scratch provisioning and the `status` → `plan` → approve the `plan_digest` →
 `migrate` → `verify` loop for SQLite and PostgreSQL. PostgreSQL connection secrets
-currently require `sslmode=disable` on a trusted local transport; TLS is tracked in #344.
+need an explicit `sslmode`: `verify-full` for any network path (host CA store, or
+`sslrootcert=/absolute/ca.pem`), `disable` only on a trusted local transport. See
+[TLS](DATABASE_MIGRATIONS.md#tls).
 
 Configure logical stores under `[databases.<name>]`, each with its own migration
 directory, named targets, and disposable scratch database using declared

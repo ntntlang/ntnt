@@ -1839,6 +1839,96 @@ fn interrupted_build_that_finished_reconciles_as_completed() {
     assert_eq!(r["progress"][1]["state"], "already_applied", "{r}");
 }
 
+/// `plan_digest` as `ntnt db` computes it: SHA-256 over the length-framed
+/// compact JSON of the plan with sorted keys.
+fn plan_digest(plan: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    fn sort(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                map.sort_keys();
+                map.values_mut().for_each(sort);
+            }
+            Value::Array(values) => values.iter_mut().for_each(sort),
+            _ => {}
+        }
+    }
+    let mut plan = plan.clone();
+    sort(&mut plan);
+    let bytes = serde_json::to_vec(&plan).unwrap();
+    let mut hash = Sha256::new();
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(&bytes);
+    hex::encode(hash.finalize())
+}
+/// Rewrite the saved `upgrade.json` as ntnt 0.6.1 saved plans: 0.6.1 connected
+/// only with sslmode=disable and bound no `transport` into the target.
+fn saved_by_0_6_1(f: &Fixture, path: &str) -> String {
+    let mut saved: Value =
+        serde_json::from_slice(&std::fs::read(f.root.path().join("upgrade.json")).unwrap())
+            .unwrap();
+    assert_eq!(plan_digest(&saved["plan"]), saved["plan_digest"]);
+    let target = saved["plan"]["binding"]["target"].as_object_mut().unwrap();
+    assert_eq!(target.remove("transport").unwrap()["sslmode"], "disable");
+    let digest = plan_digest(&saved["plan"]);
+    saved["plan_digest"] = Value::String(digest.clone());
+    std::fs::write(
+        f.root.path().join(path),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    digest
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn attempt_interrupted_under_0_6_1_reconciles_with_its_plan() {
+    /// Only a hang reaches this: a terminated backend ends promptly.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+    let (mut f, _, writer) = interrupted_build("CREATE INDEX CONCURRENTLY t_id ON app.t(id);");
+    f.admin
+        .batch_execute(&format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='{}' AND query ILIKE 'CREATE%INDEX%'", f.target))
+        .unwrap();
+    drop(writer);
+    // Wait for the terminated build's session to disappear.
+    let guard = std::time::Instant::now() + HANG_GUARD;
+    while build_backends(&mut f) > 0 {
+        assert!(
+            std::time::Instant::now() < guard,
+            "build backend did not end within {HANG_GUARD:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(index_state(&f, "t_id"), Some(false));
+    // After upgrading, no new plan can be made until the attempt is resolved,
+    // so reconcile must accept the plan 0.6.1 saved.
+    assert!(code(&f.command("plan"), "DB_ATTEMPT_UNRESOLVED"));
+    let digest = saved_by_0_6_1(&f, "legacy.json");
+    let with_legacy_plan = |command: &str| {
+        let output = f
+            .process(command)
+            .args(["--plan", "legacy.json"])
+            .env("DB_APPROVAL", &digest)
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    let r = with_legacy_plan("reconcile");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["reconciliation"]["resolution"], "rolled_back", "{r}");
+    assert_eq!(index_state(&f, "t_id"), None);
+    assert_eq!(attempt_state(&f), None);
+    // migrate still needs a plan made by this release.
+    let r = with_legacy_plan("migrate");
+    assert!(code(&r, "DB_PLAN_STALE"), "{r}");
+    assert_eq!(index_state(&f, "t_id"), None);
+    let fresh = f.plan("fresh.json");
+    let r = f.apply("fresh.json", fresh["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(index_state(&f, "t_id"), Some(true));
+}
+
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn reconciliation_refuses_what_it_cannot_explain() {

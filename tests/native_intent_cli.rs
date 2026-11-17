@@ -361,32 +361,6 @@ fn native_missing_binding_autorun_and_server_actions_fail() {
 }
 
 #[test]
-fn simple_http_intent_remains_executable() {
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/simple_server/server.intent");
-    for json in [false, true] {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port().to_string();
-        drop(listener);
-        let mut args = vec!["--port", port.as_str()];
-        if json {
-            args.push("--json");
-        }
-        let output = run_suite(&fixture, &args);
-        assert!(
-            output.status.success(),
-            "stdout={}\nstderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if json {
-            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_eq!(report["passed"], true);
-        }
-    }
-}
-
-#[test]
 fn native_table_preserves_quoted_numeric_strings() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(

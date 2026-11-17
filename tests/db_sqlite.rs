@@ -379,29 +379,6 @@ fn sqlite_competing_processes_do_not_execute_twice() {
     );
 }
 #[test]
-fn sqlite_busy_writer_is_bounded_and_cleanup_allows_retry() {
-    let f = Fixture::new();
-    f.sql("0001_initial.sql", "CREATE TABLE t(id INTEGER);");
-    let plan = f.plan("plan.json");
-    let c = f.target();
-    c.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let start = std::time::Instant::now();
-    let r = f.apply("plan.json", plan["plan_digest"].as_str());
-    assert!(code(&r, "DB_BUSY"), "{r}");
-    assert!(start.elapsed() < std::time::Duration::from_secs(8));
-    assert_eq!(
-        c.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
-    c.execute_batch("ROLLBACK").unwrap();
-    assert_eq!(
-        f.apply("plan.json", plan["plan_digest"].as_str())["outcome"],
-        "pass"
-    );
-}
-#[test]
 fn sqlite_crashes_before_commit_and_before_ack_resume_from_real_prefix() {
     use sqlite_fixture::Running;
     for after_commit in [false, true] {

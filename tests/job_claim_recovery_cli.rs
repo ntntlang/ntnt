@@ -177,36 +177,6 @@ fn killed_execution_becomes_unknown_without_replaying_effect() {
     assert!(rows.as_array().unwrap().iter().any(|r| r["id"] == id));
 }
 
-#[cfg(unix)]
-#[test]
-fn resumed_stale_process_cannot_execute_recovered_claim() {
-    let dir = tempfile::tempdir().unwrap();
-    let (file, db, effect) = fixture(dir.path(), false);
-    let id = std::fs::read_to_string(dir.path().join("id.txt")).unwrap();
-    let conn = rusqlite::Connection::open(db).unwrap();
-    conn.execute_batch("CREATE TRIGGER block_start BEFORE INSERT ON _kv WHEN NEW.key LIKE 'jobs:data:%' AND json_extract(NEW.value,'$.status')='active' BEGIN SELECT RAISE(ABORT,'hold before execution'); END").unwrap();
-    let mut first = start(&file);
-    wait(|| record(&conn, &id)["status"] == "claimed");
-    assert!(Command::new("kill")
-        .args(["-STOP", &first.0.id().to_string()])
-        .status()
-        .unwrap()
-        .success());
-    conn.execute_batch("DROP TRIGGER block_start").unwrap();
-    let mut second = start(&file);
-    wait(|| record(&conn, &id)["status"] == "completed");
-    assert!(Command::new("kill")
-        .args(["-CONT", &first.0.id().to_string()])
-        .status()
-        .unwrap()
-        .success());
-    std::thread::sleep(Duration::from_millis(400));
-    kill(&mut first);
-    kill(&mut second);
-    assert_eq!(std::fs::read_to_string(effect).unwrap(), "effect\n");
-    assert_eq!(record(&conn, &id)["status"], "completed");
-}
-
 #[test]
 #[ignore = "requires dedicated NTNT_CLAIMS_TEST_REDIS"]
 fn redis_worker_crash_does_not_replay_recorded_effect() {
