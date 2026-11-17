@@ -1713,8 +1713,10 @@ ntnt db verify --target development --against review.json --json
 **New project?** Follow [Database Migrations → Quick start](DATABASE_MIGRATIONS.md#quick-start).
 It gives a minimal `ntnt.toml`, `migrations/0001_initial.sql`, local target/scratch
 provisioning, and the `status` → `plan` → approve the `plan_digest` → `migrate` →
-`verify` loop for SQLite and PostgreSQL. PostgreSQL connection secrets currently
-require `sslmode=disable` on a trusted local transport; TLS is tracked in #344.
+`verify` loop for SQLite and PostgreSQL. PostgreSQL connection secrets need an
+explicit `sslmode`: `verify-full` for any network path (host CA store, or
+`sslrootcert=/absolute/ca.pem`), `disable` only on a trusted local transport. See
+[TLS](DATABASE_MIGRATIONS.md#tls).
 
 Configure logical stores under `[databases.<name>]`, each with its own migration
 directory, named targets, and disposable scratch database using declared

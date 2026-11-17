@@ -6,6 +6,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::future::Future;
 use std::time::Duration;
+use tokio_postgres::config::SslMode;
 use tokio_postgres::{Client, Config, NoTls, Row};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -29,29 +30,33 @@ async fn bounded_for<T>(
 ) -> Result<T> {
     match tokio::time::timeout(limit, future).await {
         Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(driver_error(&e)),
+        Err(_) => Err(deadline_error()),
+    }
+}
+/// Expose only SQLSTATE, never server error payloads.
+fn driver_error(e: &tokio_postgres::Error) -> Diagnostic {
+    match e.code().map(|c| c.code()) {
         // A lock wait that hit lock_timeout, or a deadlock victim. Nothing was
         // committed; the caller may retry the whole migration transaction.
-        Ok(Err(e)) if matches!(e.code().map(|c| c.code()), Some("55P03") | Some("40P01")) => {
-            Err(Diagnostic::new(
-                "DB_LOCK_CONFLICT",
-                &format!(
-                    "A lock was not granted in time (SQLSTATE {}).",
-                    e.code().map(|c| c.code()).unwrap_or("unavailable")
-                ),
-            ))
-        }
-        Ok(Err(e)) => Err(Diagnostic::new(
+        Some(code @ ("55P03" | "40P01")) => Diagnostic::new(
+            "DB_LOCK_CONFLICT",
+            &format!("A lock was not granted in time (SQLSTATE {code})."),
+        ),
+        code => Diagnostic::new(
             "DB_POSTGRES",
             &format!(
                 "PostgreSQL operation failed (SQLSTATE {}). Server details suppressed.",
-                e.code().map(|c| c.code()).unwrap_or("unavailable")
+                code.unwrap_or("unavailable")
             ),
-        )),
-        Err(_) => Err(Diagnostic::new(
-            "DB_TIMEOUT",
-            "Database connect/authentication/query deadline exceeded.",
-        )),
+        ),
     }
+}
+fn deadline_error() -> Diagnostic {
+    Diagnostic::new(
+        "DB_TIMEOUT",
+        "Database connect/authentication/query deadline exceeded.",
+    )
 }
 
 fn quote(identifier: &str) -> String {
@@ -61,6 +66,8 @@ fn quote(identifier: &str) -> String {
 pub(crate) struct Postgres {
     client: Client,
     task: tokio::task::JoinHandle<()>,
+    /// sslmode, trust source and the TLS version this client negotiated.
+    transport: Value,
 }
 impl Drop for Postgres {
     fn drop(&mut self) {
@@ -76,6 +83,10 @@ pub(crate) struct Identity {
     pub version: i32,
     pub settings: Value,
     pub authority: Value,
+    /// sslmode, trust source, the TLS version this client negotiated, and whether
+    /// PostgreSQL reports its own session leg as SSL (`server_ssl`). Part of the
+    /// plan binding: a plan made over TLS cannot run over a weaker transport.
+    pub transport: Value,
 }
 use super::model::{Catalog, History, HistoryEntry};
 
@@ -87,13 +98,14 @@ pub(crate) trait RelationalAdapter {
 }
 impl Postgres {
     /// Open a dedicated session after checking explicit host, role, database and transport.
-    /// The initial connection is read-only by default; this adapter accepts only explicit
-    /// NoTLS configuration on trusted transport and never silently downgrades TLS.
+    /// The initial connection is read-only by default. Every TLS sslmode requires TLS from
+    /// the server (no plaintext fallback); `disable` is plaintext for a trusted local transport.
     pub async fn connect(
         secret: &crate::interpreter::SecretValue,
         endpoint: &Endpoint,
     ) -> Result<Self> {
-        let mut config: Config = secret.expose().parse().map_err(|_| {
+        let (connection, transport) = super::postgres_tls::split(secret.expose())?;
+        let mut config: Config = connection.as_str().parse().map_err(|_| {
             Diagnostic::new(
                 "DB_CONNECTION_CONFIG",
                 "Invalid connection secret; details suppressed.",
@@ -103,18 +115,71 @@ impl Postgres {
             || config.get_user() != Some(&endpoint.role)
             || config.get_hosts().len() != 1
             || config.get_options().is_some()
-            || config.get_ssl_mode() != tokio_postgres::config::SslMode::Disable
         {
-            return Err(Diagnostic::new("DB_CONNECTION_CONFIG","Use one explicit host, the declared database/role, sslmode=disable on a trusted local transport, and no startup options. TLS transport is not yet supported."));
+            return Err(Diagnostic::new("DB_CONNECTION_CONFIG","Use one explicit host, the declared database/role, an explicit sslmode, and no startup options."));
         }
+        let encrypted = transport.mode() != super::postgres_tls::Mode::Disable;
+        if encrypted
+            && !matches!(
+                config.get_hosts().first(),
+                Some(tokio_postgres::config::Host::Tcp(_))
+            )
+        {
+            return Err(Diagnostic::new(
+                "DB_CONNECTION_CONFIG",
+                "TLS needs a TCP host name or address. A Unix-socket directory is a local transport: use sslmode=disable for it.",
+            ));
+        }
+        if config.get_channel_binding() == tokio_postgres::config::ChannelBinding::Require {
+            return Err(Diagnostic::new(
+                "DB_CONNECTION_CONFIG",
+                "channel_binding=require is not supported; sslmode=verify-full authenticates the server.",
+            ));
+        }
+        // The TLS keywords were removed above, so set the mode explicitly:
+        // tokio-postgres would otherwise default to `prefer`.
+        config.ssl_mode(if encrypted {
+            SslMode::Require
+        } else {
+            SslMode::Disable
+        });
         config.connect_timeout(IO_TIMEOUT);
         config.application_name("ntnt-db-inspect-v1");
         config.options("-c default_transaction_read_only=on -c search_path=pg_catalog -c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000 -c standard_conforming_strings=on -c row_security=off");
-        let (client, connection) = bounded(config.connect(NoTls)).await?;
-        let task = tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        Ok(Self { client, task })
+        let (connector, mut transport) = transport.connector().await?;
+        let (client, task) = match connector {
+            None => {
+                let (client, connection) = bounded(config.connect(NoTls)).await?;
+                let task = tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                (client, task)
+            }
+            Some(tls) => {
+                let negotiated = tls.clone();
+                let (client, connection) =
+                    match tokio::time::timeout(IO_TIMEOUT, config.connect(tls)).await {
+                        Ok(Ok(pair)) => pair,
+                        Ok(Err(e)) => {
+                            return Err(super::postgres_tls::classify(&e)
+                                .unwrap_or_else(|| driver_error(&e)))
+                        }
+                        Err(_) => return Err(deadline_error()),
+                    };
+                let task = tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                // What this client negotiated is the transport it controls; a
+                // TLS-terminating proxy does not change it.
+                transport["tls_version"] = json!(negotiated.negotiated_version());
+                (client, task)
+            }
+        };
+        Ok(Self {
+            client,
+            task,
+            transport,
+        })
     }
     pub async fn batch(&self, sql: &str) -> Result<()> {
         bounded(self.client.batch_execute(sql)).await
@@ -168,6 +233,20 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
  'roles',(SELECT jsonb_agg(jsonb_build_object('role',r.rolname,'superuser',r.rolsuper,'createdb',r.rolcreatedb,'createrole',r.rolcreaterole,'inherit',r.rolinherit,'bypassrls',r.rolbypassrls,'replication',r.rolreplication) ORDER BY r.rolname) FROM pg_catalog.pg_roles r JOIN roles ON r.oid=roles.oid),
  'memberships',(SELECT jsonb_agg(jsonb_build_object('member',pg_get_userbyid(m.member),'role',pg_get_userbyid(m.roleid),'admin',m.admin_option,'inherit',pg_catalog.to_jsonb(m)->'inherit_option','set',pg_catalog.to_jsonb(m)->'set_option') ORDER BY pg_get_userbyid(m.member),pg_get_userbyid(m.roleid)) FROM pg_catalog.pg_auth_members m JOIN roles r ON m.member=r.oid))
 "#,&[])).await?.get::<_,Value>(0);
+        // The server's own view of this session. Directly connected it matches
+        // the client; behind a TLS-terminating proxy or pooler it describes the
+        // proxy's leg and can be false while the client connection is verified TLS.
+        let server_ssl: bool = bounded(self.client.query_one(
+            "SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()",
+            &[],
+        ))
+        .await?
+        .get(0);
+        let mut transport = self.transport.clone();
+        if transport.get("tls_version").is_none() {
+            transport["tls_version"] = Value::Null;
+        }
+        transport["server_ssl"] = json!(server_ssl);
         let identity = Identity {
             cluster: r.get(0),
             database_oid: r.get(1),
@@ -176,6 +255,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             version: r.get(4),
             settings: r.get(5),
             authority,
+            transport,
         };
         if identity.database != endpoint.database || identity.role != endpoint.role {
             return Err(Diagnostic::new(
@@ -957,6 +1037,101 @@ mod tests {
         b["grants"][0]["privilege"] = json!("DELETE");
         assert_ne!(a, b);
     }
+    fn fixture_endpoint() -> Endpoint {
+        Endpoint {
+            connection_secret: "FIXTURE".into(),
+            database: "app".into(),
+            role: "app".into(),
+        }
+    }
+
+    #[test]
+    fn tls_modes_never_fall_back_to_plaintext() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        /// Only a hang reaches this: the client closes as soon as it reads 'N'.
+        const HANG_GUARD: Duration = Duration::from_secs(60);
+        // verify-ca needs a CA file. Any CA will do: no handshake starts below.
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let key = rcgen::KeyPair::generate().unwrap();
+        std::fs::write(&ca, params.self_signed(&key).unwrap().pem()).unwrap();
+        // A backslash escapes in key/value secrets, so use forward slashes.
+        let ca = ca.to_str().unwrap().replace('\\', "/");
+        // A server without TLS answers PostgreSQL's SSLRequest with 'N'. Every TLS
+        // mode must stop there rather than continue with a plaintext startup.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for tls in [
+                "sslmode=require".to_string(),
+                format!("sslmode=verify-ca sslrootcert='{ca}'"),
+                "sslmode=verify-full".to_string(),
+            ] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                let server = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = [0u8; 8];
+                    socket.read_exact(&mut request).await.unwrap();
+                    socket.write_all(b"N").await.unwrap();
+                    // Anything sent before the client closes the connection would
+                    // be a plaintext StartupMessage.
+                    let mut rest = Vec::new();
+                    let _ = tokio::time::timeout(HANG_GUARD, socket.read_to_end(&mut rest))
+                        .await
+                        .expect("the client kept the connection open after 'N'");
+                    (request, rest)
+                });
+                let secret = crate::interpreter::SecretValue::new(
+                    "FIXTURE",
+                    format!("host=127.0.0.1 port={port} user=app dbname=app password=fixture-only {tls}"),
+                )
+                .unwrap();
+                let error = Postgres::connect(&secret, &fixture_endpoint())
+                    .await
+                    .err()
+                    .expect("a TLS mode must not connect without TLS");
+                assert_eq!(error.code, "DB_TLS", "{tls}: {error}");
+                assert!(error.message.contains("No plaintext fallback"), "{error}");
+                let (request, rest) = server.await.unwrap();
+                // SSLRequest: length 8, request code 80877103.
+                assert_eq!(request, [0, 0, 0, 8, 4, 210, 22, 47], "{tls}");
+                assert!(rest.is_empty(), "{tls}: client continued in plaintext: {rest:?}");
+            }
+        });
+    }
+
+    #[test]
+    fn tls_needs_tcp_and_no_unsupported_channel_binding() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut cases = vec![
+            "host=127.0.0.1 user=app dbname=app sslmode=verify-full channel_binding=require",
+            "host=127.0.0.1 user=app dbname=app",
+            "host=127.0.0.1 user=app dbname=app sslmode=prefer",
+            "host=127.0.0.1 user=other dbname=app sslmode=verify-full",
+        ];
+        #[cfg(unix)]
+        cases.push("host=/var/run/postgresql user=app dbname=app sslmode=verify-full");
+        runtime.block_on(async {
+            for case in cases {
+                let secret =
+                    crate::interpreter::SecretValue::new("FIXTURE", case.to_string()).unwrap();
+                let error = Postgres::connect(&secret, &fixture_endpoint())
+                    .await
+                    .err()
+                    .expect("rejected before connecting");
+                assert_eq!(error.code, "DB_CONNECTION_CONFIG", "{case}: {error}");
+            }
+        });
+    }
+
     #[test]
     fn capabilities_report_concurrent_index_builds_as_supported() {
         // Shipped in 0.6.1 (ntnt db reconcile); reports must not call it unimplemented.

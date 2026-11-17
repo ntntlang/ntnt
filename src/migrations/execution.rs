@@ -11,6 +11,31 @@ fn stale() -> Diagnostic {
     Diagnostic::new("DB_PLAN_STALE", "Execution artifact is incomplete or no longer matches captured inputs, policy, target, history or catalog. Review a new plan; do not blindly retry SQL.")
 }
 
+/// Whether the observed target identity is the one a plan bound, for
+/// `reconcile`. Plans saved by ntnt 0.6.1 bind no `transport`: that release
+/// connected only with sslmode=disable. Such a binding matches a plaintext
+/// session whose identity is otherwise equal, so an attempt 0.6.1 left behind
+/// can be resolved after upgrading, while `plan` refuses to run until it is.
+/// `locked_prefix` (migrate) still compares exactly: it needs a new plan.
+fn reconcile_target_matches(observed: &Value, bound: &Value) -> bool {
+    if observed == bound {
+        return true;
+    }
+    let (Some(observed), Some(bound)) = (observed.as_object(), bound.as_object()) else {
+        return false;
+    };
+    let plaintext = observed
+        .get("transport")
+        .and_then(|transport| transport["sslmode"].as_str())
+        == Some("disable");
+    if bound.contains_key("transport") || !plaintext {
+        return false;
+    }
+    let mut observed = observed.clone();
+    observed.remove("transport");
+    observed == *bound
+}
+
 /// Validate the descriptor, ordered prefix evidence and exact captured source.
 /// This is pure: no I/O or approval lookup. Old inspection-only artifacts fail closed.
 pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
@@ -685,7 +710,9 @@ async fn locked_attempt(
     let base = validate(inputs, saved)?;
     db.begin_migration(&inputs.config.schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
-    if json!(&identity) != saved["plan"]["binding"]["target"] {
+    // Reconcile accepts a 0.6.1 binding here too. Migrate gets here only after
+    // locked_prefix compared the binding exactly on this same session.
+    if !reconcile_target_matches(&json!(&identity), &saved["plan"]["binding"]["target"]) {
         return Err(stale());
     }
     let history = db
@@ -743,7 +770,7 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
     db.own_migrations(inputs.limits().migrator_wait()).await?;
     db.begin_migration(schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
-    if json!(&identity) != saved["plan"]["binding"]["target"] {
+    if !reconcile_target_matches(&json!(&identity), &saved["plan"]["binding"]["target"]) {
         return Err(stale());
     }
     report["target"]["identity"] = json!(identity);
@@ -972,6 +999,43 @@ role = "owner"
                 "DB_PLAN_STALE"
             );
         }
+    }
+
+    #[test]
+    fn reconcile_accepts_a_0_6_1_binding_only_over_plaintext() {
+        let identity = |transport: Value| {
+            json!({"cluster":"7","database_oid":16384,"database":"app","role":"owner",
+                "version":170004,"settings":{"encoding":"UTF8"},"authority":{"roles":[]},
+                "transport":transport})
+        };
+        let plaintext = identity(
+            json!({"sslmode":"disable","roots":null,"tls_version":null,"server_ssl":false}),
+        );
+        let tls = identity(
+            json!({"sslmode":"verify-full","roots":"system","tls_version":"TLSv1.3","server_ssl":true}),
+        );
+        let unverified = identity(
+            json!({"sslmode":"require","roots":null,"tls_version":"TLSv1.3","server_ssl":true}),
+        );
+        // ntnt 0.6.1 bound the same identity without a transport.
+        let mut legacy = plaintext.clone();
+        legacy.as_object_mut().unwrap().remove("transport");
+        assert!(reconcile_target_matches(&plaintext, &legacy));
+        assert!(!reconcile_target_matches(&tls, &legacy));
+        assert!(!reconcile_target_matches(&unverified, &legacy));
+        // Every other field must still be equal.
+        let mut moved = legacy.clone();
+        moved["cluster"] = json!("8");
+        assert!(!reconcile_target_matches(&plaintext, &moved));
+        let mut partial = legacy.clone();
+        partial.as_object_mut().unwrap().remove("role");
+        assert!(!reconcile_target_matches(&plaintext, &partial));
+        // A binding with a transport compares exactly.
+        assert!(reconcile_target_matches(&plaintext, &plaintext));
+        assert!(reconcile_target_matches(&tls, &tls));
+        assert!(!reconcile_target_matches(&plaintext, &tls));
+        assert!(!reconcile_target_matches(&tls, &plaintext));
+        assert!(!reconcile_target_matches(&unverified, &tls));
     }
 
     #[test]

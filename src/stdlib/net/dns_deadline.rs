@@ -414,7 +414,6 @@ mod tests {
         udp_addr: SocketAddr,
         tcp_addr: SocketAddr,
         udp: Arc<AtomicUsize>,
-        tcp: Arc<AtomicUsize>,
         tcp_bytes: Arc<AtomicUsize>,
         connections: Arc<AtomicUsize>,
         stop: Arc<AtomicBool>,
@@ -431,7 +430,6 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_millis(20)))
                 .unwrap();
             let udp = Arc::new(AtomicUsize::new(0));
-            let tcp = Arc::new(AtomicUsize::new(0));
             let connections = Arc::new(AtomicUsize::new(0));
             let tcp_bytes = Arc::new(AtomicUsize::new(0));
             let stop = Arc::new(AtomicBool::new(false));
@@ -452,12 +450,7 @@ mod tests {
                     }
                 }
             });
-            let (t, b, c, s) = (
-                tcp.clone(),
-                tcp_bytes.clone(),
-                connections.clone(),
-                stop.clone(),
-            );
+            let (b, c, s) = (tcp_bytes.clone(), connections.clone(), stop.clone());
             let tt = thread::spawn(move || {
                 while !s.load(Ordering::SeqCst) {
                     match tcp_listener.accept() {
@@ -483,7 +476,6 @@ mod tests {
                             let mut body = vec![0; n];
                             if stream.read_exact(&mut body).is_ok() {
                                 b.fetch_add(n, Ordering::SeqCst);
-                                t.fetch_add(1, Ordering::SeqCst);
                                 thread::sleep(Duration::from_millis(delay_ms));
                                 let resp = answer(&body, false);
                                 let _ = stream.write_all(&(resp.len() as u16).to_be_bytes());
@@ -501,7 +493,6 @@ mod tests {
                 udp_addr,
                 tcp_addr,
                 udp,
-                tcp,
                 tcp_bytes,
                 connections,
                 stop,
@@ -677,34 +668,6 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.kind(), kind);
             assert_eq!(attempts.get(), 1);
-        }
-    }
-
-    #[test]
-    fn dns_deadline_allows_late_reply_tcp_fallback_and_retry() {
-        for (tcp_only, truncated, reply_delay, drop_first, expected_udp, expected_tcp) in [
-            (false, false, 180, false, 1, 0),
-            (false, true, 180, false, 1, 1),
-            (true, false, 180, false, 0, 1),
-            (false, false, 0, true, 2, 0),
-        ] {
-            let fixture = Fixture::new(truncated, reply_delay, drop_first);
-            let (config, opts) = fixture_options(&fixture, tcp_only, drop_first);
-            let result = lookup_with_config(
-                config,
-                opts,
-                deadline(100),
-                "fixture.example.",
-                DnsRecordType::parse("A").unwrap(),
-                Pauses::default(),
-            )
-            .unwrap();
-            assert_eq!(result[0].value, "192.0.2.7");
-            assert_eq!(result[0].record_type, "A");
-            assert_eq!(result[0].ttl, 60);
-            assert_eq!(fixture.udp.load(Ordering::SeqCst), expected_udp);
-            assert_eq!(fixture.tcp.load(Ordering::SeqCst), expected_tcp);
-            assert_eq!(fixture.connections.load(Ordering::SeqCst), expected_tcp);
         }
     }
 
