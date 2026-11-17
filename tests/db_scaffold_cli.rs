@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const SQLITE_SECRETS: [&str; 3] = [
     "APP_DATABASE_FILE",
@@ -866,9 +866,11 @@ fn sqlite_scaffold_runs_the_documented_plan_approve_migrate_loop() {
 #[test]
 fn a_stalled_cli_child_is_stopped_at_its_deadline() {
     let root = tempfile::tempdir().unwrap();
+    // An hour: the child cannot exit on its own while this test runs, so only
+    // the deadline under test can end it, however slow the machine is.
     std::fs::write(
         root.path().join("stall.tnt"),
-        "import { sleep } from \"std/time\"\nsleep(20000)\n",
+        "import { sleep } from \"std/time\"\nsleep(3600000)\n",
     )
     .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_ntnt"));
@@ -876,13 +878,20 @@ fn a_stalled_cli_child_is_stopped_at_its_deadline() {
         .args(["run", "stall.tnt"])
         .env_remove("NTNT_ENV")
         .current_dir(root.path());
-    let started = Instant::now();
-    let result = bounded_output::output_within(&mut command, Duration::from_secs(1));
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "the stalled child was not stopped at its deadline ({elapsed:?})"
-    );
+    // output_within returns only after killing and reaping the child. Without the
+    // deadline or the kill it would wait an hour, so the hang guard every child in
+    // this file gets (`DEADLINE`) fails the test instead.
+    let (done, returned) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(bounded_output::output_within(
+            &mut command,
+            Duration::from_secs(1),
+        ));
+    });
+    let result = returned
+        .recv_timeout(bounded_output::DEADLINE)
+        .expect("output_within did not stop the stalled child at its deadline");
     let failure = result.expect_err("a child past its deadline fails the test");
     assert!(failure.contains("did not exit within"), "{failure}");
+    assert!(failure.contains("it was killed"), "{failure}");
 }
