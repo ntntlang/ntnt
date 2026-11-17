@@ -9,6 +9,7 @@ mod input_file;
 mod inventory;
 mod model;
 mod postgres;
+mod postgres_tls;
 mod report;
 mod sqlite;
 mod sqlite_file;
@@ -39,7 +40,8 @@ impl Diagnostic {
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
             "DB_SECRET" => "Declare the named connection secret under [secrets.<NAME>] in ntnt.toml and make it resolvable through the configured std/secrets provider (development: an environment variable with that exact name; production: NTNT_SECRETS_PROVIDER=unix-socket). Never pass a connection URL on the command line.",
-            "DB_CONNECTION_CONFIG" => "Make the failing PostgreSQL connection secret (target or scratch) name exactly one explicit host, the user and dbname declared as that endpoint's role and database, and sslmode=disable on a trusted local transport (loopback or a Unix socket), with no startup options. TLS is not yet supported (see #344); never send credentials over an untrusted network.",
+            "DB_CONNECTION_CONFIG" => "Make the failing PostgreSQL connection secret (target or scratch) name exactly one explicit host, the user and dbname declared as that endpoint's role and database, and an explicit sslmode, with no startup options. Use sslmode=verify-full for any network path (host CA store by default, or sslrootcert=/absolute/path/ca.pem for a private CA); verify-ca only when the host name cannot match the certificate, and only with sslrootcert=/absolute/path/ca.pem naming the CA that issued it (never the host CA store); require only to accept an unverified server; disable only on a trusted local transport such as loopback, a Unix socket or a private container network.",
+            "DB_TLS" => "Check the server certificate against the configured trust. verify-full checks the chain and the host name against the host CA store, or only against the CAs in sslrootcert=/absolute/path/ca.pem (put a managed provider's CA bundle there). Use verify-ca, with sslrootcert naming the CA that issued the server certificate, only when the host name cannot match. A server without TLS is never used in plaintext: enable TLS on the server, or choose sslmode=disable explicitly for a trusted local transport.",
             "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
             "DB_ATTEMPT_UNRESOLVED" => "An earlier migrate stopped during a non-transactional migration. Make sure no migrate or index build is still running, then run `ntnt db reconcile --plan <the same approved plan>`; it records the outcome it observes or rolls the attempt back. Nothing else runs until then.",
             "DB_ATTEMPT_ACTIVE" => "The index build is still running in another session. Wait for it to finish or cancel that backend, then reconcile again.",
@@ -190,6 +192,22 @@ fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value
     file.sync_all().map_err(|_| output_error())
 }
 
+/// One-line human summary of a PostgreSQL session's transport.
+fn describe_transport(transport: &serde_json::Value) -> String {
+    let version = transport["tls_version"]
+        .as_str()
+        .map(|v| format!(", {v}"))
+        .unwrap_or_default();
+    match transport["sslmode"].as_str().unwrap_or("unknown") {
+        "disable" => "plaintext (sslmode=disable; trusted local transport only)".into(),
+        "require" => format!("TLS without server verification (sslmode=require){version}"),
+        mode => format!(
+            "TLS {mode}, {} roots{version}",
+            transport["roots"].as_str().unwrap_or("unknown")
+        ),
+    }
+}
+
 /// Synchronous CLI entry point: capture inputs, inspect/replay, and render one result.
 ///
 /// Only `migrate` may mutate the target, after independent approval and locked
@@ -337,6 +355,9 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 "Target: {} / {} ({})",
                 t["name"], t["schema"], t["identity"]["database"]
             );
+            if let Some(transport) = t["identity"].get("transport") {
+                println!("Transport: {}", describe_transport(transport));
+            }
         }
         if let Some(h) = report.get("history") {
             println!(
@@ -464,9 +485,22 @@ mod tests {
                 [
                     "target or scratch",
                     "one explicit host",
-                    "sslmode=disable",
+                    "sslmode=verify-full",
+                    "sslrootcert=",
+                    "verify-ca only when the host name cannot match the certificate, and only with sslrootcert=",
+                    "never the host CA store",
+                    "disable only on a trusted local transport",
                     "no startup options",
-                    "#344",
+                ]
+                .as_slice(),
+            ),
+            (
+                "DB_TLS",
+                [
+                    "host CA store",
+                    "sslrootcert=",
+                    "verify-ca, with sslrootcert",
+                    "never used in plaintext",
                 ]
                 .as_slice(),
             ),
