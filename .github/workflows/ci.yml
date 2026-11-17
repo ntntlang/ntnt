@@ -358,15 +358,23 @@ jobs:
   ci-status:
     name: CI Status
     if: always()
-    needs: [test, auth-backends, db-catalog, dependency-audit, lint, docs-and-examples, macos-release-socket]
+    needs: [changes, test, auth-backends, db-catalog, dependency-audit, lint, docs-and-examples, macos-release-socket]
     runs-on: ubuntu-latest
     steps:
       - name: Check CI results
         run: |
+          # Every other job but dependency-audit needs `changes` and is skipped
+          # when it fails, so a skipped result proves nothing unless it succeeded.
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "::error::Detect Changes did not succeed: ${{ needs.changes.result }}"
+            exit 1
+          fi
           results=("${{ needs.test.result }}" "${{ needs['auth-backends'].result }}" "${{ needs['db-catalog'].result }}" "${{ needs['dependency-audit'].result }}" "${{ needs.lint.result }}" "${{ needs['docs-and-examples'].result }}" "${{ needs['macos-release-socket'].result }}")
+          # Fail closed: only success and skipped pass. A job no runner picked up
+          # is reported as "abandoned", which is neither failure nor cancelled.
           for result in "${results[@]}"; do
-            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
-              echo "::error::CI job failed or was cancelled: $result"
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "::error::CI job did not succeed: $result"
               exit 1
             fi
           done
