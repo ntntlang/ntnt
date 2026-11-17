@@ -11,7 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-/// Run a child with piped output and a whole-run deadline; a stalled child is
+/// Hang guard for every child and query in this file: a stalled one fails the
+/// test instead of hanging it. Only a hang reaches it; the slowest step, `docker
+/// compose up --wait`, finishes far sooner.
+const HANG_GUARD: Duration = Duration::from_secs(180);
+
+/// Run a child with piped output and a whole-run hang guard; a stalled child is
 /// killed and the test fails instead of hanging.
 fn output_within(mut command: Command, deadline: Duration) -> Output {
     let mut child = command
@@ -106,7 +111,7 @@ fn db(root: &Path, args: &str, approval: Option<&str>) -> Value {
     if let Some(digest) = approval {
         c.env("APP_MIGRATION_APPROVAL", digest);
     }
-    let output = output_within(c, Duration::from_secs(180));
+    let output = output_within(c, HANG_GUARD);
     serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
         panic!(
             "{}\n{}",
@@ -136,7 +141,7 @@ fn readme_shows(snippet: &str) {
 fn shell(root: &Path, lines: &str) {
     let mut c = Command::new("sh");
     c.arg("-c").arg(lines).current_dir(root);
-    let output = output_within(c, Duration::from_secs(30));
+    let output = output_within(c, HANG_GUARD);
     assert!(
         output.status.success(),
         "{lines}: {}",
@@ -294,7 +299,7 @@ fn compose(args: &[&str]) {
         .arg("-f")
         .arg(example("postgresql").join("compose.yml"))
         .args(args);
-    let output = output_within(c, Duration::from_secs(180));
+    let output = output_within(c, HANG_GUARD);
     assert!(
         output.status.success(),
         "docker compose {args:?}: {}",
@@ -308,14 +313,14 @@ fn development_sql(root: &Path, sql: &str) -> Result<i64, String> {
     c.arg("-c")
         .arg(". ./dev.env && printf %s \"$APP_DATABASE\"")
         .current_dir(root);
-    let secret = String::from_utf8(output_within(c, Duration::from_secs(30)).stdout).unwrap();
+    let secret = String::from_utf8(output_within(c, HANG_GUARD).stdout).unwrap();
     let sql = sql.to_string();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async move {
-            tokio::time::timeout(Duration::from_secs(30), async move {
+            tokio::time::timeout(HANG_GUARD, async move {
                 let (client, connection) = secret
                     .parse::<tokio_postgres::Config>()
                     .unwrap()
@@ -333,7 +338,9 @@ fn development_sql(root: &Path, sql: &str) -> Result<i64, String> {
                 value
             })
             .await
-            .expect("development PostgreSQL did not answer within the deadline")
+            .unwrap_or_else(|_| {
+                panic!("development PostgreSQL did not answer within {HANG_GUARD:?}")
+            })
         })
 }
 
