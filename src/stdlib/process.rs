@@ -257,8 +257,13 @@ impl MacExitObserver {
             return Err(std::io::Error::last_os_error());
         }
         let queue = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_queue) };
-        // EVFILT_PROC reports an already-pending NOTE_EXIT without reaping the child,
-        // so registration remains safe even when a short-lived child exited first.
+        // XNU refuses to attach EVFILT_PROC to a child that has already exited and
+        // is waiting to be reaped (a zombie), with ESRCH. The child is ours and not
+        // reaped yet, so its PID cannot have been reused: ESRCH means it has exited.
+        let exited_already = |queue| Self {
+            queue,
+            exited: AtomicBool::new(true),
+        };
         let change = libc::kevent {
             ident: child.id() as libc::uintptr_t,
             filter: libc::EVFILT_PROC,
@@ -283,10 +288,18 @@ impl MacExitObserver {
             )
         };
         if result == -1 {
-            return Err(std::io::Error::last_os_error());
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(exited_already(queue));
+            }
+            return Err(error);
         }
         if result == 1 && initial_event.flags & libc::EV_ERROR != 0 {
-            return Err(std::io::Error::from_raw_os_error(initial_event.data as i32));
+            let code = initial_event.data as i32;
+            if code == libc::ESRCH {
+                return Ok(exited_already(queue));
+            }
+            return Err(std::io::Error::from_raw_os_error(code));
         }
         let exited = result == 1
             && initial_event.ident == child.id() as libc::uintptr_t
