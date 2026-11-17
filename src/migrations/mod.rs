@@ -130,7 +130,21 @@ fn database_runtime<T>(
     deadline: std::time::Duration,
     future: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    database_runtime_on(
+        tokio::runtime::Builder::new_current_thread(),
+        deadline,
+        future,
+    )
+}
+
+/// `database_runtime` on a given current-thread builder. Tests pass one that
+/// starts with a paused clock.
+fn database_runtime_on<T>(
+    mut builder: tokio::runtime::Builder,
+    deadline: std::time::Duration,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let runtime = builder
         .enable_all()
         .build()
         .map_err(|_| Diagnostic::new("DB_RUNTIME", "Cannot create database I/O runtime."))?;
@@ -541,31 +555,54 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// Hang guard for waits in these tests; only a bug or a hang reaches it.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+
     #[test]
     fn the_outer_deadline_is_the_one_supplied() {
-        let start = std::time::Instant::now();
-        let error = super::database_runtime(std::time::Duration::from_millis(50), async {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            Ok(())
-        })
-        .unwrap_err();
+        use std::time::Duration;
+        // The runtime starts with a paused clock, which moves only when all
+        // work waits on timers and then straight to the next one. Work ending
+        // a second before the supplied deadline completes; work ending a
+        // second after it is cut off, whatever the scheduling. (The deadline
+        // used to be a fixed 120 seconds.)
+        let deadline = Duration::from_secs(30);
+        let run = |work: Duration| {
+            let mut paused = tokio::runtime::Builder::new_current_thread();
+            paused.start_paused(true);
+            super::database_runtime_on(paused, deadline, async move {
+                tokio::time::sleep(work).await;
+                Ok(())
+            })
+        };
+        assert!(run(deadline - Duration::from_secs(1)).is_ok());
+        let error = run(deadline + Duration::from_secs(1)).unwrap_err();
         assert_eq!(error.code, "DB_TIMEOUT");
-        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]
     fn runtime_cleanup_does_not_wait_for_uncancellable_resolver_work() {
-        let start = std::time::Instant::now();
-        super::database_runtime(std::time::Duration::from_secs(120), async {
-            let (started, wait) = tokio::sync::oneshot::channel();
-            tokio::task::spawn_blocking(move || {
-                let _ = started.send(());
-                std::thread::sleep(std::time::Duration::from_secs(1));
+        // The blocking work ends only once database_runtime has returned. If
+        // runtime teardown waited for it, database_runtime would never return.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (returned, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::database_runtime(std::time::Duration::from_secs(120), async {
+                let (started, wait) = tokio::sync::oneshot::channel();
+                tokio::task::spawn_blocking(move || {
+                    let _ = started.send(());
+                    let _ = released.recv();
+                });
+                wait.await.unwrap();
+                Ok(())
             });
-            wait.await.unwrap();
-            Ok(())
-        })
-        .unwrap();
-        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+            let _ = returned.send(result);
+        });
+        let result = finished.recv_timeout(HANG_GUARD);
+        // Let the blocking work end on every path.
+        let _ = release.send(());
+        result
+            .expect("database_runtime must return while the blocking work still runs")
+            .unwrap();
     }
 }

@@ -459,9 +459,36 @@ fn spawn_plan(f: &Fixture, path: &str, plan: &Value) -> std::process::Child {
         .spawn()
         .unwrap()
 }
-fn wait_locked(f: &mut Fixture, count: i64) {
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+/// Hang guard for waiting on `migrate` or on a PostgreSQL state: only a bug
+/// or a hang reaches it. It stays below the 90-second default statement
+/// limit, so a lowered limit that is not applied fails as a hang.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+/// A deliberate minimum hold of a lock a migration waits for: longer than
+/// the 2-second low limits below and the 5-second session, client and
+/// migrator-wait defaults that configured limits replace. Every limit such
+/// a test must not hit is `raised`, ten times this hold.
+const PAST_THE_DEFAULTS: std::time::Duration = std::time::Duration::from_secs(6);
+/// `field = ` ten times PAST_THE_DEFAULTS, for a `[databases.app.limits]` table.
+fn raised(field: &str) -> String {
+    format!("{field} = {}", 10 * PAST_THE_DEFAULTS.as_secs())
+}
+/// Poll `probe` until it returns a value; only a bug or a hang reaches
+/// HANG_GUARD.
+fn wait_for<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+    let until = std::time::Instant::now() + HANG_GUARD;
     loop {
+        if let Some(value) = probe() {
+            return value;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "{what} not seen within {HANG_GUARD:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+fn wait_locked(f: &mut Fixture, count: i64) {
+    wait_for("migration waiting for a lock", || {
         let waiting: i64 = f
             .admin
             .query_one(
@@ -470,29 +497,38 @@ fn wait_locked(f: &mut Fixture, count: i64) {
             )
             .unwrap()
             .get(0);
-        if waiting >= count {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < until,
-            "migration did not reach owned lock"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+        (waiting >= count).then_some(())
+    });
+}
+/// The one target session waiting for a lock: its pid, the start of its
+/// transaction and its query.
+fn lock_waiter(f: &mut Fixture) -> (i32, Option<String>, String) {
+    wait_for("a target session waiting for a lock", || {
+        let rows = f
+            .admin
+            .query(
+                "SELECT pid, xact_start::text, query FROM pg_stat_activity WHERE usename=$1 AND wait_event_type='Lock'",
+                &[&f.target],
+            )
+            .unwrap();
+        assert!(rows.len() <= 1, "{} sessions wait for a lock", rows.len());
+        rows.first().map(|row| (row.get(0), row.get(1), row.get(2)))
+    })
 }
 fn result(child: std::process::Child) -> Value {
     let out = child.wait_with_output().unwrap();
     serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)))
 }
-/// `result`, but kill the process and fail if it runs longer than `limit`.
-fn result_within(mut child: std::process::Child, limit: std::time::Duration) -> Value {
-    let until = std::time::Instant::now() + limit;
+/// `result`, but kill the process and fail if it is still running after
+/// HANG_GUARD.
+fn result_within(mut child: std::process::Child) -> Value {
+    let until = std::time::Instant::now() + HANG_GUARD;
     while child.try_wait().unwrap().is_none() {
         if std::time::Instant::now() >= until {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("migrate still running after {limit:?}");
+            panic!("migrate still running after {HANG_GUARD:?}");
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -1301,18 +1337,37 @@ fn migrations_do_not_lock_unrelated_tables() {
     writer.batch_execute("COMMIT").unwrap();
 }
 
-/// Hold `mode` on `app.t` while `migrate` runs the upgrade, release it after
-/// 2.5 seconds and check that the 1-second lock timeout retried through it.
-fn retries_through_a_brief_lock(f: &mut Fixture, plan: &Value, mode: &str) -> Value {
+/// Hold `mode` on `app.t` while `migrate` runs the upgrade; the statement
+/// that waits for it contains `waits_in`. Keep the lock until that
+/// statement's transaction has ended, which while the lock is held only the
+/// 1-second lock timeout (or a failure) can do, then release it and check
+/// that the whole migration transaction was retried and committed.
+fn retries_through_a_brief_lock(
+    f: &mut Fixture,
+    plan: &Value,
+    mode: &str,
+    waits_in: &str,
+) -> Value {
     let mut locker = f.target();
     locker
         .batch_execute(&format!("BEGIN; LOCK TABLE app.t IN {mode} MODE"))
         .unwrap();
     let child = spawn_apply(f, plan);
-    wait_locked(f, 1);
-    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let (pid, transaction, query) = lock_waiter(f);
+    assert!(query.contains(waits_in), "{query}");
+    wait_for("the end of the waiting transaction", || {
+        let current: Option<Option<String>> = f
+            .admin
+            .query_opt(
+                "SELECT xact_start::text FROM pg_stat_activity WHERE pid=$1",
+                &[&pid],
+            )
+            .unwrap()
+            .map(|row| row.get(0));
+        (current != Some(transaction.clone())).then_some(())
+    });
     locker.batch_execute("COMMIT").unwrap();
-    let r = result(child);
+    let r = result_within(child);
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["progress"][1]["state"], "committed", "{r}");
     assert!(
@@ -1330,7 +1385,7 @@ fn brief_lock_conflicts_are_retried() {
     // ACCESS EXCLUSIVE also blocks the catalog inspection (pg_get_indexdef),
     // so this wait comes before the script.
     let (mut f, plan) = upgrade_fixture();
-    retries_through_a_brief_lock(&mut f, &plan, "ACCESS EXCLUSIVE");
+    retries_through_a_brief_lock(&mut f, &plan, "ACCESS EXCLUSIVE", "pg_get_indexdef");
 }
 
 #[test]
@@ -1341,7 +1396,7 @@ fn brief_lock_conflicts_are_retried_at_the_lowest_statement_limit() {
     // before the statement limit, which counts from the start of the
     // statement: a statement timeout (57014) is not retried.
     let (mut f, plan) = upgrade_fixture_with_limits(Some("statement_seconds = 2"));
-    let r = retries_through_a_brief_lock(&mut f, &plan, "SHARE");
+    let r = retries_through_a_brief_lock(&mut f, &plan, "SHARE", "ADD COLUMN label");
     assert_eq!(r["limits"]["statement_seconds"], 2, "{r}");
 }
 
@@ -2034,17 +2089,36 @@ fn statement_timed_out(r: &Value) -> bool {
     })
 }
 
+/// The script records the statement limit it runs under, then waits for
+/// advisory lock 346 with no lock timeout, so a test holding that lock on
+/// the target decides how long it runs. Replay on the scratch database does
+/// not wait: advisory locks are per database.
+const WAITS_FOR_THE_TEST: &str = "CREATE TABLE app.t(id INTEGER, statement_limit TEXT); INSERT INTO app.t VALUES (1, pg_catalog.current_setting('statement_timeout')); SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(346);";
+/// The statement limits recorded in `app.t`, in seconds, by id.
+fn recorded_limits(f: &Fixture) -> Vec<i64> {
+    f.target()
+        .query(
+            "SELECT extract(epoch FROM statement_limit::interval)::bigint FROM app.t ORDER BY id",
+            &[],
+        )
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn statement_limit_bounds_scripts_and_a_raised_limit_needs_a_new_plan() {
     // Scaled stand-in for a migration that outgrows the default limit on a
-    // large table: 2 seconds (the lowest accepted) plays the default, 6
-    // seconds the raised limit.
-    let f = Fixture::new();
-    f.sql(
-        "0001_slow.sql",
-        "CREATE TABLE app.t(id INTEGER); SELECT pg_catalog.pg_sleep(3);",
-    );
+    // large table: 2 seconds (the lowest accepted) plays the default, and a
+    // raised limit lets the same script run past it.
+    let mut f = Fixture::new();
+    f.sql("0001_slow.sql", WAITS_FOR_THE_TEST);
+    let mut holder = f.target();
+    holder
+        .batch_execute("SELECT pg_advisory_lock(346)")
+        .unwrap();
     set_limits(&f, "statement_seconds = 2");
     // Replay on the empty scratch database keeps the default limit.
     let low = f.plan("low.json");
@@ -2053,7 +2127,8 @@ fn statement_limit_bounds_scripts_and_a_raised_limit_needs_a_new_plan() {
         serde_json::json!({"statement_seconds": 2, "migrator_wait_seconds": 5}),
         "{low}"
     );
-    let r = f.apply("low.json", low["plan_digest"].as_str());
+    // The lock is held until after the outcome: only the limit ends the wait.
+    let r = result_within(spawn_plan(&f, "low.json", &low));
     assert!(statement_timed_out(&r), "{r}");
     assert_eq!(r["progress"][0]["state"], "failed", "{r}");
     assert_eq!(r["cleanup"], "pass", "{r}");
@@ -2068,28 +2143,49 @@ fn statement_limit_bounds_scripts_and_a_raised_limit_needs_a_new_plan() {
         .unwrap()
         .get::<_, bool>(0));
     // A changed limit is a changed policy: the reviewed plan is stale.
-    set_limits(&f, "statement_seconds = 6");
+    set_limits(&f, &raised("statement_seconds"));
     let stale = f.apply("low.json", low["plan_digest"].as_str());
     assert!(code(&stale, "DB_PLAN_STALE"), "{stale}");
     let against = f.command_args("verify", &["--against", "low.json"]);
     assert_eq!(against["plan_validation"]["outcome"], "fail", "{against}");
-    let raised = f.plan("raised.json");
-    let r = f.apply("raised.json", raised["plan_digest"].as_str());
+    let raised_plan = f.plan("raised.json");
+    let child = spawn_plan(&f, "raised.json", &raised_plan);
+    let (_, _, query) = lock_waiter(&mut f);
+    assert!(query.contains("pg_advisory_xact_lock(346)"), "{query}");
+    // Keep the script running past the low limit and the 5-second defaults.
+    std::thread::sleep(PAST_THE_DEFAULTS);
+    holder
+        .batch_execute("SELECT pg_advisory_unlock_all()")
+        .unwrap();
+    let r = result_within(child);
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+    let raised_seconds = 10 * PAST_THE_DEFAULTS.as_secs();
     assert_eq!(
         r["limits"],
-        serde_json::json!({"statement_seconds": 6, "migrator_wait_seconds": 5,
-            "work_deadline_seconds": 100, "total_deadline_seconds": 120}),
+        serde_json::json!({"statement_seconds": raised_seconds,
+            "migrator_wait_seconds": 5, "work_deadline_seconds": 100,
+            "total_deadline_seconds": 120}),
         "{r}"
     );
+    // Each script runs under exactly the limit its plan binds: the raised
+    // one above, and the low one for a script planned with it.
+    f.sql(
+        "0002_record.sql",
+        "INSERT INTO app.t VALUES (2, pg_catalog.current_setting('statement_timeout'));",
+    );
+    set_limits(&f, "statement_seconds = 2");
+    let record = f.plan("record.json");
+    let r = f.apply("record.json", record["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(recorded_limits(&f), [raised_seconds as i64, 2]);
 }
 
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn statement_limit_bounds_a_concurrent_index_build() {
-    // A build that waits on a busy table, scaled: past a 2-second limit it
-    // fails and cleans up as before; with 8 seconds the same wait fits.
+    // A build that waits on a busy table, scaled: at a 2-second limit it
+    // fails and cleans up as before; a raised limit lets it wait past that.
     let mut f = Fixture::new();
     f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
     let initial = f.plan("initial.json");
@@ -2104,32 +2200,30 @@ fn statement_limit_bounds_a_concurrent_index_build() {
     set_limits(&f, "statement_seconds = 2");
     let low = f.plan("low.json");
     // SHARE conflicts with the build's SHARE UPDATE EXCLUSIVE, so the build
-    // waits before it creates anything.
+    // waits before it creates anything. The lock is held until after the
+    // outcome, so only the limit ends the wait; the 90-second default would
+    // run into HANG_GUARD.
     let mut holder = f.target();
     holder
         .batch_execute("BEGIN; LOCK TABLE app.t IN SHARE MODE")
         .unwrap();
-    // Well under the 90-second default the build would otherwise wait for.
-    let r = result_within(
-        spawn_plan(&f, "low.json", &low),
-        std::time::Duration::from_secs(8),
-    );
+    let r = result_within(spawn_plan(&f, "low.json", &low));
     assert!(statement_timed_out(&r), "{r}");
     assert_eq!(r["progress"][1]["state"], "failed", "{r}");
     assert_eq!(r["progress"][1]["cleanup"], "pass", "{r}");
     assert_eq!(index_state(&f, "t_id"), None);
     assert_eq!(ledger_rows(&f), 1, "the failed attempt is removed");
-    set_limits(&f, "statement_seconds = 8");
-    let raised = f.plan("raised.json");
-    let start = std::time::Instant::now();
-    let child = spawn_plan(&f, "raised.json", &raised);
-    wait_locked(&mut f, 1);
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    set_limits(&f, &raised("statement_seconds"));
+    let raised_plan = f.plan("raised.json");
+    let child = spawn_plan(&f, "raised.json", &raised_plan);
+    let (_, _, query) = lock_waiter(&mut f);
+    assert!(query.contains("CREATE INDEX CONCURRENTLY"), "{query}");
+    // Keep the build waiting past the low limit and the 5-second defaults.
+    std::thread::sleep(PAST_THE_DEFAULTS);
     holder.batch_execute("COMMIT").unwrap();
-    let r = result(child);
+    let r = result_within(child);
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["progress"][1]["state"], "committed", "{r}");
-    assert!(start.elapsed() >= std::time::Duration::from_secs(3));
     assert_eq!(index_state(&f, "t_id"), Some(true));
     assert_eq!(f.command("verify")["outcome"], "pass");
 }
@@ -2143,31 +2237,33 @@ fn migrator_wait_bounds_the_wait_for_a_competing_migrator() {
     other
         .batch_execute("SELECT pg_advisory_lock(1853124212,245)")
         .unwrap();
-    // Shorter than the 5-second default: give up after about a second.
+    // Shorter than the 5-second default. The competitor keeps the lock until
+    // after the outcome, so the wait runs out, as a lock conflict: not the
+    // statement timeout that used to cut it off (57014) or the client
+    // deadline.
     set_limits(&f, "migrator_wait_seconds = 1");
     let short = f.plan("short.json");
-    let start = std::time::Instant::now();
-    let r = f.apply("short.json", short["plan_digest"].as_str());
+    let r = result_within(spawn_plan(&f, "short.json", &short));
     assert!(code(&r, "DB_LOCK_CONFLICT"), "{r}");
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(4),
-        "{:?}",
-        start.elapsed()
-    );
+    assert!(!statement_timed_out(&r) && !code(&r, "DB_TIMEOUT"), "{r}");
     assert_eq!(r["progress"][0]["state"], "not_run", "{r}");
-    // Longer than the default: outwait a competitor that keeps the lock for
-    // more than 5 seconds.
-    set_limits(&f, "migrator_wait_seconds = 10");
+    assert_eq!(r["limits"]["migrator_wait_seconds"], 1, "{r}");
+    // Longer than the old 5-second cap on this wait (its lock, statement and
+    // client limits): outwait a competitor that keeps the lock for
+    // PAST_THE_DEFAULTS after the migrator is seen waiting for it.
+    set_limits(&f, &raised("migrator_wait_seconds"));
     let patient = f.plan("patient.json");
-    let start = std::time::Instant::now();
     let child = spawn_plan(&f, "patient.json", &patient);
-    wait_locked(&mut f, 1);
-    std::thread::sleep(std::time::Duration::from_millis(6500).saturating_sub(start.elapsed()));
+    let (_, _, query) = lock_waiter(&mut f);
+    assert!(
+        query.contains("pg_advisory_lock(1853124212, 245)"),
+        "{query}"
+    );
+    std::thread::sleep(PAST_THE_DEFAULTS);
     other
         .batch_execute("SELECT pg_advisory_unlock_all()")
         .unwrap();
-    let r = result(child);
+    let r = result_within(child);
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["progress"][0]["state"], "committed", "{r}");
-    assert!(start.elapsed() >= std::time::Duration::from_secs(6));
 }
