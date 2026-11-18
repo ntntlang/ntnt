@@ -24,6 +24,12 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   existing `ntnt.exe` until the new one runs; it no longer builds from source when
   the download fails, and never reuses or overwrites `.\ntnt`.
 
+### Fixed
+
+- `ntnt test` waits until the app's server is listening before sending requests,
+  so slow-starting apps no longer fail their first requests; `--port 0` picks a free
+  port.
+
 ## 0.6.2
 
 See the [versioned announcement and upgrade guidance](docs/release-notes/v0.6.2.md).

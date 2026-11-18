@@ -64,6 +64,9 @@ newlines. Relative links, fragments and `to_html()` are unchanged.
   install stays. It no longer builds from source when the download fails, never
   reuses or overwrites an existing `.\ntnt` directory, and fetches the starter kit
   from the release tag instead of `main`.
+- `ntnt test` sends its requests once the app's server is listening, instead of
+  after a fixed short wait, so an app that is slow to start no longer fails its
+  first requests; `--port 0` now picks a free port.
 - Process tests keep their fixtures in private temporary directories.
 
 ## Upgrade notes
