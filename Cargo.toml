@@ -106,7 +106,11 @@ chrono-tz = "0.10.4"
 
 # Redis/Valkey KV store. `tls-rustls` (rustls without default features, so the
 # ring provider only; no async runtime integration) serves rediss:// and valkeys://.
-redis = { version = "0.27", features = ["tls-rustls"] }
+# tls-rustls-webpki-roots (it implies tls-rustls) compiles out redis's per-connection
+# load of the OS CA store, which fails every rediss:// connect on one entry rustls
+# cannot parse. Its bundled roots are never used: src/stdlib/redis_tls.rs always
+# supplies the host CA store, and redis uses those roots instead of the bundle.
+redis = { version = "0.27", features = ["tls-rustls-webpki-roots"] }
 
 # JWT for auth
 # jsonwebtoken 10 requires an explicit signing/verification provider.

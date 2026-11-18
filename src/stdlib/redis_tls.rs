@@ -70,6 +70,9 @@ fn client_with_roots(
         redis::ConnectionAddr::TcpTls { insecure: true, .. } => Err(
             "TLS certificate verification cannot be disabled: remove #insecure from the rediss:// or valkeys:// URL, or use redis:// for plaintext.".to_string(),
         ),
+        // Supplied roots replace redis's default store, so verification uses
+        // exactly the host CA store. The webpki-roots feature only keeps redis
+        // from loading the OS store again on every connect (see Cargo.toml).
         redis::ConnectionAddr::TcpTls { .. } => redis::Client::build_with_tls(
             info,
             redis::TlsCertificates {

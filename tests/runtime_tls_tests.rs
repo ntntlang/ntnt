@@ -563,6 +563,27 @@ fn kv_rediss_and_valkeys_verify_the_certificate_against_the_host_ca_store() {
     assert_eq!(next(&seen), RedisSeen::HandshakeFailed);
 }
 
+/// One host CA entry that rustls cannot parse must not break rediss://: the
+/// host CA store skips it, and Redis verifies against those roots only.
+#[test]
+fn kv_rediss_ignores_a_malformed_host_ca_entry() {
+    let trusted = pki(&["127.0.0.1"]);
+    let (port, seen) = redis_server(Some(trusted.server.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("host-store.pem");
+    let mut bundle = std::fs::read_to_string(&trusted.ca).unwrap();
+    // Valid PEM framing around bytes that are not a certificate.
+    bundle.push_str("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n");
+    std::fs::write(&store, bundle).unwrap();
+    let url = format!("rediss://127.0.0.1:{port}/0");
+    let output = run_script(KV_SCRIPT, &store, &[("NTNT_TLS_TEST_KV", url)]);
+    assert!(output.contains("read: hello over tls"), "{output}");
+    match next(&seen) {
+        RedisSeen::Tls(commands) => assert!(commands.iter().any(|c| c == "SET"), "{commands:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn kv_rediss_checks_the_host_name() {
     // Trusted CA, but the certificate names another host than the URL's 127.0.0.1.
