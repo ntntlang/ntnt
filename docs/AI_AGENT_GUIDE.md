@@ -21,7 +21,7 @@ ntnt --version  # Verify: should print ntnt 0.4.6 or later
 
 ### TLS Trust and Host Certificates
 
-`std/net.tls_info`, HTTPS `std/http.probe_fetch`, and SMTP TLS use the host's CA certificates instead of a root bundle compiled into NTNT. Ordinary `fetch`/`download` already use native/system TLS. TLS transports, hostname checking, and the patched verifier's compromised-key protection remain enabled; importing host roots does not reproduce every OS/browser revocation or distrust policy.
+`std/net.tls_info`, HTTPS `std/http.probe_fetch`, SMTP TLS, PostgreSQL `verify-full` (`ntnt db`, `std/db/postgres`, the auth store) and Redis/Valkey `rediss://` use the host's CA certificates instead of a root bundle compiled into NTNT. Ordinary `fetch`/`download` already use native/system TLS. TLS transports, hostname checking, and the patched verifier's compromised-key protection remain enabled; importing host roots does not reproduce every OS/browser revocation or distrust policy.
 
 - Maintain the operating system's CA store. Linux runtime/container images need a CA package such as `ca-certificates`; a container does not automatically inherit its physical host's certificates. Windows/macOS use their platform certificate stores.
 - The Rustls paths above honor `SSL_CERT_FILE` and `SSL_CERT_DIR`. Set them before first TLS use if you need a specific PEM file/directory; explicit paths replace native discovery rather than silently supplement it with bundled public roots.
@@ -1809,6 +1809,39 @@ When admitting a new target at capacity, the registry closes the least-recently-
 
 **Migration:** applications using more than 32 simultaneously live targets must set a larger positive cap intentionally. Prefer stable, trusted, env-backed URLs rather than request-supplied connection strings. Always close logical handles when finished; this pool cap does not bound leaked logical handles. Explicitly commit or roll back transactions before `close()`—closing a logical handle is not a substitute for transaction cleanup. Registry metadata uses hashed keys, never raw credential-bearing URLs.
 
+### Runtime TLS (PostgreSQL, Redis/Valkey)
+
+`std/db/postgres` `connect()` and every PostgreSQL auth-store connection read libpq's `sslmode` and `sslrootcert` from the connection string. The certificate is checked against the host CA store (see [TLS Trust and Host Certificates](#tls-trust-and-host-certificates)) or, with `sslrootcert=/absolute/path/ca.pem`, against exactly the CAs in that file:
+
+| `sslmode` | Transport |
+|-----------|-----------|
+| `verify-full` | TLS; certificate chain **and** host name verified (recommended for any network path) |
+| `verify-ca` | TLS; chain only, for a host name the certificate cannot match. Requires `sslrootcert=/absolute/path/ca.pem` |
+| `require` | TLS without server verification (explicit opt-in: encrypted, but not authenticated) |
+| `disable` | Plaintext, for a trusted local transport |
+| `prefer`, `allow` | Rejected with `Err`: they can fall back to plaintext |
+| *(absent)* | Plaintext only when **every** host is local: `127.0.0.1`/`::1` (any loopback address), `localhost`, a Unix socket (`host=/var/run/postgresql`), or a single-label name such as a Docker Compose service (`db`, `postgres`). Any other host (`db.example.com`, `10.0.0.5`) gets `verify-full` against the host CA store. `sslrootcert` alone also selects `verify-full`. |
+
+Every TLS mode requires TLS from the server: a server that refuses TLS is an error (`The server does not accept TLS connections. No plaintext fallback was attempted.`), never a plaintext retry. Errors never echo the connection string. Client certificates (`sslcert`/`sslkey`) are not supported, and TLS over a Unix socket is rejected (PostgreSQL serves sockets in plaintext). The shared pool's identity includes the TLS policy, so the same server reached with a different `sslmode` or CA file gets its own pool. Trust is read when a pool (or the auth store) is first opened; restart after changing the CA store or the `sslrootcert` file.
+
+```ntnt
+// Managed PostgreSQL with a provider CA bundle
+let db = unwrap(connect("postgres://app:secret@db.example.com/app?sslmode=verify-full&sslrootcert=/etc/ssl/certs/provider-ca.pem"))
+// Public CA: the host CA store is enough
+let db = unwrap(connect("postgres://app:secret@db.example.com/app?sslmode=verify-full"))
+// Docker Compose service on a private network: plaintext by default; say so explicitly if you like
+let db = unwrap(connect("postgres://app:secret@db/app?sslmode=disable"))
+```
+
+**Upgrading from 0.6.2 or earlier:** connections used to be plaintext whatever the URL said. A connection string without `sslmode` whose host is a fully qualified name or a non-loopback IP now requires verified TLS. If such a server has no TLS (or a certificate the host store does not trust), either enable TLS (and add `sslrootcert=` for a private CA) or add `sslmode=disable` for a trusted private network. `sslmode=prefer`/`allow` must be replaced by an explicit mode. `ntnt db` keeps its stricter rule: its connection secrets must name `sslmode` explicitly.
+
+Redis/Valkey URLs (`std/kv` `open()`, `std/jobs` `configure_queue` stores and auth `session_store`) choose the transport by scheme: `redis://` and `valkey://` are plaintext; `rediss://` and `valkeys://` use TLS, verifying the chain against the host CA store (`SSL_CERT_FILE`/`SSL_CERT_DIR` select a private CA) and the certificate against the URL's host name. There is no unverified mode: a `#insecure` fragment is rejected. A TLS URL never falls back to plaintext.
+
+```ntnt
+let cache = unwrap(open("rediss://:secret@cache.example.com:6380/0"))   // verified TLS
+let local = unwrap(open("redis://localhost:6379"))                       // plaintext
+```
+
 ```ntnt
 import { connect, query, execute, close } from "std/db/postgres"
 
@@ -2207,6 +2240,8 @@ fn get(req) {
 Boundary rule: use `std/auth` for auth flows, sessions, CSRF, current-user helpers, and TOTP. Use `std/crypto` for generic crypto helpers like `uuid`, `hash_password`, and `verify_password`.
 
 Full OAuth, session management, CSRF, JWT, TOTP, and local credential bootstrap, setup completion, password reset, and verification support.
+
+Persistent `session_store` URLs follow the [Runtime TLS](#runtime-tls-postgresql-redisvalkey) rules: `postgres://` stores honor `sslmode` (verify-full by default for non-local hosts), `rediss://` and `valkeys://` use verified TLS, and `redis://`/`valkey://` are plaintext. Session rows can hold retained OAuth tokens, so use TLS for any store reached over a network.
 
 ### PostgreSQL auth bootstrap and runtime privileges
 
@@ -2682,7 +2717,7 @@ There is no `login_url` option. Local-only apps pass an empty provider array and
 
 ## Key-Value Store (`std/kv`)
 
-Redis/Valkey or SQLite-backed key-value store with TTL support.
+Redis/Valkey or SQLite-backed key-value store with TTL support. `rediss://` and `valkeys://` URLs use verified TLS; `redis://` and `valkey://` are plaintext (see [Runtime TLS](#runtime-tls-postgresql-redisvalkey)).
 
 ```ntnt
 import { open, get as kv_get, set, del, has, list, expire, ttl } from "std/kv"

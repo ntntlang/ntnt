@@ -879,6 +879,90 @@ mod tests {
     }
 
     #[test]
+    fn runtime_split_defaults_only_a_missing_sslmode() {
+        let local = |_: &str| Ok(Mode::Disable);
+        let remote = |_: &str| Ok(Mode::VerifyFull);
+        // The default sees the remainder without TLS keywords.
+        let seen = std::cell::RefCell::new(String::new());
+        let (rest, tls) = split_with_default("host=db user=u dbname=d", |rest| {
+            seen.replace(rest.to_string());
+            Ok(Mode::Disable)
+        })
+        .unwrap();
+        assert_eq!(seen.into_inner(), "host=db user=u dbname=d");
+        assert_eq!(
+            (rest.as_str(), tls.mode),
+            ("host=db user=u dbname=d", Mode::Disable)
+        );
+        let (_, tls) = split_with_default("host=db.example.com", remote).unwrap();
+        assert_eq!(
+            (tls.mode, tls.roots),
+            (Mode::VerifyFull, Some(RootSource::System))
+        );
+        // An explicit sslmode is never replaced by the default.
+        for (secret, mode) in [
+            ("host=h sslmode=disable", Mode::Disable),
+            ("host=h sslmode=require", Mode::Require),
+            ("postgres://u@h/d?sslmode=verify-full", Mode::VerifyFull),
+        ] {
+            let (_, tls) = split_with_default(secret, |_| panic!("default consulted")).unwrap();
+            assert_eq!(tls.mode, mode, "{secret}");
+        }
+        // A CA file or `system` selects verify-full even where the default is plaintext.
+        let (_, tls) =
+            split_with_default(&format!("host=h sslrootcert={}", absolute("ca.pem")), local)
+                .unwrap();
+        assert_eq!(
+            (tls.mode, tls.roots),
+            (
+                Mode::VerifyFull,
+                Some(RootSource::File(absolute("ca.pem").into()))
+            )
+        );
+        let (_, tls) = split_with_default("host=h sslrootcert=system", local).unwrap();
+        assert_eq!(
+            (tls.mode, tls.roots),
+            (Mode::VerifyFull, Some(RootSource::System))
+        );
+        // Downgradable and unknown modes stay rejected, as for ntnt db.
+        for rejected in [
+            "host=h sslmode=prefer",
+            "host=h sslmode=allow",
+            "host=h sslmode=verify",
+            "host=h sslmode=verify-ca",
+        ] {
+            assert_eq!(
+                split_with_default(rejected, local).unwrap_err().code,
+                "DB_CONNECTION_CONFIG",
+                "{rejected}"
+            );
+        }
+        // ntnt db's own rule is unchanged: no default.
+        assert!(split("host=h")
+            .unwrap_err()
+            .message
+            .contains("Set sslmode explicitly"));
+    }
+
+    #[test]
+    fn policy_names_mode_and_trust_source() {
+        let policy = |secret: &str| split(secret).unwrap().1.policy();
+        assert_eq!(policy("host=h sslmode=disable"), "disable");
+        assert_eq!(policy("host=h sslmode=require"), "require");
+        assert_eq!(
+            policy("host=h sslmode=verify-full"),
+            "verify-full roots=system"
+        );
+        assert_eq!(
+            policy(&format!(
+                "host=h sslmode=verify-ca sslrootcert={}",
+                absolute("ca.pem")
+            )),
+            format!("verify-ca roots=file:{}", absolute("ca.pem"))
+        );
+    }
+
+    #[test]
     fn verify_ca_requires_a_ca_file() {
         // verify-ca skips the host-name check, so host-store roots would accept
         // any certificate a public CA issued to anyone, for any name.

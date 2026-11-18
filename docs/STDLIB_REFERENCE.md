@@ -2666,7 +2666,7 @@ Initialize the authentication system with OAuth providers. Pass an empty provide
 
 Stores provider configurations for use by auth handlers. After calling this, you can use auth_start, auth_callback, and auth_logout with routes to enable OAuth login.
 
-Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url". Built-in presets: "consumer", "admin", "internal", "strict". Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions, refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, route_prefix, login_page, login_page_title, login_page_logo_url, login_page_heading, login_page_copy, cookie_name, cookie_secure, cookie_same_site, cookie_http_only, session_store, store_tokens, health_endpoint. When a preset string is used, the overrides map is applied on top of the preset.
+Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", "redis://url", "rediss://url", "valkey://url" or "valkeys://url". PostgreSQL stores follow the std/db/postgres connect() TLS policy (sslmode honored; without it, verify-full unless every host is local). rediss:// and valkeys:// use TLS verified against the host CA store; redis:// and valkey:// are plaintext. TLS never falls back to plaintext. Built-in presets: "consumer", "admin", "internal", "strict". Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions, refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure, logout_url/after_logout, protected_paths, route_prefix, login_page, login_page_title, login_page_logo_url, login_page_heading, login_page_copy, cookie_name, cookie_secure, cookie_same_site, cookie_http_only, session_store, store_tokens, health_endpoint. When a preset string is used, the overrides map is applied on top of the preset.
 
 **Parameters:**
 
@@ -2685,6 +2685,7 @@ enable_auth([github], map { "session_secret": "my-secret" })
 enable_auth([github], "admin")  // Admin preset
 enable_auth([github], "consumer", map { "session_store": "sqlite:./sessions.db" })  // Preset plus overrides
 enable_auth([github], map { "session_store": "redis://localhost:6379" })  // Redis sessions
+enable_auth([github], map { "session_store": "rediss://:secret@cache.example.com:6380/0" })  // Redis sessions over verified TLS
 ```
 
 **See also:** `oauth`, `oauth_discover`, `auth_start`
@@ -8776,7 +8777,7 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`batch_status`](#batch_status) | Get the current status and counters for a batch. |
 | [`cancel_job`](#cancel_job) | Cancel a job by its ID. |
 | [`clear_jobs`](#clear_jobs) | Clear all jobs from the test queue without executing them. |
-| [`configure_queue`](#configure_queue) | Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. Durable execution leases default to 300 seconds, renewed every 30 seconds. Advanced lease_seconds accepts integers 10..86400; renewal uses one-third of the duration capped at 30 seconds. Configure before starting workers. Expired unstarted claims recover automatically; authorized executions become outcome_unknown with no TTL or automatic replay. Upgrade workers together; old active jobs without leases are shown as outcome_unknown. |
+| [`configure_queue`](#configure_queue) | Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. Durable execution leases default to 300 seconds, renewed every 30 seconds. Advanced lease_seconds accepts integers 10..86400; renewal uses one-third of the duration capped at 30 seconds. Configure before starting workers. Expired unstarted claims recover automatically; authorized executions become outcome_unknown with no TTL or automatic replay. Upgrade workers together; old active jobs without leases are shown as outcome_unknown. A Redis/Valkey store uses the std/kv open() URL rules: redis:// and valkey:// are plaintext; rediss:// and valkeys:// use TLS verified against the host CA store (chain and host name), with no plaintext fallback. |
 | [`delete_jobs`](#delete_jobs) | Bulk delete jobs by status. Deleting history does not shorten independent uniqueness windows. |
 | [`drain_jobs`](#drain_jobs) | Execute all enqueued test jobs synchronously and return the count. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing, or buffer a job into an open batch. |
@@ -8987,7 +8988,7 @@ clear_jobs()  // Clear all enqueued test jobs
 configure_queue(opts: Map) -> Result<Unit, String>
 ```
 
-Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. Durable execution leases default to 300 seconds, renewed every 30 seconds. Advanced lease_seconds accepts integers 10..86400; renewal uses one-third of the duration capped at 30 seconds. Configure before starting workers. Expired unstarted claims recover automatically; authorized executions become outcome_unknown with no TTL or automatic replay. Upgrade workers together; old active jobs without leases are shown as outcome_unknown.
+Configure job storage and terminal-history TTLs for this process. Default store: "sqlite:./jobs.db". Completed/cancelled records expire 30 days after finishing; dead/failed/expired records expire after 90 days. Optional retention map: enabled (boolean), completed_days and failed_days (integers 1..365000). Omitting retention uses defaults. Use the same configuration in every writer. Settings affect subsequent state writes, not existing TTLs or legacy history without TTL. Live jobs have no TTL. Redis expires keys natively; SQLite physically sweeps expired KV rows in bounded batches while the store is open. No count/byte eviction limits. Durable execution leases default to 300 seconds, renewed every 30 seconds. Advanced lease_seconds accepts integers 10..86400; renewal uses one-third of the duration capped at 30 seconds. Configure before starting workers. Expired unstarted claims recover automatically; authorized executions become outcome_unknown with no TTL or automatic replay. Upgrade workers together; old active jobs without leases are shown as outcome_unknown. A Redis/Valkey store uses the std/kv open() URL rules: redis:// and valkey:// are plaintext; rediss:// and valkeys:// use TLS verified against the host CA store (chain and host name), with no plaintext fallback.
 
 **Parameters:**
 
@@ -9000,6 +9001,7 @@ Configure job storage and terminal-history TTLs for this process. Default store:
 ```ntnt
 configure_queue(map { "store": "sqlite:./jobs.db" })  // Use SQLite for job storage
 configure_queue(map { "store": "redis://localhost:6379" })  // Use Redis for job storage
+configure_queue(map { "store": "rediss://cache.example.com:6380" })  // Use Redis over verified TLS
 ```
 
 ---
@@ -10007,11 +10009,11 @@ open(url: String) -> Result<KVStore, String>
 
 Open a KV store connection.
 
-For SQLite (bundled, zero-config), pass a file path or ":memory:". For Redis/Valkey (production), pass a URL like "redis://host:6379".
+For SQLite (bundled, zero-config), pass a file path or ":memory:". For Redis/Valkey (production), pass a URL like "redis://host:6379". redis:// and valkey:// connect in plaintext. rediss:// and valkeys:// connect over TLS: the server certificate must chain to the host CA store (SSL_CERT_FILE / SSL_CERT_DIR select a private CA) and be valid for the URL's host name. There is no unverified mode (#insecure is rejected) and no plaintext fallback. Trust is read once per process.
 
 **Parameters:**
 
-- `url` — Connection string: file path for SQLite, redis:// or valkey:// URL for Redis/Valkey
+- `url` — Connection string: file path for SQLite, redis://, rediss://, valkey:// or valkeys:// URL for Redis/Valkey
 
 **Returns:** Result containing the KV store handle or an error message
 
@@ -10022,6 +10024,7 @@ open("cache.db")  // Open SQLite KV store
 open(":memory:")  // Open in-memory SQLite KV store
 open("redis://localhost:6379")  // Open Redis connection
 open("valkey://localhost:6379/0")  // Open Valkey connection with database 0
+open("rediss://:secret@cache.example.com:6380/0")  // Open Redis over verified TLS
 ```
 
 ---
@@ -12530,6 +12533,8 @@ Open or reuse a shared connection pool to a PostgreSQL database.
 
 Establishes a URL-keyed shared connection pool using the provided connection string and returns an opaque connection handle that can be passed to query, execute, and transaction functions. Repeated connect() calls with the same connection string reuse the verified shared pool, so request-path connect() calls use the fast path instead of creating a new pool each time. close(handle) invalidates the logical handle; commit or rollback transactions explicitly before closing. Unused shared pools stay cached until LRU eviction is needed to admit a different connection key. Each process permits at most 32 shared pools, including pending creations. NTNT_POSTGRES_MAX_SHARED_POOLS overrides this with a positive integer and is read once at first connect; zero is invalid, not an unlimited mode. Invalid configuration or a full registry with no unused pool returns Err. Same-key concurrent connects share one verification. Active handles, in-flight operations and transaction snapshots prevent pool eviction. Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE env var). Note: each worker has its own process-local shared pools, so total connections = num_workers × num_databases × pool_size.
 
+TLS follows sslmode: verify-full checks the certificate chain and host name (host CA store, or sslrootcert=/absolute/ca.pem), verify-ca the chain only (sslrootcert required), require encrypts without verifying the server, disable is plaintext. prefer and allow are rejected because they can fall back to plaintext. Without sslmode, a connection is plaintext only when every host is local (127.0.0.1, ::1, localhost, a Unix socket, or a single-label name such as a Docker service "db"); otherwise it uses verify-full. sslrootcert alone also means verify-full. TLS never falls back to plaintext, and the pool identity includes the TLS policy. Trust is read when a pool is created; restart after changing it.
+
 **Parameters:**
 
 - `connection_string` — A PostgreSQL connection URI (e.g. "postgres://user:pass@localhost/mydb")
@@ -12540,11 +12545,16 @@ Establishes a URL-keyed shared connection pool using the provided connection str
 
 ```ntnt
 connect("postgres://user:pass@localhost/mydb")  // => Result::Ok(Connection)  // Open a database connection
+connect("postgres://app:secret@db.example.com/app?sslmode=verify-full&sslrootcert=/etc/ssl/db-ca.pem")  // => Result::Ok(Connection)  // Verified TLS with a private CA
 ```
 
 **Errors:**
 
 - **TypeError**: connect() requires a connection string — *Fix: Pass a String connection URI as the argument*
+
+**Gotchas:**
+
+- Without sslmode, a host name with a dot (db.example.com) gets verify-full against the host CA store; add sslmode=disable only for a trusted private network
 
 **See also:** `close`, `query`, `execute`, `begin`
 
