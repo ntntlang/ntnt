@@ -433,6 +433,11 @@ fn init_refuses_a_manifest_it_cannot_write() {
                 .contains("not writable"),
             "{r}"
         );
+        let message = diagnostic["message"].as_str().unwrap();
+        assert!(
+            message.contains("ntnt.toml") && message.contains("(os error"),
+            "{r}"
+        );
         assert!(
             diagnostic["next_action"]
                 .as_str()
@@ -891,7 +896,18 @@ fn a_stalled_cli_child_is_stopped_at_its_deadline() {
     let result = returned
         .recv_timeout(bounded_output::DEADLINE)
         .expect("output_within did not stop the stalled child at its deadline");
-    let failure = result.expect_err("a child past its deadline fails the test");
-    assert!(failure.contains("did not exit within"), "{failure}");
-    assert!(failure.contains("it was killed"), "{failure}");
+    let stalled = result.expect_err("a child past its deadline fails the test");
+    assert!(
+        stalled.to_string().contains("did not exit within"),
+        "{stalled}"
+    );
+    // The status is what wait returned once the child was reaped: evidence of the
+    // kill, not text about it. On Unix only SIGKILL ends the hour-long sleep.
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&stalled.status),
+        Some(libc::SIGKILL),
+        "{stalled}"
+    );
+    assert!(!stalled.status.success(), "{stalled}");
 }

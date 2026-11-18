@@ -122,13 +122,13 @@ disposable = true
     }
 }
 
-/// `value` as one POSIX shell word: unchanged when no character is special to a
-/// shell, otherwise single-quoted with each `'` written as `'\''`.
 /// `path` for a diagnostic message, as one POSIX shell word like the printed commands.
 fn shown(path: &Path) -> String {
     shell_word(&path.to_string_lossy())
 }
 
+/// `value` as one POSIX shell word: unchanged when no character is special to a
+/// shell, otherwise single-quoted with each `'` written as `'\''`.
 fn shell_word(value: &str) -> String {
     let plain = |b: u8| b.is_ascii_alphanumeric() || b"_./:@%+=,-".contains(&b);
     if !value.is_empty() && value.bytes().all(plain) {
@@ -248,9 +248,10 @@ fn lock(path: &Path, file: &File, try_lock: TryLock) -> Result<()> {
         Err(TryLockError::WouldBlock) => Err(conflict(
             "Another `ntnt db init` is updating the manifest; it was left unchanged.",
         )),
-        Err(TryLockError::Error(_)) => Err(io_failure(
-            "Cannot lock the manifest for an exclusive update; it was left unchanged.",
-        )),
+        Err(TryLockError::Error(error)) => Err(io_failure(&format!(
+            "Cannot lock the manifest {} for an exclusive update: {error}; it was left unchanged.",
+            shown(path)
+        ))),
     }
 }
 
@@ -325,11 +326,15 @@ fn with_cleanup(mut error: Diagnostic, path: &Path, removed: std::io::Result<()>
 fn existing_dir(migrations: &Path) -> Result<bool> {
     match std::fs::symlink_metadata(migrations) {
         Ok(metadata) if metadata.is_dir() => Ok(true),
-        Ok(_) => Err(conflict(
-            "The migrations path exists but is not a directory; init never replaces it.",
-        )),
+        Ok(_) => Err(conflict(&format!(
+            "The migrations path {} exists but is not a directory; init never replaces it.",
+            shown(migrations)
+        ))),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(io_failure("Cannot inspect the migrations directory.")),
+        Err(error) => Err(io_failure(&format!(
+            "Cannot inspect the migrations directory {}: {error}.",
+            shown(migrations)
+        ))),
     }
 }
 
@@ -341,8 +346,11 @@ fn existing_dir(migrations: &Path) -> Result<bool> {
 fn with_migrations_dir(migrations: &Path, write: impl FnOnce() -> Result<()>) -> Result<bool> {
     let created = !existing_dir(migrations)?;
     if created {
-        std::fs::create_dir(migrations).map_err(|_| {
-            io_failure("Cannot create the migrations directory; the manifest was not changed.")
+        std::fs::create_dir(migrations).map_err(|error| {
+            io_failure(&format!(
+                "Cannot create the migrations directory {}: {error}; the manifest was not changed.",
+                shown(migrations)
+            ))
         })?;
     }
     if let Err(diagnostic) = write() {
@@ -366,8 +374,12 @@ fn replace_manifest(
     combined: &[u8],
     before_write: impl FnOnce(),
 ) -> Result<()> {
-    let failed =
-        || io_failure("Cannot write the extended manifest; the original was left unchanged.");
+    let failed = |error: std::io::Error| {
+        io_failure(&format!(
+            "Cannot write the extended manifest {}: {error}; the original was left unchanged.",
+            shown(path)
+        ))
+    };
     // Opening for append writes nothing; it refuses a file the caller may not modify.
     let mut probe = std::fs::OpenOptions::new();
     probe.append(true);
@@ -379,20 +391,28 @@ fn replace_manifest(
     let permissions = probe
         .open(path)
         .and_then(|file| file.metadata())
-        .map_err(|_| io_failure("The manifest is not writable; it was left unchanged."))?
+        .map_err(|error| {
+            io_failure(&format!(
+                "The manifest {} is not writable: {error}; it was left unchanged.",
+                shown(path)
+            ))
+        })?
         .permissions();
     let mut temp = tempfile::Builder::new()
         .prefix(".ntnt.toml.")
         .suffix(".tmp")
         .tempfile_in(project_dir(path).unwrap_or(Path::new(".")))
-        .map_err(|_| failed())?;
+        .map_err(failed)?;
     temp.write_all(combined)
         .and_then(|()| temp.as_file().set_permissions(permissions))
         .and_then(|()| temp.as_file().sync_all())
-        .map_err(|_| failed())?;
+        .map_err(failed)?;
     // From here the synced copy is removed by hand on failure; `keep` also clears the
     // temporary-file attribute Windows gives it.
-    let temp = temp.into_temp_path().keep().map_err(|_| failed())?;
+    let temp = temp
+        .into_temp_path()
+        .keep()
+        .map_err(|error| failed(error.error))?;
     let replaced = (|| {
         // The lock excludes other inits, not an editor that ignores it. Replace only
         // the locked file, still at `path`, with exactly the bytes that were validated.
@@ -402,7 +422,7 @@ fn replace_manifest(
         before_write();
         // Unlike tempfile's persist, std's rename also replaces a file that is still
         // open (here through the lock) on Windows.
-        std::fs::rename(&temp, path).map_err(|_| failed())
+        std::fs::rename(&temp, path).map_err(failed)
     })();
     if replaced.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -632,10 +652,18 @@ pub(super) fn new(args: &NewArgs) -> anyhow::Result<()> {
 /// The ID after the highest `<digits>_<name>.sql|.toml` entry, and the widest existing
 /// ID (at least four digits) so a new file keeps the directory's zero padding.
 fn next_id(dir: &Path) -> Result<(u64, usize)> {
-    let unreadable = || Diagnostic::new("DB_CONFIG", "Cannot enumerate migration directory.");
+    let unreadable = |error: std::io::Error| {
+        Diagnostic::new(
+            "DB_CONFIG",
+            &format!(
+                "Cannot enumerate the migration directory {}: {error}.",
+                shown(dir)
+            ),
+        )
+    };
     let (mut highest, mut width) = (0u64, 4usize);
-    for entry in std::fs::read_dir(dir).map_err(|_| unreadable())? {
-        let name = entry.map_err(|_| unreadable())?.file_name();
+    for entry in std::fs::read_dir(dir).map_err(unreadable)? {
+        let name = entry.map_err(unreadable)?.file_name();
         let Some((digits, _)) = name
             .to_str()
             .and_then(|n| n.strip_suffix(".sql").or_else(|| n.strip_suffix(".toml")))
@@ -727,6 +755,140 @@ fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lock that fails for a reason other than contention names the manifest and
+    /// the OS error (REVIEW.md: errors carry paths).
+    #[test]
+    fn a_failed_lock_names_the_manifest_and_the_os_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ntnt.toml");
+        std::fs::write(&path, b"").unwrap();
+        let file = File::open(&path).unwrap();
+        let error = lock(&path, &file, |_| {
+            Err(TryLockError::Error(std::io::Error::other(
+                "no locks available",
+            )))
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "DB_SCAFFOLD_IO");
+        assert!(error.message.contains(&shown(&path)), "{}", error.message);
+        assert!(
+            error.message.contains("no locks available"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Migrations-directory failures name the directory, and I/O failures the OS error.
+    #[test]
+    fn migrations_directory_errors_name_the_path_and_the_os_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A missing parent: nothing is there to inspect, and creating the directory fails.
+        let orphan = dir.path().join("missing").join("migrations");
+        let error = with_migrations_dir(&orphan, || Ok(())).unwrap_err();
+        assert_eq!(error.code, "DB_SCAFFOLD_IO");
+        assert!(
+            error.message.contains(&format!(
+                "Cannot create the migrations directory {}: ",
+                shown(&orphan)
+            )),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("(os error"), "{}", error.message);
+
+        // A file where the parent should be: inspecting fails on Unix (ENOTDIR);
+        // elsewhere the path reads as missing and creating it fails.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let blocked = blocker.join("migrations");
+        let error = with_migrations_dir(&blocked, || Ok(())).unwrap_err();
+        assert_eq!(error.code, "DB_SCAFFOLD_IO");
+        assert!(
+            error.message.contains(&shown(&blocked)),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("(os error"), "{}", error.message);
+        #[cfg(unix)]
+        assert!(
+            error
+                .message
+                .starts_with("Cannot inspect the migrations directory"),
+            "{}",
+            error.message
+        );
+
+        // A file at the migrations path itself is refused by name.
+        let error = existing_dir(&blocker).unwrap_err();
+        assert_eq!(error.code, "DB_INIT_CONFLICT");
+        assert!(
+            error.message.contains(&shown(&blocker)),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Replacing an existing manifest names it and the OS error when the writability
+    /// probe or the write itself fails, and leaves the original in place.
+    #[test]
+    fn manifest_replacement_errors_name_the_manifest_and_the_os_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ntnt.toml");
+        let original: &[u8] = b"[lint]\n";
+        // The probe: a manifest that cannot be opened for writing.
+        let other = dir.path().join("other.toml");
+        std::fs::write(&other, original).unwrap();
+        let held = File::open(&other).unwrap();
+        let error = replace_manifest(&path, &held, original, original, || {}).unwrap_err();
+        assert!(
+            error
+                .message
+                .contains(&format!("The manifest {} is not writable: ", shown(&path))),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("(os error"), "{}", error.message);
+
+        // The write: a directory put in the manifest's place after the checks makes
+        // the rename fail. Unix only: Windows cannot replace a file that is still open.
+        #[cfg(unix)]
+        {
+            std::fs::write(&path, original).unwrap();
+            let held = File::open(&path).unwrap();
+            let error =
+                replace_manifest(&path, &held, original, b"[lint]\nstrict = true\n", || {
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::create_dir(&path).unwrap();
+                })
+                .unwrap_err();
+            assert_eq!(error.code, "DB_SCAFFOLD_IO");
+            assert!(
+                error.message.contains(&format!(
+                    "Cannot write the extended manifest {}: ",
+                    shown(&path)
+                )),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains("(os error"), "{}", error.message);
+        }
+    }
+
+    /// `ntnt db new` names a migration directory it cannot list, and the OS error.
+    #[test]
+    fn an_unlistable_migration_directory_is_named_with_the_os_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("migrations");
+        let error = next_id(&missing).unwrap_err();
+        assert_eq!(error.code, "DB_CONFIG");
+        assert!(
+            error.message.contains(&shown(&missing)),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("(os error"), "{}", error.message);
+    }
 
     /// Creation failures name the file and the OS error (REVIEW.md: errors carry paths).
     #[test]
