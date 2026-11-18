@@ -7156,6 +7156,64 @@ mod tests {
     }
 
     #[test]
+    fn test_protected_patterns_match_every_spelling_the_router_serves() {
+        // The router ignores empty segments; protection must too.
+        for (path, pattern) in [
+            ("//admin", "/admin/*"),
+            ("//admin/", "/admin/*"),
+            ("//admin/users", "/admin/*"),
+            ("/admin//users", "/admin/*"),
+            ("//reports/daily", "/reports/daily"),
+            ("/reports//daily", "/reports/daily"),
+            ("/reports/daily//", "/reports/daily"),
+            ("/admin/users", "//admin//*"),
+            ("/reports/daily", "reports//daily/"),
+            ("//anything", "*"),
+        ] {
+            assert!(
+                path_matches_protected_pattern(path, pattern),
+                "{path} should match {pattern}"
+            );
+        }
+        assert!(!path_matches_protected_pattern("//adminish", "/admin/*"));
+        assert!(!path_matches_protected_pattern(
+            "/reports//daily/extra",
+            "/reports/daily"
+        ));
+    }
+
+    #[test]
+    fn test_register_protected_paths_stores_canonical_patterns() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_protected_paths();
+        register_protected_paths(&[
+            "//admin//*".to_string(),
+            "reports//daily/".to_string(),
+            "/*".to_string(),
+            "/".to_string(),
+        ]);
+        assert_eq!(
+            get_protected_paths(),
+            vec!["/admin/*", "/reports/daily", "/*", "/"]
+        );
+        reset_protected_paths();
+    }
+
+    #[test]
+    fn test_request_target_uses_the_canonical_path() {
+        // A refresh redirect must not turn `//host/...` into a
+        // protocol-relative Location.
+        let req = Value::Map(HashMap::from([
+            (
+                "path".to_string(),
+                Value::String("//evil.example//admin/".to_string()),
+            ),
+            ("query".to_string(), Value::String("page=2".to_string())),
+        ]));
+        assert_eq!(guards::request_target(&req), "/evil.example/admin?page=2");
+    }
+
+    #[test]
     fn test_validate_provider_name_rejects_unsafe_names() {
         assert!(validate_provider_name("google").is_ok());
         assert!(validate_provider_name("google.workspace").is_ok());

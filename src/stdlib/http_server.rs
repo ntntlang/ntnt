@@ -902,7 +902,7 @@ impl ServerState {
     /// then linear search within the partition (typically 1-5 routes).
     pub fn find_route_typed(&self, method: &str, path: &str) -> RouteMatchResult {
         // Count path segments to narrow down candidates
-        let segment_count = path.split('/').filter(|s| !s.is_empty()).count();
+        let segment_count = route_path_segments(path).count();
 
         let try_match = |lookup_method: &str| -> RouteMatchResult {
             let key = (lookup_method.to_string(), segment_count);
@@ -1208,9 +1208,29 @@ pub enum MatchResult {
     NoMatch,
 }
 
+/// The segments the router matches in a request path: empty segments are
+/// ignored, so `//admin`, `/admin/` and `/admin` select the same route.
+/// Code that decides about a route (auth) uses [`canonical_route_path`].
+pub fn route_path_segments(path: &str) -> impl Iterator<Item = &str> {
+    path.split('/').filter(|segment| !segment.is_empty())
+}
+
+/// `path` as the router matches it: `/` followed by its non-empty segments.
+pub fn canonical_route_path(path: &str) -> String {
+    let mut canonical = String::with_capacity(path.len());
+    for segment in route_path_segments(path) {
+        canonical.push('/');
+        canonical.push_str(segment);
+    }
+    if canonical.is_empty() {
+        canonical.push('/');
+    }
+    canonical
+}
+
 /// Match a URL path with type validation, returning detailed result
 pub fn match_route_typed(path: &str, route: &Route) -> MatchResult {
-    let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let path_segments: Vec<&str> = route_path_segments(path).collect();
 
     if path_segments.len() != route.segments.len() {
         return MatchResult::NoMatch;
@@ -4332,6 +4352,53 @@ mod tests {
         let result = match_route("/", &route);
         assert!(result.is_some());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_canonical_route_path_is_the_spelling_the_router_matches() {
+        for (path, canonical) in [
+            ("", "/"),
+            ("/", "/"),
+            ("//", "/"),
+            ("/admin", "/admin"),
+            ("//admin", "/admin"),
+            ("/admin/", "/admin"),
+            ("/admin//panel", "/admin/panel"),
+            ("///admin///panel///", "/admin/panel"),
+        ] {
+            assert_eq!(canonical_route_path(path), canonical, "{path:?}");
+        }
+
+        // Sync and async routers select a route for exactly the paths whose
+        // canonical form is that route.
+        let mut state = ServerState::new();
+        state.add_route("GET", "/admin/panel", Value::Unit);
+        let async_route = crate::stdlib::http_server_async::Route {
+            method: "GET".to_string(),
+            pattern: "/admin/panel".to_string(),
+            segments: crate::stdlib::http_server_async::parse_route_pattern("/admin/panel"),
+        };
+        for path in [
+            "/admin/panel",
+            "//admin/panel",
+            "/admin//panel/",
+            "/admin/panel/",
+            "/admin/panelx",
+            "/admin",
+            "/admin/panel/x",
+        ] {
+            let canonical_match = canonical_route_path(path) == "/admin/panel";
+            assert_eq!(
+                state.find_route("GET", path).is_some(),
+                canonical_match,
+                "{path}"
+            );
+            assert_eq!(
+                crate::stdlib::http_server_async::match_route(path, &async_route).is_some(),
+                canonical_match,
+                "{path}"
+            );
+        }
     }
 
     // ===========================================

@@ -10,21 +10,8 @@ fn normalize_auth_route_prefix(prefix: &str) -> std::result::Result<String, Stri
         return Err("[auth] route_prefix must not be empty".to_string());
     }
 
-    let with_leading = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{}", trimmed.trim_start_matches('/'))
-    };
-
-    let normalized = if with_leading.len() > 1 {
-        with_leading.trim_end_matches('/').to_string()
-    } else {
-        with_leading
-    };
-
-    if normalized.is_empty() || !normalized.starts_with('/') {
-        return Err("[auth] route_prefix must start with /".to_string());
-    }
+    // The router's canonical form, which the auth guard compares against.
+    let normalized = crate::stdlib::http_server::canonical_route_path(trimmed);
 
     if normalized == "/" {
         return Err(
@@ -893,6 +880,30 @@ mod tests {
             auth_route_manifest(&config),
             routes.iter().map(|r| r.path.clone()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn route_prefix_uses_the_router_canonical_path() {
+        // Repeated slashes would leave the guard comparing against a prefix
+        // no canonical request path has, and make the login redirect
+        // protocol-relative.
+        for (prefix, canonical) in [
+            ("//account", "/account"),
+            ("account//", "/account"),
+            ("/my//account/", "/my/account"),
+        ] {
+            assert_eq!(
+                normalize_auth_route_prefix_option(prefix).as_deref(),
+                Ok(canonical),
+                "{prefix}"
+            );
+        }
+        assert!(normalize_auth_route_prefix_option("//").is_err());
+        let config = AuthConfig {
+            route_prefix: "//account".to_string(),
+            ..AuthConfig::default()
+        };
+        assert_eq!(auth_route_path(&config, ""), "/account");
     }
 
     #[test]

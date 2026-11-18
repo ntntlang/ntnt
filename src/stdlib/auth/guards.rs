@@ -1,36 +1,23 @@
 use super::cookies::build_signed_session_cookie_with_max_age;
 use super::sessions::{get_session_for_request, SessionAccessEffect};
 use super::*;
+use crate::stdlib::http_server::canonical_route_path;
 
+/// A protected path pattern in the router's canonical form (see
+/// `canonical_route_path`), keeping a trailing `/*` subtree marker.
 fn normalize_protected_path(pattern: &str) -> String {
     let trimmed = pattern.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
-    let normalized_input = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{}", trimmed.trim_start_matches('/'))
-    };
-
-    if normalized_input == "/" || normalized_input == "/*" {
-        return normalized_input;
-    }
-
-    if let Some(base) = normalized_input.strip_suffix("/*") {
-        let normalized = if base.len() > 1 {
-            base.trim_end_matches('/')
-        } else {
-            base
-        };
-        return format!("{}/*", normalized);
-    }
-
-    if normalized_input.len() > 1 {
-        normalized_input.trim_end_matches('/').to_string()
-    } else {
-        normalized_input
+    let rooted = format!("/{trimmed}");
+    match rooted.strip_suffix("/*") {
+        Some(base) => match canonical_route_path(base).as_str() {
+            "/" => "/*".to_string(),
+            base => format!("{base}/*"),
+        },
+        None => canonical_route_path(&rooted),
     }
 }
 
@@ -100,7 +87,7 @@ pub fn get_protected_paths() -> Vec<String> {
 
 #[cfg(test)]
 pub(super) fn path_matches_protected_pattern(path: &str, pattern: &str) -> bool {
-    let normalized_path = normalize_protected_path(path);
+    let normalized_path = canonical_route_path(path);
     let normalized_pattern = normalize_protected_path(pattern);
 
     path_matches_normalized_protected_pattern(&normalized_path, &normalized_pattern)
@@ -130,17 +117,19 @@ fn path_matches_normalized_protected_pattern(path: &str, pattern: &str) -> bool 
 }
 
 fn is_auth_exempt_path(path: &str) -> bool {
-    let normalized = normalize_protected_path(path);
     let prefix = get_auth_config()
         .map(|config| super::routes::auth_route_prefix(&config))
         .unwrap_or_else(|| "/auth".to_string());
-    normalized == prefix || normalized.starts_with(&format!("{}/", prefix))
+    path == prefix || path.starts_with(&format!("{}/", prefix))
 }
 
+/// The request path in the canonical form the router matched (repeated and
+/// trailing slashes removed). Auth decisions and redirects use only this, so a
+/// different spelling of a protected route cannot miss its rule.
 pub(super) fn request_path(request: &Value) -> String {
     if let Value::Map(req_map) = request {
         if let Some(Value::String(path)) = req_map.get("path") {
-            return path.clone();
+            return canonical_route_path(path);
         }
     }
     "/".to_string()
@@ -259,17 +248,16 @@ fn auth_required_response(request: &Value) -> Value {
     redirect_response(&login_path, None)
 }
 
+/// `path` is canonical (see `request_path`), like the stored patterns.
 fn path_requires_auth(path: &str) -> bool {
     if is_auth_exempt_path(path) {
         return false;
     }
 
-    let normalized_path = normalize_protected_path(path);
-
     with_protected_paths(|patterns| {
         patterns
             .iter()
-            .any(|pattern| path_matches_normalized_protected_pattern(&normalized_path, pattern))
+            .any(|pattern| path_matches_normalized_protected_pattern(path, pattern))
     })
 }
 
