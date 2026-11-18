@@ -346,66 +346,134 @@ fn binary_op_str(op: &BinaryOp) -> &'static str {
 
 /// Find JavaScript-style `${ident...}` interpolation candidates in a string literal.
 ///
-/// Returns `(head_ident, full_snippet)` pairs, e.g. `("name", "${name}")` or
-/// `("user", "${user.name}")`. Only sequences whose first character after `${`
-/// can start an identifier (Unicode, matching NTNT identifiers) and that close
-/// with `}` before the next newline are reported; `${}`, `${1}`, and `${{` are
-/// skipped. Callers decide relevance by resolving the head identifier against
-/// their scope/environment.
+/// Returns `(head_ident, full_snippet)` pairs in source order, e.g.
+/// `("name", "${name}")` or `("user", "${user.name}")`. Only sequences whose
+/// first character after `${` can start an identifier (Unicode, matching NTNT
+/// identifiers) and that close with a balanced `}` before the next newline are
+/// reported; `${}`, `${1}`, and `${{` are skipped. A candidate nested inside
+/// another is reported too: "${PATH:-${name}}" yields the full outer span and
+/// then `${name}`. Callers decide relevance by resolving the head identifier
+/// against their scope/environment.
+///
+/// The literal is scanned once, so hostile input such as deeply nested or
+/// unclosed `${a${a...` costs linear time. At most
+/// [`JS_INTERPOLATION_MAX_RESULTS`] candidates are reported, and a snippet longer
+/// than [`JS_INTERPOLATION_MAX_SNIPPET_BYTES`] is cut at a character boundary
+/// and ends with `…`, which bounds the copied text.
 pub fn find_js_interpolation_idents(s: &str) -> Vec<(String, String)> {
+    scan_js_interpolation_idents(s).0
+}
+
+/// Most candidates [`find_js_interpolation_idents`] reports for one literal.
+pub const JS_INTERPOLATION_MAX_RESULTS: usize = 64;
+/// Longest snippet, in bytes before the `…`, [`find_js_interpolation_idents`] copies.
+pub const JS_INTERPOLATION_MAX_SNIPPET_BYTES: usize = 200;
+
+/// [`find_js_interpolation_idents`] plus the number of characters examined,
+/// which tests use to prove the scan is linear.
+fn scan_js_interpolation_idents(s: &str) -> (Vec<(String, String)>, usize) {
+    /// A `${ident` candidate: where it starts, its head identifier, and the
+    /// offset of its balanced closing `}` once seen.
+    struct Candidate {
+        start: usize,
+        ident: std::ops::Range<usize>,
+        close: Option<usize>,
+    }
+
+    /// Move closed candidates, in source order, into `results` up to the limit.
+    fn report(s: &str, candidates: &mut Vec<Candidate>, results: &mut Vec<(String, String)>) {
+        for candidate in candidates.drain(..) {
+            if results.len() == JS_INTERPOLATION_MAX_RESULTS {
+                break;
+            }
+            if let Some(close) = candidate.close {
+                results.push((
+                    s[candidate.ident].to_string(),
+                    js_interpolation_snippet(&s[candidate.start..=close]),
+                ));
+            }
+        }
+    }
+
     let mut results = Vec::new();
-    let chars: Vec<(usize, char)> = s.char_indices().collect();
-    let n = chars.len();
-    let mut i = 0;
-    while i + 1 < n {
-        if chars[i].1 != '$' || chars[i + 1].1 != '{' {
-            i += 1;
-            continue;
-        }
-        let start = chars[i].0;
-        let mut j = i + 2;
-        // The first character after `${` must start an identifier
-        if j >= n || !(chars[j].1.is_alphabetic() || chars[j].1 == '_') {
-            i += 2;
-            continue;
-        }
-        let ident_start = chars[j].0;
-        while j < n && (chars[j].1.is_alphanumeric() || chars[j].1 == '_') {
-            j += 1;
-        }
-        let ident_end = if j < n { chars[j].0 } else { s.len() };
-        // Require a balanced closing `}` before the next newline, so nested
-        // content like "${PATH:-${name}}" yields the full outer span instead
-        // of a truncated "${PATH:-${name" snippet.
-        let mut close = None;
-        let mut k = j;
-        let mut depth = 1usize;
-        while k < n {
-            match chars[k].1 {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = Some(chars[k].0);
-                        break;
+    // Candidates since no candidate was last open, in source order. Once none
+    // is open they are final: closed, or unclosed before a newline.
+    let mut candidates: Vec<Candidate> = Vec::new();
+    // Open candidates, innermost last: an index into `candidates` and the
+    // number of plain `{` opened inside it that are still unclosed.
+    let mut open: Vec<(usize, usize)> = Vec::new();
+    let mut examined = 0usize;
+    {
+        let mut chars = s.char_indices().inspect(|_| examined += 1).peekable();
+        while let Some((pos, c)) = chars.next() {
+            match c {
+                '\n' => {
+                    // A candidate must close before the next newline.
+                    open.clear();
+                    report(s, &mut candidates, &mut results);
+                }
+                '{' => {
+                    if let Some((_, plain)) = open.last_mut() {
+                        *plain += 1;
                     }
                 }
-                '\n' => break,
+                '}' => match open.last_mut() {
+                    Some((_, plain)) if *plain > 0 => *plain -= 1,
+                    Some(_) => {
+                        let (index, _) = open.pop().expect("an open candidate");
+                        candidates[index].close = Some(pos);
+                        if open.is_empty() {
+                            report(s, &mut candidates, &mut results);
+                        }
+                    }
+                    None => {}
+                },
+                '$' => {
+                    if chars.next_if(|&(_, next)| next == '{').is_none() {
+                        continue;
+                    }
+                    match chars.next_if(|&(_, next)| next.is_alphabetic() || next == '_') {
+                        Some((ident_start, first)) => {
+                            let mut ident_end = ident_start + first.len_utf8();
+                            while let Some((at, next)) =
+                                chars.next_if(|&(_, next)| next.is_alphanumeric() || next == '_')
+                            {
+                                ident_end = at + next.len_utf8();
+                            }
+                            candidates.push(Candidate {
+                                start: pos,
+                                ident: ident_start..ident_end,
+                                close: None,
+                            });
+                            open.push((candidates.len() - 1, 0));
+                        }
+                        // `${` without an identifier still opens a brace.
+                        None => {
+                            if let Some((_, plain)) = open.last_mut() {
+                                *plain += 1;
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
-            k += 1;
+            if results.len() == JS_INTERPOLATION_MAX_RESULTS {
+                break;
+            }
         }
-        if let Some(close) = close {
-            results.push((
-                s[ident_start..ident_end].to_string(),
-                s[start..=close].to_string(),
-            ));
-        }
-        // Resume right after the head identifier so a nested `${...}` inside
-        // the same span (e.g. "${PATH:-${name}}") is still examined.
-        i = j;
     }
-    results
+    report(s, &mut candidates, &mut results);
+    (results, examined)
+}
+
+/// `span`, or its first [`JS_INTERPOLATION_MAX_SNIPPET_BYTES`] bytes (cut at a
+/// character boundary) followed by `…` when it is longer.
+fn js_interpolation_snippet(span: &str) -> String {
+    if span.len() <= JS_INTERPOLATION_MAX_SNIPPET_BYTES {
+        return span.to_string();
+    }
+    let end = span.floor_char_boundary(JS_INTERPOLATION_MAX_SNIPPET_BYTES);
+    format!("{}…", &span[..end])
 }
 
 /// A literal value produced by const-folding contract clauses (DD-063 Rec 9)
@@ -5765,6 +5833,179 @@ mod tests {
     #[test]
     fn js_interp_detector_ignores_plain_dollars_and_braces() {
         assert!(find_js_interpolation_idents("cost: $5 {not interp} $ {gap}").is_empty());
+    }
+
+    #[test]
+    fn js_interp_detector_reports_closed_candidates_inside_an_unclosed_one() {
+        let found = find_js_interpolation_idents("x ${outer ${inner} y\n} ${next}");
+        assert_eq!(
+            found,
+            vec![
+                ("inner".to_string(), "${inner}".to_string()),
+                ("next".to_string(), "${next}".to_string()),
+            ]
+        );
+    }
+
+    /// The scanner before results were bounded: rescans each candidate's span,
+    /// so it is quadratic on nested input. A model for inputs below the limits.
+    fn reference_js_interpolation_idents(s: &str) -> Vec<(String, String)> {
+        let mut results = Vec::new();
+        let chars: Vec<(usize, char)> = s.char_indices().collect();
+        let n = chars.len();
+        let mut i = 0;
+        while i + 1 < n {
+            if chars[i].1 != '$' || chars[i + 1].1 != '{' {
+                i += 1;
+                continue;
+            }
+            let start = chars[i].0;
+            let mut j = i + 2;
+            if j >= n || !(chars[j].1.is_alphabetic() || chars[j].1 == '_') {
+                i += 2;
+                continue;
+            }
+            let ident_start = chars[j].0;
+            while j < n && (chars[j].1.is_alphanumeric() || chars[j].1 == '_') {
+                j += 1;
+            }
+            let ident_end = if j < n { chars[j].0 } else { s.len() };
+            let mut depth = 1usize;
+            let mut k = j;
+            while k < n && chars[k].1 != '\n' {
+                match chars[k].1 {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            results.push((
+                                s[ident_start..ident_end].to_string(),
+                                s[start..=chars[k].0].to_string(),
+                            ));
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                k += 1;
+            }
+            i = j;
+        }
+        results
+    }
+
+    #[test]
+    fn js_interp_detector_matches_reference_below_limits() {
+        // Every string of up to 7 characters over the structural alphabet...
+        let alphabet = ['$', '{', '}', 'a', '\n'];
+        let mut inputs = vec![String::new()];
+        let mut frontier = vec![String::new()];
+        for _ in 0..7 {
+            frontier = frontier
+                .iter()
+                .flat_map(|prefix| alphabet.iter().map(move |c| format!("{prefix}{c}")))
+                .collect();
+            inputs.extend(frontier.iter().cloned());
+        }
+        // ...plus longer strings from a fixed-seed generator with identifier,
+        // Unicode and shell-style characters.
+        let alphabet = ['$', '{', '}', 'a', '_', '1', 'é', ':', '-', ' ', '\n'];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize
+        };
+        for _ in 0..20_000 {
+            let len = next() % 41;
+            inputs.push(
+                (0..len)
+                    .map(|_| alphabet[next() % alphabet.len()])
+                    .collect(),
+            );
+        }
+        for input in &inputs {
+            assert_eq!(
+                find_js_interpolation_idents(input),
+                reference_js_interpolation_idents(input),
+                "input {input:?}"
+            );
+        }
+    }
+
+    /// `depth` nested candidates, all closed: `${a${a...}}`.
+    fn nested_js_interpolations(depth: usize) -> String {
+        format!("{}{}", "${a".repeat(depth), "}".repeat(depth))
+    }
+
+    #[test]
+    fn js_interp_detector_examines_each_character_at_most_once() {
+        // Shapes that are quadratic for a scanner that rescans each candidate's
+        // span: nested closed candidates, unclosed candidates, and candidates
+        // inside braces that close only after a newline.
+        let depth = 2_000;
+        let inputs = [
+            nested_js_interpolations(depth),
+            "${a".repeat(depth),
+            "{${a".repeat(depth),
+            format!("{}\n{}", "${a{".repeat(depth), "}".repeat(depth)),
+        ];
+        for input in &inputs {
+            let (_, examined) = scan_js_interpolation_idents(input);
+            let chars = input.chars().count();
+            assert!(
+                examined <= chars,
+                "examined {examined} characters for a {chars}-character literal"
+            );
+        }
+    }
+
+    #[test]
+    fn js_interp_detector_bounds_results_and_copied_bytes() {
+        let found = find_js_interpolation_idents(&nested_js_interpolations(2_000));
+        assert_eq!(found.len(), JS_INTERPOLATION_MAX_RESULTS);
+        for (ident, snippet) in &found {
+            assert_eq!(ident, "a");
+            assert!(
+                snippet.len() <= JS_INTERPOLATION_MAX_SNIPPET_BYTES + '…'.len_utf8(),
+                "snippet of {} bytes",
+                snippet.len()
+            );
+        }
+        // Source order: the outermost (longest) candidate comes first.
+        assert!(found[0].1.starts_with("${a${a${a"));
+        assert!(found[0].1.ends_with('…'));
+    }
+
+    #[test]
+    fn js_interp_detector_reports_first_candidates_in_order_up_to_the_limit() {
+        let input = (0..JS_INTERPOLATION_MAX_RESULTS + 10)
+            .map(|i| format!("${{v{i}}}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let expected = (0..JS_INTERPOLATION_MAX_RESULTS)
+            .map(|i| (format!("v{i}"), format!("${{v{i}}}")))
+            .collect::<Vec<_>>();
+        assert_eq!(find_js_interpolation_idents(&input), expected);
+    }
+
+    #[test]
+    fn js_interp_detector_truncates_long_snippets_on_a_char_boundary() {
+        let input = format!(
+            "${{naïve {}}}",
+            "é".repeat(JS_INTERPOLATION_MAX_SNIPPET_BYTES)
+        );
+        let found = find_js_interpolation_idents(&input);
+        assert_eq!(found.len(), 1);
+        let (ident, snippet) = &found[0];
+        assert_eq!(ident, "naïve");
+        let kept = snippet
+            .strip_suffix('…')
+            .expect("a long snippet ends with an ellipsis");
+        assert!(kept.len() <= JS_INTERPOLATION_MAX_SNIPPET_BYTES);
+        assert!(kept.len() > JS_INTERPOLATION_MAX_SNIPPET_BYTES - 'é'.len_utf8());
+        assert!(input.starts_with(kept));
     }
 
     fn check(source: &str) -> Vec<TypeDiagnostic> {
