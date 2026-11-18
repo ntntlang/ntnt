@@ -53,6 +53,26 @@ longer renders heading attributes such as `# Title {#id .class}`. Scheme detecti
 follows browsers: it ignores case, leading control characters and embedded tabs or
 newlines. Relative links, fragments and `to_html()` are unchanged.
 
+## Verified TLS for PostgreSQL and Redis
+
+- **PostgreSQL** (`std/db/postgres` and the std/auth store) honours `sslmode`:
+  `verify-full` checks the certificate chain and host name, `verify-ca` the chain
+  only (it needs `sslrootcert`), `require` encrypts without verifying, and `disable`
+  stays plaintext. `prefer` and `allow` are rejected because they can fall back to
+  plaintext. Without `sslmode`, a connection uses verified TLS (`verify-full`
+  against the host CA store) unless every host is local: a loopback address,
+  `localhost`, a Unix socket, or a single-label name such as a Docker service
+  (`db`), which stay plaintext as before. `sslrootcert=/path/ca.pem` adds a private
+  CA and on its own selects `verify-full`. A TLS connection never falls back to
+  plaintext, and errors never include the connection string. Each TLS policy has
+  its own connection pool, and trust roots are read once per pool: restart after
+  rotating a CA.
+- **Redis and Valkey** (`std/kv`, `std/jobs` stores and the std/auth session store):
+  `rediss://` and `valkeys://` connect over TLS and verify the certificate chain and
+  host name against the host CA store. `redis://` and `valkey://` stay plaintext.
+  Before, `std/kv` treated a `rediss://` URL as a SQLite file path, and jobs and auth
+  rejected it.
+
 ## Other fixes
 
 - The warning for JavaScript-style `${...}` interpolation in string literals scans
@@ -80,5 +100,12 @@ newlines. Relative links, fragments and `to_html()` are unchanged.
 4. During development hot reload, a `require_auth(path)` rule or `protected_paths`
    entry you delete stays enforced until the server restarts; added rules still
    apply at the reload.
+
+5. A PostgreSQL connection string whose host is not local (a name containing a dot,
+   or a non-loopback address) and that has no `sslmode` now requires verified TLS.
+   Enable TLS on the server, add `sslrootcert=` for a private or managed CA, or add
+   `sslmode=disable` to keep plaintext on a trusted network.
+6. `sslmode=prefer` and `sslmode=allow` are rejected; choose `verify-full`,
+   `verify-ca`, `require` or `disable`. TLS modes over a Unix socket are rejected.
 
 See [NTNT v0.6.2](v0.6.2.md) for the previous release.
