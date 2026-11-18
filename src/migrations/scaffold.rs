@@ -124,6 +124,11 @@ disposable = true
 
 /// `value` as one POSIX shell word: unchanged when no character is special to a
 /// shell, otherwise single-quoted with each `'` written as `'\''`.
+/// `path` for a diagnostic message, as one POSIX shell word like the printed commands.
+fn shown(path: &Path) -> String {
+    shell_word(&path.to_string_lossy())
+}
+
 fn shell_word(value: &str) -> String {
     let plain = |b: u8| b.is_ascii_alphanumeric() || b"_./:@%+=,-".contains(&b);
     if !value.is_empty() && value.bytes().all(plain) {
@@ -269,32 +274,50 @@ fn create_new(path: &Path, exists: Diagnostic, label: &str) -> Result<File> {
         .open(path)
         .map_err(|error| match error.kind() {
             ErrorKind::AlreadyExists => exists,
-            _ => io_failure(&format!("Cannot create {label}.")),
+            _ => io_failure(&format!("Cannot create {label} {}: {error}.", shown(path))),
         })
 }
 
 /// Write and sync `contents` to `file`, the new file `create_new` opened at `path`.
-/// A partially written file is removed while `file`, and any lock on it, is held.
+/// A partially written file is removed while `file`, and any lock on it, is held,
+/// and the diagnostic says whether that removal worked.
 fn write_new(path: &Path, mut file: &File, contents: &[u8], label: &str) -> Result<()> {
-    if file
-        .write_all(contents)
-        .and_then(|()| file.sync_all())
-        .is_err()
-    {
-        let _ = std::fs::remove_file(path);
-        return Err(io_failure(&format!(
-            "Cannot write {label}; the incomplete new file was removed."
-        )));
+    let Err(error) = file.write_all(contents).and_then(|()| file.sync_all()) else {
+        return Ok(());
+    };
+    let cleanup = match std::fs::remove_file(path) {
+        Ok(()) => "the incomplete new file was removed".to_string(),
+        Err(cleanup) => format!(
+            "the incomplete new file could not be removed ({cleanup}); delete it before running ntnt db again"
+        ),
+    };
+    Err(io_failure(&format!(
+        "Cannot write {label} {}: {error}; {cleanup}.",
+        shown(path)
+    )))
+}
+
+/// Remove the manifest init created at `path`, open as `file`, while it is still empty
+/// and still at `path`; a file another writer has put there is kept. An error means
+/// the empty file is still there.
+fn remove_created(path: &Path, file: &File) -> std::io::Result<()> {
+    if names(path, file) && file.metadata().is_ok_and(|metadata| metadata.len() == 0) {
+        std::fs::remove_file(path)?;
     }
     Ok(())
 }
 
-/// Remove the manifest init created at `path`, open as `file`, while it is still empty
-/// and still at `path`; a file another writer has put there is kept.
-fn remove_created(path: &Path, file: &File) {
-    if names(path, file) && file.metadata().is_ok_and(|metadata| metadata.len() == 0) {
-        let _ = std::fs::remove_file(path);
+/// `error`, noting that the empty manifest init created at `path` is still there when
+/// `removed` failed.
+fn with_cleanup(mut error: Diagnostic, path: &Path, removed: std::io::Result<()>) -> Diagnostic {
+    if let Err(cleanup) = removed {
+        error.message = format!(
+            "{} However, the empty manifest {} it created could not be removed ({cleanup}); delete it before running ntnt db again.",
+            error.message,
+            shown(path)
+        );
     }
+    error
 }
 
 /// Whether the migrations directory exists. Init never replaces a migrations path
@@ -523,16 +546,20 @@ fn initialize_with(
             if let Err(error) = lock(manifest, &file, try_lock) {
                 // On a conflict, another init that found the file holds its lock and
                 // extends it. Otherwise the empty file is still this init's own.
-                if error.code != "DB_INIT_CONFLICT" {
-                    remove_created(manifest, &file);
+                if error.code == "DB_INIT_CONFLICT" {
+                    return Err(error);
                 }
-                return Err(error);
+                return Err(with_cleanup(
+                    error,
+                    manifest,
+                    remove_created(manifest, &file),
+                ));
             }
             with_migrations_dir(&migrations, || {
                 pause(Step::Write);
                 write_new(manifest, &file, &combined, "the manifest")
             })
-            .inspect_err(|_| remove_created(manifest, &file))?
+            .map_err(|error| with_cleanup(error, manifest, remove_created(manifest, &file)))?
         }
     };
     // Any cleanup above ran under the lock; release it only now.
@@ -659,7 +686,7 @@ fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
         &path,
         Diagnostic::new(
             "DB_MIGRATION_EXISTS",
-            "The next migration file already exists.",
+            &format!("The next migration file {} already exists.", shown(&path)),
         ),
         "the migration file",
     )?;
@@ -700,6 +727,96 @@ fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Creation failures name the file and the OS error (REVIEW.md: errors carry paths).
+    #[test]
+    fn creation_errors_name_the_file_and_the_os_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("0001_initial.sql");
+        let error = create_new(&path, conflict("exists"), "the migration file").unwrap_err();
+        assert_eq!(error.code, "DB_SCAFFOLD_IO");
+        assert!(error.message.contains(&shown(&path)), "{}", error.message);
+        assert!(error.message.contains("(os error"), "{}", error.message);
+    }
+
+    /// A failed write names the file and says whether the incomplete file was removed.
+    #[test]
+    fn write_failures_say_whether_the_incomplete_file_was_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        // Writing through a read-only handle fails on every platform.
+        let other = dir.path().join("other");
+        std::fs::write(&other, b"").unwrap();
+        let read_only = File::open(&other).unwrap();
+
+        let removable = dir.path().join("0001_initial.sql");
+        std::fs::write(&removable, b"").unwrap();
+        let error =
+            write_new(&removable, &read_only, b"-- one\n", "the migration file").unwrap_err();
+        assert!(!removable.exists());
+        assert!(
+            error.message.contains(&shown(&removable)),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("was removed"), "{}", error.message);
+
+        // remove_file refuses a directory, so this cleanup fails.
+        let stuck = dir.path().join("0002_names.sql");
+        std::fs::create_dir(&stuck).unwrap();
+        let error = write_new(&stuck, &read_only, b"-- two\n", "the migration file").unwrap_err();
+        assert!(stuck.exists());
+        assert!(
+            error.message.contains("could not be removed"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("was removed"), "{}", error.message);
+    }
+
+    /// When init cannot remove the empty manifest it created, the diagnostic says so.
+    #[test]
+    fn a_manifest_that_could_not_be_removed_is_reported() {
+        let path = Path::new("ntnt.toml");
+        let removed = with_cleanup(io_failure("Cannot lock."), path, Ok(()));
+        assert_eq!(removed.message, "Cannot lock.");
+        let stuck = with_cleanup(
+            io_failure("Cannot lock."),
+            path,
+            Err(std::io::Error::other("read-only file system")),
+        );
+        assert!(
+            stuck
+                .message
+                .contains("ntnt.toml it created could not be removed (read-only file system)"),
+            "{}",
+            stuck.message
+        );
+    }
+
+    /// remove_created returns a failed removal instead of discarding it.
+    #[cfg(unix)]
+    #[test]
+    fn remove_created_returns_a_failed_removal() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root ignores directory permissions, so the removal cannot fail
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ntnt.toml");
+        let file = File::create_new(&path).unwrap();
+        let permissions =
+            |mode| std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode));
+        permissions(0o555).unwrap();
+        let removed = remove_created(&path, &file);
+        permissions(0o755).unwrap();
+        assert!(
+            removed.is_err(),
+            "removal in a read-only directory succeeded"
+        );
+        assert!(path.exists());
+        assert!(remove_created(&path, &file).is_ok());
+        assert!(!path.exists());
+    }
 
     #[test]
     fn new_files_never_replace_an_existing_file() {
