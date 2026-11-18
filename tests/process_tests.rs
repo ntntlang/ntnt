@@ -1,19 +1,23 @@
 use std::fs;
-use std::io::Write;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Hang guard for fixture processes; only a bug reaches it.
+const FIXTURE_HANG_GUARD: Duration = Duration::from_secs(120);
+
+/// A private directory with an unpredictable name, removed on drop. Fixture
+/// files inside it cannot be planted or replaced by another local user.
+fn private_fixture_dir(prefix: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("create private fixture directory")
+}
 
 fn run_ntnt(code: &str, allowlist: &str) -> (String, String, i32) {
-    let source = std::env::temp_dir().join(format!(
-        "ntnt-process-language-{}-{}.tnt",
-        std::process::id(),
-        TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut file = fs::File::create(&source).unwrap();
-    file.write_all(code.as_bytes()).unwrap();
-    drop(file);
+    let directory = private_fixture_dir("ntnt-process-language-");
+    let source = directory.path().join("main.tnt");
+    fs::write(&source, code).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
         .arg("run")
         .arg(&source)
@@ -21,7 +25,6 @@ fn run_ntnt(code: &str, allowlist: &str) -> (String, String, i32) {
         .env("NTNT_PROCESS_ALLOW", allowlist)
         .output()
         .expect("run NTNT process fixture");
-    fs::remove_file(source).ok();
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -121,15 +124,12 @@ fn direct_exit_commands_shutdown_started_processes() {
     let fixture = std::env::current_exe().unwrap();
     let fixture_text = fixture.to_string_lossy();
     let program = program_literal(&fixture_text);
-    let directory = std::env::temp_dir().join(format!(
-        "ntnt-process-direct-exit-{}-{}",
-        std::process::id(),
-        TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&directory).unwrap();
-    let source = directory.join("server.tnt");
-    let marker = directory.join("child.pid");
-    let store = directory.join("jobs.db");
+    // Kept until the end of the test: the program, the PID marker the test
+    // signals and the job store all live in a private directory.
+    let directory = private_fixture_dir("ntnt-process-direct-exit-");
+    let source = directory.path().join("server.tnt");
+    let marker = directory.path().join("child.pid");
+    let store = directory.path().join("jobs.db");
     let code = format!(
         r#"
 import {{ run, start }} from "std/process"
@@ -142,7 +142,7 @@ match start({program}, ["--exact", "process_fixture_write_pid_and_sleep", "--ign
     Ok(_) => {{}},
     Err(error) => print(error)
 }}
-let pause = run({program}, ["--exact", "process_fixture_sleep_short", "--ignored", "--nocapture"])
+let marker_written = run({program}, ["--exact", "process_fixture_wait_for_file", "--ignored", "--nocapture", "--", {marker}])
 configure_queue(map {{ "store": {store} }})
 "#,
         marker = program_literal(&marker.to_string_lossy()),
@@ -175,7 +175,6 @@ configure_queue(map {{ "store": {store} }})
             libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
         }
     }
-    fs::remove_dir_all(directory).unwrap();
     assert!(!survived, "child {pid} survived CLI exit");
 }
 
@@ -196,12 +195,23 @@ fn process_fixture_sleep() {
     std::thread::sleep(std::time::Duration::from_secs(10));
 }
 
+/// Exits once the file named after `--` exists, so a program can wait for a
+/// started fixture instead of sleeping.
 #[test]
 #[ignore]
-fn process_fixture_sleep_short() {
-    std::thread::sleep(std::time::Duration::from_millis(100));
+fn process_fixture_wait_for_file() {
+    let path = std::env::args()
+        .skip_while(|argument| argument != "--")
+        .nth(1)
+        .expect("path argument");
+    let deadline = Instant::now() + FIXTURE_HANG_GUARD;
+    while !std::path::Path::new(&path).exists() {
+        assert!(Instant::now() < deadline, "{path} never appeared");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
+/// Writes its PID to the marker named after `--`, then runs until killed.
 #[test]
 #[ignore]
 fn process_fixture_write_pid_and_sleep() {
@@ -209,6 +219,9 @@ fn process_fixture_write_pid_and_sleep() {
         .skip_while(|argument| argument != "--")
         .nth(1)
         .expect("pid marker argument");
-    fs::write(marker, std::process::id().to_string()).unwrap();
-    std::thread::sleep(std::time::Duration::from_secs(10));
+    // Rename into place so a waiter never sees a partly written marker.
+    let partial = format!("{marker}.partial");
+    fs::write(&partial, std::process::id().to_string()).unwrap();
+    fs::rename(&partial, &marker).unwrap();
+    std::thread::sleep(FIXTURE_HANG_GUARD);
 }
