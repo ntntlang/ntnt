@@ -11,6 +11,10 @@ See [unreleased notes](docs/release-notes/unreleased.md).
 - `ntnt db` PostgreSQL TLS: `sslmode=verify-full` (host-store or `sslrootcert`
   trust), `verify-ca` (`sslrootcert` CA file only) and `require`, no plaintext
   fallback, and the transport bound into plans (#344).
+- PostgreSQL `[databases.<name>.limits]` for `ntnt db`: configurable
+  `statement_seconds` (scripts and concurrent index builds) and
+  `migrator_wait_seconds`, bounded, bound into plans, with deadlines that fit
+  them (#346).
 
 ## 0.6.1
 

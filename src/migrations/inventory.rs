@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 
 pub(super) const MAX_INPUT_BYTES: usize = 1_048_576;
 
@@ -68,6 +69,121 @@ pub(crate) struct Database {
     pub approval_secret: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adoption_checks: BTreeMap<String, String>,
+    /// Absent serializes nothing, so the policy digest (and earlier plans)
+    /// of a manifest without this table are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Limits>,
+}
+
+const DEFAULT_STATEMENT_SECONDS: u64 = 90;
+const DEFAULT_MIGRATOR_WAIT_SECONDS: u64 = 5;
+/// A migration statement waits at most 1 second for each lock (the migration
+/// `lock_timeout`); the whole transaction is then retried. The statement limit
+/// counts from the start of the statement, so it must outlast that wait, or a
+/// brief lock ends as a statement timeout, which is not retried.
+/// `own_migrations` keeps its statement limit one second above its lock wait
+/// in the same way.
+pub(super) const MIN_STATEMENT_SECONDS: u64 = 2;
+pub(super) const MIN_MIGRATOR_WAIT_SECONDS: u64 = 1;
+/// A day: longer single statements belong in an operator-supervised build.
+pub(super) const MAX_STATEMENT_SECONDS: u64 = 86_400;
+/// Five minutes: a migrator holding the lock longer is stuck or building.
+pub(super) const MAX_MIGRATOR_WAIT_SECONDS: u64 = 300;
+fn default_statement_seconds() -> u64 {
+    DEFAULT_STATEMENT_SECONDS
+}
+fn default_migrator_wait_seconds() -> u64 {
+    DEFAULT_MIGRATOR_WAIT_SECONDS
+}
+
+/// PostgreSQL `[databases.<name>.limits]` for `migrate` and `reconcile` on
+/// the target, in whole seconds. Omitted fields keep their defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Limits {
+    /// Server limit for one migration script (each statement, with the whole
+    /// script bounded 5 seconds later) or one concurrent index statement.
+    #[serde(default = "default_statement_seconds")]
+    pub statement_seconds: u64,
+    /// How long to wait for another migrator's advisory lock.
+    #[serde(default = "default_migrator_wait_seconds")]
+    pub migrator_wait_seconds: u64,
+}
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            statement_seconds: DEFAULT_STATEMENT_SECONDS,
+            migrator_wait_seconds: DEFAULT_MIGRATOR_WAIT_SECONDS,
+        }
+    }
+}
+impl Limits {
+    pub fn statement(&self) -> Duration {
+        Duration::from_secs(self.statement_seconds)
+    }
+    pub fn migrator_wait(&self) -> Duration {
+        Duration::from_secs(self.migrator_wait_seconds)
+    }
+    /// One run's work: a full migrator wait, a full statement and 5 seconds
+    /// for everything else. Lowered limits never shorten it below 100 seconds.
+    pub fn work_deadline(&self) -> Duration {
+        Duration::from_secs(
+            self.statement_seconds.max(DEFAULT_STATEMENT_SECONDS)
+                + self
+                    .migrator_wait_seconds
+                    .max(DEFAULT_MIGRATOR_WAIT_SECONDS)
+                + 5,
+        )
+    }
+    /// The whole command: the work deadline plus a reserve in which fresh
+    /// reconciliation after an interrupted COMMIT can still wait for the
+    /// migrator lock (120 seconds with the defaults).
+    pub fn total_deadline(&self) -> Duration {
+        self.work_deadline()
+            + Duration::from_secs(
+                self.migrator_wait_seconds
+                    .max(DEFAULT_MIGRATOR_WAIT_SECONDS)
+                    + 15,
+            )
+    }
+    /// Effective limits and the deadlines derived from them, for reports.
+    pub fn report(&self) -> serde_json::Value {
+        serde_json::json!({
+            "statement_seconds": self.statement_seconds,
+            "migrator_wait_seconds": self.migrator_wait_seconds,
+            "work_deadline_seconds": self.work_deadline().as_secs(),
+            "total_deadline_seconds": self.total_deadline().as_secs(),
+        })
+    }
+    fn validate(&self, database: &str, engine: &str) -> Result<()> {
+        let table = format!("[databases.{database}.limits]");
+        if engine != "postgresql" {
+            return Err(invalid(&format!(
+                "{table} applies only to PostgreSQL; SQLite keeps its fixed operation limits."
+            )));
+        }
+        for (field, value, min, max) in [
+            (
+                "statement_seconds",
+                self.statement_seconds,
+                MIN_STATEMENT_SECONDS,
+                MAX_STATEMENT_SECONDS,
+            ),
+            (
+                "migrator_wait_seconds",
+                self.migrator_wait_seconds,
+                MIN_MIGRATOR_WAIT_SECONDS,
+                MAX_MIGRATOR_WAIT_SECONDS,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(invalid(&format!(
+                    "{table} {field} must be from {min} to {max} seconds."
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -167,6 +283,14 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 impl CapturedInputs {
+    /// Effective execution limits: the declared table or the defaults.
+    pub fn limits(&self) -> Limits {
+        self.config.limits.unwrap_or_default()
+    }
+    /// The limits a plan binds. SQLite has none: it keeps fixed limits.
+    pub fn plan_limits(&self) -> Option<serde_json::Value> {
+        (self.config.engine == "postgresql").then(|| serde_json::json!(self.limits()))
+    }
     /// Bind the exact covered source prefix without claiming its SQL was executed.
     pub fn checkpoint(&self, count: usize) -> Result<super::model::HistoryEntry> {
         let last = count
@@ -237,10 +361,36 @@ impl CapturedInputs {
         };
         // Only the selected definition is interpreted. Other stores may use a
         // future adapter, unavailable credentials, or unprovisioned directories.
-        let config: Database = databases[&database_name]
-            .clone()
-            .try_into()
-            .map_err(|_| invalid("Unknown or invalid database configuration field."))?;
+        let raw = &databases[&database_name];
+        // The configuration is tables. Serde's derived structs would also accept
+        // arrays by position (`limits = [1, 300]`), so reject any other shape.
+        let table = |value: Option<&toml::Value>| value.is_none_or(toml::Value::is_table);
+        if !raw.get("limits").is_none_or(toml::Value::is_table) {
+            return Err(invalid(&format!("[databases.{database_name}.limits] must be a table of statement_seconds and migrator_wait_seconds, each a whole number of seconds.")));
+        }
+        if !raw.is_table()
+            || !table(raw.get("scratch"))
+            || !raw.get("targets").is_none_or(|targets| {
+                targets
+                    .as_table()
+                    .is_some_and(|targets| targets.values().all(toml::Value::is_table))
+            })
+        {
+            return Err(invalid(
+                "Database, target and scratch definitions must be TOML tables.",
+            ));
+        }
+        let config: Database = raw.clone().try_into().map_err(|_| {
+            // Name the limits table when it is the culprit, never its values.
+            if raw
+                .get("limits")
+                .is_some_and(|limits| limits.clone().try_into::<Limits>().is_err())
+            {
+                invalid(&format!("[databases.{database_name}.limits] accepts only statement_seconds and migrator_wait_seconds, each a whole number of seconds."))
+            } else {
+                invalid("Unknown or invalid database configuration field.")
+            }
+        })?;
         match config.engine.as_str() {
             "postgresql"
                 if identifier(&config.schema)
@@ -251,6 +401,9 @@ impl CapturedInputs {
             _ => return Err(invalid(
                 "Use PostgreSQL with `public` or another non-system schema, or SQLite with schema=main.",
             )),
+        }
+        if let Some(limits) = &config.limits {
+            limits.validate(&database_name, &config.engine)?;
         }
         if config.adoption_checks.len() > 64
             || config.adoption_checks.iter().any(|(name, sql)| {
@@ -491,6 +644,182 @@ role="target_role"
         )
         .unwrap();
         root
+    }
+    fn with_limits(root: &tempfile::TempDir, limits: &str) -> std::path::PathBuf {
+        let manifest = root.path().join("ntnt.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            format!("{text}[databases.app.limits]\n{limits}\n"),
+        )
+        .unwrap();
+        manifest
+    }
+    #[test]
+    fn absent_limits_keep_the_defaults_and_the_earlier_digests() {
+        let root = project();
+        std::fs::write(
+            root.path().join("migrations/1_first.sql"),
+            "CREATE TABLE app.t(id INT);",
+        )
+        .unwrap();
+        let inputs = CapturedInputs::load(&root.path().join("ntnt.toml"), "local", None).unwrap();
+        // Digests of these exact inputs before limits existed (0.6.2 cycle
+        // base): a manifest without limits keeps its saved plans valid.
+        assert_eq!(
+            inputs.policy_digest,
+            "eab5d51ca9c9f49f7d081a47890d7c3d5c5eb6bc98c3220c489e7da550630114"
+        );
+        assert_eq!(
+            inputs.input_digest,
+            "e752df6db4a5ef75d90050e87f98a7ec6b5932647dfeef02dc5d74447a5ec693"
+        );
+        assert!(inputs.config.limits.is_none());
+        assert_eq!(
+            inputs.limits().report(),
+            serde_json::json!({"statement_seconds":90,"migrator_wait_seconds":5,
+                "work_deadline_seconds":100,"total_deadline_seconds":120})
+        );
+        assert_eq!(
+            inputs.plan_limits(),
+            Some(serde_json::json!({"statement_seconds":90,"migrator_wait_seconds":5}))
+        );
+    }
+    #[test]
+    fn declared_limits_extend_the_deadlines_and_change_the_policy() {
+        let mut digests = BTreeSet::new();
+        digests.insert(
+            CapturedInputs::load(&project().path().join("ntnt.toml"), "local", None)
+                .unwrap()
+                .policy_digest,
+        );
+        for (limits, effective, work, total) in [
+            ("statement_seconds = 3600", (3600, 5), 3610, 3630),
+            ("statement_seconds = 3601", (3601, 5), 3611, 3631),
+            ("migrator_wait_seconds = 60", (90, 60), 155, 230),
+            (
+                "statement_seconds = 86400\nmigrator_wait_seconds = 300",
+                (86400, 300),
+                86705,
+                87020,
+            ),
+            // The lowest limits keep the default deadlines.
+            (
+                "statement_seconds = 2\nmigrator_wait_seconds = 1",
+                (2, 1),
+                100,
+                120,
+            ),
+            // An empty table states the defaults explicitly.
+            ("", (90, 5), 100, 120),
+        ] {
+            let root = project();
+            let manifest = with_limits(&root, limits);
+            let inputs = CapturedInputs::load(&manifest, "local", None).unwrap();
+            let l = inputs.limits();
+            assert_eq!(
+                (l.statement_seconds, l.migrator_wait_seconds),
+                effective,
+                "{limits}"
+            );
+            assert_eq!(l.statement().as_secs(), effective.0);
+            assert_eq!(l.migrator_wait().as_secs(), effective.1);
+            assert_eq!(l.work_deadline().as_secs(), work, "{limits}");
+            assert_eq!(l.total_deadline().as_secs(), total, "{limits}");
+            assert_eq!(
+                inputs.policy_digest,
+                CapturedInputs::load(&manifest, "local", None)
+                    .unwrap()
+                    .policy_digest
+            );
+            assert!(digests.insert(inputs.policy_digest), "{limits}");
+        }
+    }
+    #[test]
+    fn invalid_limits_name_the_field_without_echoing_values() {
+        for (limits, field) in [
+            (
+                "statement_seconds = 0",
+                "statement_seconds must be from 2 to 86400",
+            ),
+            // One second would end a brief lock wait as a statement timeout
+            // before the 1-second lock timeout could retry it.
+            (
+                "statement_seconds = 1",
+                "statement_seconds must be from 2 to 86400",
+            ),
+            (
+                "statement_seconds = 86401",
+                "statement_seconds must be from 2 to 86400",
+            ),
+            (
+                "migrator_wait_seconds = 0",
+                "migrator_wait_seconds must be from 1 to 300",
+            ),
+            (
+                "migrator_wait_seconds = 301",
+                "migrator_wait_seconds must be from 1 to 300",
+            ),
+            ("statement_seconds = -1", "statement_seconds"),
+            ("statement_seconds = 1.5", "statement_seconds"),
+            ("migrator_wait_seconds = true", "migrator_wait_seconds"),
+            (
+                "statement_seconds = 'ntnt346_private_canary'",
+                "statement_seconds",
+            ),
+            ("statement_timeout = 5", "statement_seconds"),
+        ] {
+            let root = project();
+            let manifest = with_limits(&root, limits);
+            let d = CapturedInputs::load(&manifest, "local", None)
+                .err()
+                .unwrap_or_else(|| panic!("{limits} was accepted"));
+            assert_eq!(d.code, "DB_CONFIG", "{limits}");
+            assert!(
+                d.message.contains("[databases.app.limits]") && d.message.contains(field),
+                "{limits}: {}",
+                d.message
+            );
+            assert!(!d.message.contains("canary"), "{}", d.message);
+        }
+        let root = project();
+        let manifest = root.path().join("ntnt.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            text.replace(
+                "migrations_dir=\"migrations\"\n",
+                "migrations_dir=\"migrations\"\nlimits=90\n",
+            ),
+        )
+        .unwrap();
+        let d = CapturedInputs::load(&manifest, "local", None)
+            .err()
+            .unwrap();
+        assert!(
+            d.message.contains("[databases.app.limits]"),
+            "{}",
+            d.message
+        );
+    }
+    #[test]
+    fn sqlite_rejects_limits_it_would_not_apply() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("migrations")).unwrap();
+        let manifest = root.path().join("ntnt.toml");
+        std::fs::write(
+            &manifest,
+            "[databases.app]\nengine=\"sqlite\"\nschema=\"main\"\nmigrations_dir=\"migrations\"\n[databases.app.targets.local]\nconnection_secret=\"TEST_FILE\"\n[secrets.TEST_FILE]\n",
+        )
+        .unwrap();
+        let sqlite = CapturedInputs::load(&manifest, "local", None).unwrap();
+        assert_eq!(sqlite.plan_limits(), None);
+        let manifest = with_limits(&root, "statement_seconds = 600");
+        let d = CapturedInputs::load(&manifest, "local", None)
+            .err()
+            .unwrap();
+        assert_eq!(d.code, "DB_CONFIG");
+        assert!(d.message.contains("only to PostgreSQL"), "{}", d.message);
     }
     #[test]
     fn json_identity_uses_sorted_object_keys_not_rust_field_order() {

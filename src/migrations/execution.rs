@@ -108,6 +108,7 @@ pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> 
         || b["database"] != inputs.database_name
         || b["target_name"] != inputs.target_name
         || b["managed_schema"] != inputs.config.schema
+        || !limits_match(inputs, plan)
         || plan["pending"] != json!(pending)
         || inputs.migrations.iter().take(end).any(|m| {
             !super::analysis::analyze_for(&inputs.config.engine, &m.sql, &inputs.config.schema)
@@ -117,6 +118,15 @@ pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> 
         return Err(stale());
     }
     Ok(base)
+}
+
+/// A plan binds the effective limits. One saved before plans recorded them
+/// implies the defaults, so it stays valid while no limits table is declared.
+fn limits_match(inputs: &CapturedInputs, plan: &Value) -> bool {
+    match plan["execution"].get("limits") {
+        Some(saved) => inputs.plan_limits().as_ref() == Some(saved),
+        None => inputs.config.limits.is_none(),
+    }
 }
 
 /// Resolve exact approval through the existing secret provider. The protected
@@ -247,7 +257,7 @@ async fn reconcile(
     attempted: usize,
 ) -> Result<()> {
     let db = connect(inputs, saved).await?;
-    db.own_migrations().await?;
+    db.own_migrations(inputs.limits().migrator_wait()).await?;
     let (count, history, identity, adopted) = locked_prefix(&db, inputs, saved).await?;
     db.rollback().await?;
     report["target"]["identity"] = json!(identity);
@@ -333,6 +343,13 @@ async fn checks(
     Ok(())
 }
 
+/// The limits and deadlines this run uses. SQLite keeps its fixed limits.
+fn report_limits(inputs: &CapturedInputs, report: &mut Value) {
+    if inputs.plan_limits().is_some() {
+        report["limits"] = inputs.limits().report();
+    }
+}
+
 /// Reserve part of the CLI's outer deadline for fresh reconciliation. Dropping
 /// the timed-out future drops its owned physical connection before recovery starts.
 async fn work_deadline<T>(
@@ -370,6 +387,7 @@ pub(super) async fn migrate(
     report["plan_digest"] = saved["plan_digest"].clone();
     report["source"] =
         json!({"input_digest":inputs.input_digest,"policy_digest":inputs.policy_digest});
+    report_limits(inputs, report);
     report["progress"] = json!(inputs
         .migrations
         .iter()
@@ -380,7 +398,7 @@ pub(super) async fn migrate(
     }
     let result = work_deadline(
         apply_owned(inputs, saved, report),
-        std::time::Duration::from_secs(100),
+        inputs.limits().work_deadline(),
     )
     .await;
     if result.as_ref().is_err_and(|d| d.code == "DB_TIMEOUT") {
@@ -408,7 +426,7 @@ fn lock_backoff(attempt: u32) -> std::time::Duration {
 async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
     let action = Adoption::from_plan(inputs, saved)?;
     let db = connect(inputs, saved).await?;
-    db.own_migrations().await?;
+    db.own_migrations(inputs.limits().migrator_wait()).await?;
     let mut lock_retries = 0u32;
     loop {
         let assertions_before = report["assertions"].clone();
@@ -490,8 +508,12 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                     report,
                 )
                 .await?;
-                db.execute_captured(migration, &inputs.config.schema)
-                    .await?;
+                db.execute_captured(
+                    migration,
+                    &inputs.config.schema,
+                    inputs.limits().statement(),
+                )
+                .await?;
                 checks(
                     &db,
                     &migration.ensures,
@@ -628,14 +650,15 @@ async fn build_concurrent(
     db.commit().await?;
     progress["attempt_recorded"] = json!(true);
     progress["phase"] = json!("build");
-    if let Err(d) = db.build_concurrent_index(migration, schema).await {
+    let limit = inputs.limits().statement();
+    if let Err(d) = db.build_concurrent_index(migration, schema, limit).await {
         // Delete the attempt only once the index is confirmed absent. A build
         // can succeed and still return an error (e.g. restoring settings
         // failed); a valid or unknown index keeps the attempt for reconcile.
         let cleanup = async {
             let mut dropped = false;
             if db.index_validity(schema, &index.name).await? == Some(false) {
-                db.drop_invalid_index(schema, &index.name).await?;
+                db.drop_invalid_index(schema, &index.name, limit).await?;
                 dropped = true;
             }
             if db.index_validity(schema, &index.name).await?.is_some() {
@@ -732,9 +755,10 @@ pub(super) async fn reconcile_attempt(
     report["database"] = json!(inputs.database_name);
     report["target"] = json!({"name":inputs.target_name,"schema":inputs.config.schema});
     report["plan_digest"] = saved["plan_digest"].clone();
+    report_limits(inputs, report);
     work_deadline(
         reconcile_owned(inputs, saved, report),
-        std::time::Duration::from_secs(100),
+        inputs.limits().work_deadline(),
     )
     .await
 }
@@ -743,7 +767,7 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
     let schema = &inputs.config.schema;
     let fingerprints = &saved["plan"]["execution"]["prefix_fingerprints"];
     let db = connect(inputs, saved).await?;
-    db.own_migrations().await?;
+    db.own_migrations(inputs.limits().migrator_wait()).await?;
     db.begin_migration(schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
     if !reconcile_target_matches(&json!(&identity), &saved["plan"]["binding"]["target"]) {
@@ -810,7 +834,8 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
             }
             db.rollback().await?;
             pending_write(report, "dropped_invalid_index");
-            db.drop_invalid_index(schema, &index.name).await?;
+            db.drop_invalid_index(schema, &index.name, inputs.limits().statement())
+                .await?;
             report["reconciliation"]["dropped_invalid_index"] = json!(true);
             report["reconciliation"]["outcome"] = json!("fail");
             let (position, after) = locked_attempt(&db, inputs, saved).await?;
@@ -865,14 +890,15 @@ fn locked_attempt_scope(applied: usize, inputs: &CapturedInputs, saved: &Value) 
 mod tests {
     use super::*;
 
-    #[test]
-    fn applied_count_cannot_wrap_into_a_valid_prefix() {
+    /// Captured inputs for a one-target PostgreSQL manifest plus `extra` TOML.
+    fn captured(extra: &str) -> (tempfile::TempDir, CapturedInputs) {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join("migrations")).unwrap();
         let manifest = project.path().join("ntnt.toml");
         std::fs::write(
             &manifest,
-            r#"
+            format!(
+                r#"
 [databases.app]
 engine = "postgresql"
 schema = "app"
@@ -882,13 +908,17 @@ connection_secret = "DB_TARGET"
 database = "target"
 role = "owner"
 [secrets.DB_TARGET]
-"#,
+{extra}"#
+            ),
         )
         .unwrap();
         let inputs = CapturedInputs::load(&manifest, "test", None).unwrap();
-        // A descriptor fixture for the pure validator, not database evidence.
+        (project, inputs)
+    }
+    /// A descriptor fixture for the pure validator, not database evidence.
+    fn descriptor(inputs: &CapturedInputs) -> Value {
         let fingerprint = "a".repeat(64);
-        let mut plan = json!({
+        json!({
             "binding": {"format_version":1,"applied_count":0,
                 "expected_base_digest":fingerprint,"base_catalog_digest":fingerprint,
                 "base_history_digest":fingerprint,"adapter":"postgresql-catalog-v1",
@@ -898,11 +928,63 @@ role = "owner"
             "execution":{"format":"postgresql-transactional-v1","prefix_fingerprints":[fingerprint]},
             "candidate":{"outcome":"pass","fingerprint":fingerprint},
             "authorized":false,"executable":false,"classification":"requires_review","pending":[]
-        });
-        let saved = |plan: &Value| {
-            json!({"format_version":1,"outcome":"pass",
+        })
+    }
+    fn saved(plan: &Value) -> Value {
+        json!({"format_version":1,"outcome":"pass",
             "plan_digest":json_digest(plan),"plan":plan})
-        };
+    }
+
+    #[test]
+    fn plans_bind_limits_and_plans_without_them_imply_the_defaults() {
+        let (_project, inputs) = captured("");
+        let mut plan = descriptor(&inputs);
+        // Saved before plans recorded limits: the defaults are implied.
+        assert_eq!(validate(&inputs, &saved(&plan)).unwrap(), 0);
+        for (limits, valid) in [
+            (
+                json!({"statement_seconds":90,"migrator_wait_seconds":5}),
+                true,
+            ),
+            (
+                json!({"statement_seconds":91,"migrator_wait_seconds":5}),
+                false,
+            ),
+            (json!({"statement_seconds":90}), false),
+            (Value::Null, false),
+        ] {
+            plan["execution"]["limits"] = limits.clone();
+            assert_eq!(validate(&inputs, &saved(&plan)).is_ok(), valid, "{limits}");
+        }
+        // Declared limits are bound exactly, never implied.
+        let (_project, limited) = captured("[databases.app.limits]\nstatement_seconds = 600\n");
+        let mut plan = descriptor(&limited);
+        for (limits, valid) in [
+            (None, false),
+            (
+                Some(json!({"statement_seconds":90,"migrator_wait_seconds":5})),
+                false,
+            ),
+            (
+                Some(json!({"statement_seconds":600,"migrator_wait_seconds":5})),
+                true,
+            ),
+        ] {
+            if let Some(limits) = limits {
+                plan["execution"]["limits"] = limits;
+            }
+            let result = validate(&limited, &saved(&plan));
+            assert_eq!(result.is_ok(), valid, "{plan}");
+            if !valid {
+                assert_eq!(result.unwrap_err().code, "DB_PLAN_STALE");
+            }
+        }
+    }
+
+    #[test]
+    fn applied_count_cannot_wrap_into_a_valid_prefix() {
+        let (_project, inputs) = captured("");
+        let mut plan = descriptor(&inputs);
         assert_eq!(validate(&inputs, &saved(&plan)).unwrap(), 0);
         for value in [
             json!(1),

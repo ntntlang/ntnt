@@ -42,7 +42,7 @@ impl Diagnostic {
             "DB_SECRET" => "Declare the named connection secret under [secrets.<NAME>] in ntnt.toml and make it resolvable through the configured std/secrets provider (development: an environment variable with that exact name; production: NTNT_SECRETS_PROVIDER=unix-socket). Never pass a connection URL on the command line.",
             "DB_CONNECTION_CONFIG" => "Make the failing PostgreSQL connection secret (target or scratch) name exactly one explicit host, the user and dbname declared as that endpoint's role and database, and an explicit sslmode, with no startup options. Use sslmode=verify-full for any network path (host CA store by default, or sslrootcert=/absolute/path/ca.pem for a private CA); verify-ca only when the host name cannot match the certificate, and only with sslrootcert=/absolute/path/ca.pem naming the CA that issued it (never the host CA store); require only to accept an unverified server; disable only on a trusted local transport such as loopback, a Unix socket or a private container network.",
             "DB_TLS" => "Check the server certificate against the configured trust. verify-full checks the chain and the host name against the host CA store, or only against the CAs in sslrootcert=/absolute/path/ca.pem (put a managed provider's CA bundle there). Use verify-ca, with sslrootcert naming the CA that issued the server certificate, only when the host name cannot match. A server without TLS is never used in plaintext: enable TLS on the server, or choose sslmode=disable explicitly for a trusted local transport.",
-            "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
+            "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), give a PostgreSQL [databases.<name>.limits] table only whole seconds (statement_seconds 2-86400, migrator_wait_seconds 1-300), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
             "DB_ATTEMPT_UNRESOLVED" => "An earlier migrate stopped during a non-transactional migration. Make sure no migrate or index build is still running, then run `ntnt db reconcile --plan <the same approved plan>`; it records the outcome it observes or rolls the attempt back. Nothing else runs until then.",
             "DB_ATTEMPT_ACTIVE" => "The index build is still running in another session. Wait for it to finish or cancel that backend, then reconcile again.",
             "DB_RECONCILE_INCOMPLETE" => "The planned invalid index was dropped, so the database has changed, but the result did not match the plan's state before the migration and the attempt was kept. Inspect drift with an operator, then reconcile again.",
@@ -128,13 +128,30 @@ pub struct Options {
 
 /// Run one database operation with an outer deadline and bounded runtime teardown.
 /// Dedicated sessions are discarded; uncancellable resolver work cannot keep the CLI alive.
-fn database_runtime<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
+fn database_runtime<T>(
+    deadline: std::time::Duration,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    database_runtime_on(
+        tokio::runtime::Builder::new_current_thread(),
+        deadline,
+        future,
+    )
+}
+
+/// `database_runtime` on a given current-thread builder. Tests pass one that
+/// starts with a paused clock.
+fn database_runtime_on<T>(
+    mut builder: tokio::runtime::Builder,
+    deadline: std::time::Duration,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let runtime = builder
         .enable_all()
         .build()
         .map_err(|_| Diagnostic::new("DB_RUNTIME", "Cannot create database I/O runtime."))?;
     let result = runtime.block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(120), future)
+        tokio::time::timeout(deadline, future)
             .await
             .map_err(|_| {
                 Diagnostic::new(
@@ -248,10 +265,14 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             let saved = serde_json::from_slice(&bytes).map_err(|_| {
                 Diagnostic::new("DB_PLAN_INVALID", "Invalid saved execution plan JSON.")
             })?;
+            let deadline = inputs.limits().total_deadline();
             if command == "reconcile" {
-                database_runtime(execution::reconcile_attempt(&inputs, &saved, &mut progress))
+                database_runtime(
+                    deadline,
+                    execution::reconcile_attempt(&inputs, &saved, &mut progress),
+                )
             } else {
-                database_runtime(execution::migrate(&inputs, &saved, &mut progress))
+                database_runtime(deadline, execution::migrate(&inputs, &saved, &mut progress))
             }
         });
         if let Err(d) = work {
@@ -290,7 +311,10 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                         }
                     }
                 }
-                database_runtime(report::inspect(inputs, command, adopt_through))
+                // Inspection keeps the default bounds: its replay runs on an
+                // empty scratch database, not the target's large tables.
+                let deadline = inventory::Limits::default().total_deadline();
+                database_runtime(deadline, report::inspect(inputs, command, adopt_through))
             })
             .unwrap_or_else(|d| report::failure(command, d))
     };
@@ -478,7 +502,17 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
 mod tests {
     #[test]
     fn configuration_diagnostics_have_specific_next_actions() {
+        use super::inventory::{
+            MAX_MIGRATOR_WAIT_SECONDS, MAX_STATEMENT_SECONDS, MIN_MIGRATOR_WAIT_SECONDS,
+            MIN_STATEMENT_SECONDS,
+        };
         let generic = super::Diagnostic::new("DB_NOT_A_REAL_CODE", "x").next_action;
+        // The next action states the ranges validation actually accepts.
+        let statement_range =
+            format!("statement_seconds {MIN_STATEMENT_SECONDS}-{MAX_STATEMENT_SECONDS}");
+        let wait_range = format!(
+            "migrator_wait_seconds {MIN_MIGRATOR_WAIT_SECONDS}-{MAX_MIGRATOR_WAIT_SECONDS}"
+        );
         for (code, expected) in [
             (
                 "DB_CONNECTION_CONFIG",
@@ -511,6 +545,9 @@ mod tests {
                     "migrations_dir",
                     "approval_secret",
                     "--adopt-through",
+                    "[databases.<name>.limits]",
+                    statement_range.as_str(),
+                    wait_range.as_str(),
                 ]
                 .as_slice(),
             ),
@@ -552,19 +589,54 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// Hang guard for waits in these tests; only a bug or a hang reaches it.
+    const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+
+    #[test]
+    fn the_outer_deadline_is_the_one_supplied() {
+        use std::time::Duration;
+        // The runtime starts with a paused clock, which moves only when all
+        // work waits on timers and then straight to the next one. Work ending
+        // a second before the supplied deadline completes; work ending a
+        // second after it is cut off, whatever the scheduling. (The deadline
+        // used to be a fixed 120 seconds.)
+        let deadline = Duration::from_secs(30);
+        let run = |work: Duration| {
+            let mut paused = tokio::runtime::Builder::new_current_thread();
+            paused.start_paused(true);
+            super::database_runtime_on(paused, deadline, async move {
+                tokio::time::sleep(work).await;
+                Ok(())
+            })
+        };
+        assert!(run(deadline - Duration::from_secs(1)).is_ok());
+        let error = run(deadline + Duration::from_secs(1)).unwrap_err();
+        assert_eq!(error.code, "DB_TIMEOUT");
+    }
+
     #[test]
     fn runtime_cleanup_does_not_wait_for_uncancellable_resolver_work() {
-        let start = std::time::Instant::now();
-        super::database_runtime(async {
-            let (started, wait) = tokio::sync::oneshot::channel();
-            tokio::task::spawn_blocking(move || {
-                let _ = started.send(());
-                std::thread::sleep(std::time::Duration::from_secs(1));
+        // The blocking work ends only once database_runtime has returned. If
+        // runtime teardown waited for it, database_runtime would never return.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (returned, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::database_runtime(std::time::Duration::from_secs(120), async {
+                let (started, wait) = tokio::sync::oneshot::channel();
+                tokio::task::spawn_blocking(move || {
+                    let _ = started.send(());
+                    let _ = released.recv();
+                });
+                wait.await.unwrap();
+                Ok(())
             });
-            wait.await.unwrap();
-            Ok(())
-        })
-        .unwrap();
-        assert!(start.elapsed() < std::time::Duration::from_millis(500));
+            let _ = returned.send(result);
+        });
+        let result = finished.recv_timeout(HANG_GUARD);
+        // Let the blocking work end on every path.
+        let _ = release.send(());
+        result
+            .expect("database_runtime must return while the blocking work still runs")
+            .unwrap();
     }
 }
