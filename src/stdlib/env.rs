@@ -2,7 +2,51 @@
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
+
+/// Host runtime-policy keys that application code may not set. The runtime
+/// reads them from the environment that starts ntnt (process execution and
+/// `fetch()` SSRF policy are captured before any source is evaluated), so a
+/// dotenv file loaded by the application must not grant or relax them.
+/// `NTNT_ENV` is application configuration and stays loadable.
+const RESERVED_POLICY_KEYS: &[&str] = &[
+    "NTNT_PROCESS_ENABLE",
+    "NTNT_PROCESS_ALLOW",
+    "NTNT_SSRF_PROTECTION",
+    "NTNT_ALLOW_LOCALHOST",
+    "NTNT_ALLOW_PRIVATE_IPS",
+    "NTNT_BLOCKED_HOSTS",
+    "NTNT_NET_ALLOW_PRIVATE",
+    "NTNT_NETMON_ENABLE",
+];
+
+/// Every `std/secrets` provider-selection and provider-configuration key.
+const RESERVED_POLICY_PREFIX: &str = "NTNT_SECRETS_";
+
+/// Environment names are case-insensitive on Windows, so reserved names are
+/// matched case-insensitively on every platform.
+fn is_reserved_policy_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.starts_with(RESERVED_POLICY_PREFIX)
+        || RESERVED_POLICY_KEYS
+            .iter()
+            .any(|reserved| *reserved == upper)
+}
+
+/// Warns once per process for each reserved key that `load_env` skipped.
+fn warn_skipped_policy_key(key: &str) {
+    static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+    let first = WARNED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(key.to_ascii_uppercase());
+    if first {
+        eprintln!(
+            "[WARN] load_env: ignored {key}; runtime security policy is read from the environment that starts ntnt and cannot be changed by application code"
+        );
+    }
+}
 
 /// Initialize the std/env module
 pub fn init() -> HashMap<String, Value> {
@@ -101,12 +145,21 @@ pub fn init() -> HashMap<String, Value> {
     // with # are treated as comments and skipped. Variables are set in
     // the current process environment. Loading `.env` files remains supported
     // in production and is not replaced or restricted by optional `std/secrets`.
+    //
+    // Host runtime-policy keys are reserved and skipped with one stderr warning
+    // per key, while the rest of the file still loads: NTNT_PROCESS_ENABLE,
+    // NTNT_PROCESS_ALLOW, NTNT_SSRF_PROTECTION, NTNT_ALLOW_LOCALHOST,
+    // NTNT_ALLOW_PRIVATE_IPS, NTNT_BLOCKED_HOSTS, NTNT_NET_ALLOW_PRIVATE,
+    // NTNT_NETMON_ENABLE, and every NTNT_SECRETS_* key (matched
+    // case-insensitively). Set them in the environment that starts ntnt.
+    // NTNT_ENV is not reserved.
     // @param path Path to the .env file
     // @returns Result indicating success or file read error
     // @see_also get_env
     // @since v0.2.0
     // @example load_env(".env") ~ "Load default .env file"
     // @example load_env(".env.local") ~ "Load environment-specific file"
+    // @gotcha Reserved runtime-policy keys in the file are ignored with a warning; process execution and fetch() SSRF policy come from the environment that starts ntnt
     module.insert(
         "load_env".to_string(),
         Value::NativeFunction {
@@ -127,7 +180,12 @@ pub fn init() -> HashMap<String, Value> {
                                     }
                                     // Parse KEY=VALUE
                                     if let Some((key, value)) = line.split_once('=') {
-                                        std::env::set_var(key.trim(), value.trim());
+                                        let key = key.trim();
+                                        if is_reserved_policy_key(key) {
+                                            warn_skipped_policy_key(key);
+                                            continue;
+                                        }
+                                        std::env::set_var(key, value.trim());
                                     }
                                 }
                                 Ok(Value::ok(Value::Unit))
@@ -147,4 +205,65 @@ pub fn init() -> HashMap<String, Value> {
     );
 
     module
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call_load_env(path: &std::path::Path) -> Value {
+        let module = init();
+        let Some(Value::NativeFunction { func, .. }) = module.get("load_env") else {
+            panic!("std/env exports load_env");
+        };
+        func(&[Value::String(path.to_string_lossy().into_owned())]).expect("load_env result")
+    }
+
+    #[test]
+    fn load_env_skips_reserved_runtime_policy_keys_and_loads_the_rest() {
+        let reserved = [
+            "NTNT_PROCESS_ENABLE",
+            "NTNT_PROCESS_ALLOW",
+            "NTNT_SSRF_PROTECTION",
+            "NTNT_ALLOW_LOCALHOST",
+            "NTNT_ALLOW_PRIVATE_IPS",
+            "NTNT_BLOCKED_HOSTS",
+            "NTNT_NET_ALLOW_PRIVATE",
+            "NTNT_NETMON_ENABLE",
+            "NTNT_SECRETS_PROVIDER",
+            "NTNT_SECRETS_SOCKET_ENDPOINTS",
+            "NTNT_SECRETS_AUTHORIZATION_SCOPE",
+            "NTNT_SECRETS_TIMEOUT_MS",
+        ];
+        // Windows environment names are case-insensitive, so spelling variants
+        // of a reserved key are reserved on every platform.
+        let variant = "Ntnt_Process_Enable";
+        let before: Vec<_> = reserved
+            .iter()
+            .chain([&variant])
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        let directory = tempfile::tempdir().unwrap();
+        let dotenv = directory.path().join(".env");
+        let mut contents = String::from("# application configuration\n");
+        for key in reserved.iter().chain([&variant]) {
+            contents.push_str(&format!("{key}=from-dotenv\n"));
+        }
+        contents.push_str("STD_ENV_LOAD_ENV_ORDINARY_KEY = loaded \n");
+        std::fs::write(&dotenv, contents).unwrap();
+
+        let result = call_load_env(&dotenv);
+
+        assert!(
+            matches!(&result, Value::EnumValue { enum_name, variant, .. } if enum_name == "Result" && variant == "Ok"),
+            "load_env must keep loading the file: {result:?}"
+        );
+        for (key, previous) in before {
+            assert_eq!(std::env::var_os(key), previous, "load_env changed {key}");
+        }
+        assert_eq!(
+            std::env::var("STD_ENV_LOAD_ENV_ORDINARY_KEY").as_deref(),
+            Ok("loaded")
+        );
+    }
 }

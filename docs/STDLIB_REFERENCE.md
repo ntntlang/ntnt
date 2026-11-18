@@ -6490,6 +6490,8 @@ Loads environment variables from a .env file.
 
 Reads the file line by line, parsing KEY=VALUE pairs. Lines starting with # are treated as comments and skipped. Variables are set in the current process environment. Loading `.env` files remains supported in production and is not replaced or restricted by optional `std/secrets`.
 
+Host runtime-policy keys are reserved and skipped with one stderr warning per key, while the rest of the file still loads: NTNT_PROCESS_ENABLE, NTNT_PROCESS_ALLOW, NTNT_SSRF_PROTECTION, NTNT_ALLOW_LOCALHOST, NTNT_ALLOW_PRIVATE_IPS, NTNT_BLOCKED_HOSTS, NTNT_NET_ALLOW_PRIVATE, NTNT_NETMON_ENABLE, and every NTNT_SECRETS_* key (matched case-insensitively). Set them in the environment that starts ntnt. NTNT_ENV is not reserved.
+
 **Parameters:**
 
 - `path` — Path to the .env file
@@ -6502,6 +6504,10 @@ Reads the file line by line, parsing KEY=VALUE pairs. Lines starting with # are 
 load_env(".env")  // Load default .env file
 load_env(".env.local")  // Load environment-specific file
 ```
+
+**Gotchas:**
+
+- Reserved runtime-policy keys in the file are ignored with a warning; process execution and fetch() SSRF policy come from the environment that starts ntnt
 
 **See also:** `get_env`
 
@@ -12720,7 +12726,7 @@ run(program: String, args: Array<String>, options?: Map) -> Result<Map, String>
 
 Run a native program directly and wait for its bounded result.
 
-The operating-system process API receives every argument literally; no shell is invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW. Options: cwd (String), env (Map<String, String | Secret>), clear_env (Bool), stdin/stdout/stderr mode maps, timeout_ms, termination_grace_ms, and max_output_bytes. stdin modes are null, inherit, file, string, and bytes; stdout/stderr modes are capture, inherit, null, and file. File modes require path, output files optionally accept append, and string/bytes input requires data. run() has no default timeout; set timeout_ms whenever execution must be time-bounded.
+The operating-system process API receives every argument literally; no shell is invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW; both are read from the environment that starts ntnt, before application code runs, and load_env cannot change them. Options: cwd (String), env (Map<String, String | Secret>), clear_env (Bool), stdin/stdout/stderr mode maps, timeout_ms, termination_grace_ms, and max_output_bytes. stdin modes are null, inherit, file, string, and bytes; stdout/stderr modes are capture, inherit, null, and file. File modes require path, output files optionally accept append, and string/bytes input requires data. run() has no default timeout; set timeout_ms whenever execution must be time-bounded.
 
 **Parameters:**
 
@@ -12738,7 +12744,7 @@ run("/usr/bin/ffmpeg", ["-version"])  // => Ok({...})  // Run without a shell
 
 **Errors:**
 
-- **RuntimeError**: process execution is disabled — *Fix: Set NTNT_PROCESS_ENABLE=1 for a trusted application*
+- **RuntimeError**: process execution is disabled — *Fix: Set NTNT_PROCESS_ENABLE=1 in the environment that starts ntnt for a trusted application*
 - **RuntimeError**: Windows batch scripts are not direct executables — *Fix: Invoke an explicitly allowlisted cmd.exe only when shell authority is intentional*
 
 *Since v0.5.3*

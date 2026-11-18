@@ -921,6 +921,9 @@ fn install_run_shutdown_handler() -> anyhow::Result<()> {
 }
 
 fn main() {
+    // Host security policy comes from the environment that started ntnt,
+    // captured before any command can evaluate application code.
+    ntnt::stdlib::capture_host_policy();
     // Internal native-case transport. It is not an authority or sandbox boundary:
     // callers already have permission to execute local NTNT code.
     let internal_args: Vec<_> = std::env::args_os().collect();

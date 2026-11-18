@@ -49,6 +49,20 @@ use std::collections::HashMap;
 /// Type alias for stdlib module initialization functions
 pub type StdlibModule = HashMap<String, Value>;
 
+/// Capture host-owned runtime security policy (`std/process` execution and the
+/// `fetch()` SSRF policy) from the real process environment.
+///
+/// The first call in a process wins and later calls are no-ops, so environment
+/// changes made by application code (for example `load_env`) cannot grant
+/// capabilities. `main()` and `Interpreter::new()` both call this before any
+/// source is evaluated: every CLI command, server/job/task worker interpreter
+/// and embedding of the public `Interpreter` API constructs an interpreter
+/// first. Policy consumers also capture lazily for direct Rust callers.
+pub fn capture_host_policy() {
+    process::capture_host_policy();
+    http::capture_host_policy();
+}
+
 /// Stop process-local runtimes before the host exits.
 pub fn shutdown_runtimes() {
     crate::control_socket::stop_control_socket();

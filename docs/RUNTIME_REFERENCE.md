@@ -19,7 +19,7 @@ Runtime configuration, environment variables, and CLI commands for NTNT
 
 ## Environment Variables
 
-Environment variables that control NTNT runtime behavior
+Environment variables that control NTNT runtime behavior. Host security policy (`NTNT_PROCESS_ENABLE`, `NTNT_PROCESS_ALLOW`, the `fetch()` SSRF settings `NTNT_SSRF_PROTECTION`, `NTNT_ALLOW_LOCALHOST`, `NTNT_ALLOW_PRIVATE_IPS` and `NTNT_BLOCKED_HOSTS`, `NTNT_NET_ALLOW_PRIVATE`, `NTNT_NETMON_ENABLE` and every `NTNT_SECRETS_*` key) must be set in the environment that starts ntnt: process execution and `fetch()` SSRF policy are read before application code runs, and `load_env` skips these keys with a warning.
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|

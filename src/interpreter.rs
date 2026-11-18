@@ -1507,6 +1507,9 @@ impl Interpreter {
     }
 
     pub fn new() -> Self {
+        // Host security policy is fixed before this interpreter can evaluate
+        // any source; see `stdlib::capture_host_policy`.
+        crate::stdlib::capture_host_policy();
         let env = Environment::shared(Environment::new());
         let mut interpreter = Interpreter {
             #[cfg(test)]

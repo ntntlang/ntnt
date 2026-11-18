@@ -46,47 +46,73 @@ type Result<T> = std::result::Result<T, IntentError>;
 // SSRF Protection Configuration
 // =============================================================================
 
-/// SSRF protection configuration loaded from environment variables
+/// SSRF protection policy for `fetch()`, captured from the host environment
+/// before application code runs (see `crate::stdlib::capture_host_policy`).
 #[derive(Debug, Clone)]
 struct SsrfConfig {
     /// Whether SSRF protection is enabled (default: true)
     enabled: bool,
     /// Allow localhost requests (default: false in production, true in development)
     allow_localhost: bool,
+    /// `NTNT_ALLOW_LOCALHOST` was unset, so `allow_localhost` is the mode
+    /// default. A production mode selected after startup (for example through
+    /// `load_env`) still blocks loopback; a later mode change never loosens it.
+    localhost_follows_mode: bool,
     /// Allow private IP ranges (default: false)
     allow_private: bool,
     /// Additional blocked hosts (comma-separated in env var)
     blocked_hosts: Vec<String>,
 }
 
-impl Default for SsrfConfig {
-    fn default() -> Self {
-        let production_mode = std::env::var("NTNT_ENV")
-            .map(|v| v == "production" || v == "prod")
-            .unwrap_or(false);
+impl SsrfConfig {
+    fn from_environment(var: impl Fn(&str) -> Option<String>) -> Self {
+        let production_mode = var("NTNT_ENV").is_some_and(|v| is_production_mode(&v));
+        let explicit_localhost =
+            var("NTNT_ALLOW_LOCALHOST").map(|v| v == "1" || v.to_lowercase() == "true");
 
         SsrfConfig {
-            enabled: std::env::var("NTNT_SSRF_PROTECTION")
+            enabled: var("NTNT_SSRF_PROTECTION")
                 .map(|v| v != "0" && v.to_lowercase() != "false")
                 .unwrap_or(true), // Enabled by default
-            allow_localhost: std::env::var("NTNT_ALLOW_LOCALHOST")
-                .map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(!production_mode), // Allow in dev, block in prod
-            allow_private: std::env::var("NTNT_ALLOW_PRIVATE_IPS")
+            // Allow in dev, block in prod
+            allow_localhost: explicit_localhost.unwrap_or(!production_mode),
+            localhost_follows_mode: explicit_localhost.is_none(),
+            allow_private: var("NTNT_ALLOW_PRIVATE_IPS")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false), // Blocked by default
-            blocked_hosts: std::env::var("NTNT_BLOCKED_HOSTS")
+            blocked_hosts: var("NTNT_BLOCKED_HOSTS")
                 .map(|v| v.split(',').map(|s| s.trim().to_lowercase()).collect())
                 .unwrap_or_default(),
         }
     }
+
+    /// Loopback allowance for one request. `production_now` is the live
+    /// `NTNT_ENV`; it can only tighten the captured policy.
+    fn allows_localhost(&self, production_now: bool) -> bool {
+        self.allow_localhost && !(self.localhost_follows_mode && production_now)
+    }
 }
 
-/// Global SSRF configuration (loaded once from environment)
+fn is_production_mode(value: &str) -> bool {
+    value == "production" || value == "prod"
+}
+
+fn production_mode_now() -> bool {
+    std::env::var("NTNT_ENV").is_ok_and(|value| is_production_mode(&value))
+}
+
+/// Global SSRF configuration, captured once from the host environment.
 static SSRF_CONFIG: OnceLock<SsrfConfig> = OnceLock::new();
 
+/// Captures the `fetch()` SSRF policy on the first call in this process.
+/// `crate::stdlib::capture_host_policy` makes that call before any
+/// application code is evaluated, so `load_env` cannot change it.
+pub(crate) fn capture_host_policy() {
+    get_ssrf_config();
+}
+
 fn get_ssrf_config() -> &'static SsrfConfig {
-    SSRF_CONFIG.get_or_init(SsrfConfig::default)
+    SSRF_CONFIG.get_or_init(|| SsrfConfig::from_environment(|key| std::env::var(key).ok()))
 }
 
 /// Check if an IP address is private/internal
@@ -211,11 +237,12 @@ fn validated_http_target(url: &str) -> std::result::Result<Option<ValidatedHttpT
         Ok(iter) => iter.collect(),
         Err(_) => return Err(format!("Could not resolve hostname: {}", host)),
     };
-    validate_resolved_addresses(config, host, addrs).map(Some)
+    validate_resolved_addresses(config, production_mode_now(), host, addrs).map(Some)
 }
 
 fn validate_resolved_addresses(
     config: &SsrfConfig,
+    production_now: bool,
     host: String,
     addrs: Vec<SocketAddr>,
 ) -> std::result::Result<ValidatedHttpTarget, String> {
@@ -223,6 +250,7 @@ fn validate_resolved_addresses(
         return Err(format!("Could not resolve hostname: {}", host));
     }
 
+    let allow_localhost = config.allows_localhost(production_now);
     // Check all resolved IPs.
     for address in &addrs {
         let ip = address.ip();
@@ -230,7 +258,7 @@ fn validate_resolved_addresses(
         let is_private = is_private_ip(&ip);
 
         // Check localhost
-        if is_loopback && !config.allow_localhost {
+        if is_loopback && !allow_localhost {
             return Err(format!(
                 "Localhost requests blocked ({}). Set NTNT_ALLOW_LOCALHOST=true to allow.",
                 ip
@@ -3951,21 +3979,104 @@ mod tests {
         let config = SsrfConfig {
             enabled: true,
             allow_localhost: false,
+            localhost_follows_mode: false,
             allow_private: false,
             blocked_hosts: Vec::new(),
         };
         let public = "8.8.8.8:443".parse().unwrap();
         let blocked = "127.0.0.1:443".parse().unwrap();
+        assert!(validate_resolved_addresses(
+            &config,
+            false,
+            "example.test".into(),
+            vec![public, blocked]
+        )
+        .is_err());
         assert!(
-            validate_resolved_addresses(&config, "example.test".into(), vec![public, blocked])
-                .is_err()
+            validate_resolved_addresses(&config, false, "example.test".into(), vec![]).is_err()
         );
-        assert!(validate_resolved_addresses(&config, "example.test".into(), vec![]).is_err());
         let approved = vec![public, "1.1.1.1:443".parse().unwrap()];
         let target =
-            validate_resolved_addresses(&config, "example.test".into(), approved.clone()).unwrap();
+            validate_resolved_addresses(&config, false, "example.test".into(), approved.clone())
+                .unwrap();
         assert_eq!(target.addresses, approved);
         assert_eq!(target.host, "example.test");
+    }
+
+    fn ssrf_config_from(vars: &[(&str, &str)]) -> SsrfConfig {
+        let vars: HashMap<String, String> = vars
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        SsrfConfig::from_environment(|key| vars.get(key).cloned())
+    }
+
+    #[test]
+    fn ssrf_mode_selected_after_startup_only_tightens_loopback() {
+        // Development host: an application-selected production mode still blocks loopback.
+        let development = ssrf_config_from(&[]);
+        assert!(development.enabled);
+        assert!(development.allows_localhost(false));
+        assert!(!development.allows_localhost(true));
+        // Production host: an application-selected development mode cannot reopen loopback.
+        let production = ssrf_config_from(&[("NTNT_ENV", "production")]);
+        assert!(!production.allows_localhost(false));
+        assert!(!production.allows_localhost(true));
+        // An explicit host decision wins over every mode, as before.
+        let allowed = ssrf_config_from(&[("NTNT_ENV", "prod"), ("NTNT_ALLOW_LOCALHOST", "true")]);
+        assert!(allowed.allows_localhost(true));
+        let denied = ssrf_config_from(&[("NTNT_ALLOW_LOCALHOST", "false")]);
+        assert!(!denied.allows_localhost(false));
+
+        let loopback = vec!["127.0.0.1:80".parse().unwrap()];
+        assert!(validate_resolved_addresses(
+            &development,
+            false,
+            "a.test".into(),
+            loopback.clone()
+        )
+        .is_ok());
+        let error = validate_resolved_addresses(&development, true, "a.test".into(), loopback)
+            .expect_err("production selected by the application blocks loopback");
+        assert!(error.contains("Localhost requests blocked"), "{error}");
+    }
+
+    #[test]
+    fn ssrf_policy_is_captured_once() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("NTNT_SSRF_PROTECTION", value),
+                    None => std::env::remove_var("NTNT_SSRF_PROTECTION"),
+                }
+            }
+        }
+        let captured = get_ssrf_config().enabled;
+        let _restore = Restore(std::env::var_os("NTNT_SSRF_PROTECTION"));
+        std::env::set_var(
+            "NTNT_SSRF_PROTECTION",
+            if captured { "false" } else { "true" },
+        );
+        assert_ne!(
+            SsrfConfig::from_environment(|key| std::env::var(key).ok()).enabled,
+            captured
+        );
+        assert_eq!(get_ssrf_config().enabled, captured);
+        // Requests consult the captured policy: an enabled policy rejects the
+        // scheme before any resolution; a disabled one admits the URL untouched.
+        assert_eq!(
+            validated_http_target("ftp://policy.invalid/").is_err(),
+            captured
+        );
+    }
+
+    #[test]
+    fn interpreter_construction_captures_ssrf_policy() {
+        // Process-per-test runners start with no snapshot, so this observes the
+        // capture that Interpreter::new() performs before any source is evaluated.
+        let _interpreter = crate::interpreter::Interpreter::new();
+        assert!(SSRF_CONFIG.get().is_some());
     }
 
     #[test]
