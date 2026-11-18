@@ -68,6 +68,7 @@ use cookies::{
 #[cfg(test)]
 use guards::path_matches_protected_pattern;
 use guards::validate_auth_challenge_kind;
+pub(crate) use guards::RouteDispatch;
 pub use guards::{
     enforce_auth_for_request, get_protected_paths, register_protected_paths, reset_protected_paths,
 };
@@ -3383,6 +3384,11 @@ pub fn init() -> HashMap<String, Value> {
     // - `require_auth("/admin/*")` registers protected path patterns for file-routed apps.
     //
     // - `require_auth(req)` may be called directly inside custom middleware.
+    //
+    // Under the auth route prefix, std/auth's own handlers (login page, OAuth
+    // start and callback, logout, health, `auth_me`) stay public; app handlers
+    // there are protected like any other route. Paths match as the router
+    // matches them, so `//admin` and `/admin/` are both `/admin`.
     //
     // @param target Optional request object, single path pattern, or array of path patterns
     // @returns Middleware function, Unit for path registration, or a redirect/401 response when called with a request
@@ -14516,6 +14522,75 @@ response.status
             Value::String("/auth/google".to_string()),
         )]));
 
-        assert!(enforce_auth_for_request(&req, true).is_ok());
+        let builtin_start = Value::NativeFunction {
+            name: "_auth_start".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: handle_auth_start,
+        };
+        let _dispatch = RouteDispatch::enter(&builtin_start);
+        assert!(matches!(enforce_auth_for_request(&req, true), Ok(None)));
+    }
+
+    #[test]
+    fn test_enforce_auth_for_request_exempts_only_std_auth_handlers_under_prefix() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_protected_paths();
+        init_auth(AuthConfig {
+            providers: vec![ProviderConfig {
+                name: "google".to_string(),
+                ..ProviderConfig::default()
+            }],
+            protected_paths: vec!["/auth/*".to_string(), "/admin/*".to_string()],
+            ..AuthConfig::default()
+        });
+        let request = |path: &str| {
+            Value::Map(HashMap::from([(
+                "path".to_string(),
+                Value::String(path.to_string()),
+            )]))
+        };
+        let native = |name: &str| Value::NativeFunction {
+            name: name.to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |_| Ok(Value::Unit),
+        };
+        let under_prefix = request("/auth/settings");
+        let denied = |req: &Value| {
+            enforce_auth_for_request(req, true).is_err()
+                && enforce_auth_for_request(req, false).is_err()
+        };
+        let exempt = |req: &Value| {
+            matches!(enforce_auth_for_request(req, true), Ok(None))
+                && matches!(enforce_auth_for_request(req, false), Ok(None))
+        };
+
+        // No recorded dispatch, an app function, or another native handler:
+        // the prefix alone exempts nothing.
+        assert!(denied(&under_prefix));
+        for handler in [Value::Unit, native("require_auth_middleware")] {
+            let _dispatch = RouteDispatch::enter(&handler);
+            assert!(denied(&under_prefix));
+        }
+
+        let auth_index = native("_auth_index");
+        {
+            let _dispatch = RouteDispatch::enter(&auth_index);
+            assert!(exempt(&under_prefix));
+            {
+                let _nested = RouteDispatch::enter(&Value::Unit);
+                assert!(denied(&under_prefix));
+            }
+            assert!(exempt(&under_prefix), "dropping restores the outer state");
+            // Outside the prefix a std/auth handler keeps the app's rule.
+            assert!(denied(&request("/admin/auth-health")));
+        }
+        assert!(denied(&under_prefix), "dropping clears the state");
+
+        let _dispatch = RouteDispatch::enter(&native("auth_health"));
+        assert!(exempt(&request("//auth//health/")));
     }
 }

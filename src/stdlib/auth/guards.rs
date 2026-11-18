@@ -2,6 +2,42 @@ use super::cookies::build_signed_session_cookie_with_max_age;
 use super::sessions::{get_session_for_request, SessionAccessEffect};
 use super::*;
 use crate::stdlib::http_server::canonical_route_path;
+use std::cell::Cell;
+
+thread_local! {
+    /// Whether the request this thread is serving was routed to one of
+    /// std/auth's public handlers. Only [`RouteDispatch`] changes it.
+    static SERVING_PUBLIC_AUTH_HANDLER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Records, for one request, whether the router selected one of std/auth's
+/// public handlers (`super::routes::PUBLIC_AUTH_HANDLERS`). The interpreter
+/// holds it while middleware and the handler run, so the guard can exempt
+/// std/auth's own routes without exempting an app handler that shares their
+/// prefix. Dropping it restores the previous state.
+#[must_use = "the selected handler is recorded only while this value is alive"]
+pub struct RouteDispatch {
+    previous: bool,
+}
+
+impl RouteDispatch {
+    pub fn enter(handler: &Value) -> Self {
+        let public = matches!(
+            handler,
+            Value::NativeFunction { name, .. }
+                if super::routes::PUBLIC_AUTH_HANDLERS.contains(&name.as_str())
+        );
+        Self {
+            previous: SERVING_PUBLIC_AUTH_HANDLER.with(|serving| serving.replace(public)),
+        }
+    }
+}
+
+impl Drop for RouteDispatch {
+    fn drop(&mut self) {
+        SERVING_PUBLIC_AUTH_HANDLER.with(|serving| serving.set(self.previous));
+    }
+}
 
 /// A protected path pattern in the router's canonical form (see
 /// `canonical_route_path`), keeping a trailing `/*` subtree marker.
@@ -116,7 +152,15 @@ fn path_matches_normalized_protected_pattern(path: &str, pattern: &str) -> bool 
     path == pattern
 }
 
-fn is_auth_exempt_path(path: &str) -> bool {
+/// std/auth's public routes (login page, OAuth start and callback, logout,
+/// health) need no session. The exemption follows the handler the router
+/// selected, so an app handler under the same prefix keeps the protection
+/// the app gave it with `require_auth()` or a protected path.
+fn is_auth_exempt(path: &str) -> bool {
+    SERVING_PUBLIC_AUTH_HANDLER.with(Cell::get) && is_under_auth_prefix(path)
+}
+
+fn is_under_auth_prefix(path: &str) -> bool {
     let prefix = get_auth_config()
         .map(|config| super::routes::auth_route_prefix(&config))
         .unwrap_or_else(|| "/auth".to_string());
@@ -250,7 +294,7 @@ fn auth_required_response(request: &Value) -> Value {
 
 /// `path` is canonical (see `request_path`), like the stored patterns.
 fn path_requires_auth(path: &str) -> bool {
-    if is_auth_exempt_path(path) {
+    if is_auth_exempt(path) {
         return false;
     }
 
@@ -268,7 +312,7 @@ pub fn enforce_auth_for_request(
 ) -> std::result::Result<Option<String>, Box<Value>> {
     let path = request_path(request);
 
-    if is_auth_exempt_path(&path) {
+    if is_auth_exempt(&path) {
         return Ok(None);
     }
 

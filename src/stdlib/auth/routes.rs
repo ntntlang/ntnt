@@ -102,6 +102,24 @@ pub fn auth_server_routes(config: &AuthConfig) -> Vec<AuthServerRoute> {
     routes
 }
 
+/// std/auth's own handlers that serve visitors without a session: the
+/// built-in routes above and the convenience handlers an app can mount itself
+/// (`get("/auth/{provider}", auth_start)`). `auth_me` answers an anonymous
+/// caller with its own 401. Under the route prefix, the auth guard exempts a
+/// request only when the router selected one of these.
+pub(super) const PUBLIC_AUTH_HANDLERS: [&str; 10] = [
+    "_auth_index",
+    "_auth_health",
+    "_auth_logout",
+    "_auth_start",
+    "_auth_callback",
+    "auth_start",
+    "auth_callback",
+    "auth_logout",
+    "auth_health",
+    "auth_me",
+];
+
 /// True when a fixed one-segment GET route would hide a configured provider.
 fn shadows_provider(config: &AuthConfig, route: &AuthServerRoute) -> bool {
     let prefix = auth_route_prefix(config);
@@ -904,6 +922,34 @@ mod tests {
             ..AuthConfig::default()
         };
         assert_eq!(auth_route_path(&config, ""), "/account");
+    }
+
+    #[test]
+    fn public_auth_handlers_name_exactly_std_auth_handlers() {
+        // Every built-in route handler is public, for any provider set.
+        for providers in [vec![], vec!["github"], vec!["health", "google"]] {
+            let config = AuthConfig {
+                providers: providers
+                    .into_iter()
+                    .map(|name| ProviderConfig {
+                        name: name.to_string(),
+                        ..ProviderConfig::default()
+                    })
+                    .collect(),
+                ..AuthConfig::default()
+            };
+            for route in auth_server_routes(&config) {
+                assert!(PUBLIC_AUTH_HANDLERS.contains(&route.name), "{}", route.name);
+            }
+        }
+        // The others are std/auth exports apps mount themselves.
+        let module = super::super::init();
+        for name in PUBLIC_AUTH_HANDLERS.iter().filter(|n| !n.starts_with('_')) {
+            assert!(
+                matches!(module.get(*name), Some(Value::NativeFunction { name: native, .. }) if native == name),
+                "{name} must be a std/auth native handler"
+            );
+        }
     }
 
     #[test]

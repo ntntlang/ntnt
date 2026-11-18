@@ -3313,6 +3313,8 @@ Usage patterns:
 
 - `require_auth(req)` may be called directly inside custom middleware.
 
+Under the auth route prefix, std/auth's own handlers (login page, OAuth start and callback, logout, health, `auth_me`) stay public; app handlers there are protected like any other route. Paths match as the router matches them, so `//admin` and `/admin/` are both `/admin`.
+
 **Parameters:**
 
 - `target` — Optional request object, single path pattern, or array of path patterns

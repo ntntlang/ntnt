@@ -10366,6 +10366,10 @@ impl Interpreter {
                     }
                 }
 
+                // The auth guard exempts std/auth's public routes by the
+                // handler selected here; it applies to middleware and the handler.
+                let _auth_dispatch = crate::stdlib::auth::RouteDispatch::enter(&handler);
+
                 // Process request to get request Value
                 match http_server::process_request(request, route_params) {
                     Ok((mut req_value, http_request)) => {
@@ -11071,6 +11075,10 @@ impl Interpreter {
 
             // Convert to NTNT Value
             let req_value = full_request.to_value();
+
+            // The auth guard exempts std/auth's public routes by the handler
+            // selected here; it applies to middleware and the handler.
+            let _auth_dispatch = crate::stdlib::auth::RouteDispatch::enter(&handler);
 
             // Run middleware
             let middleware_handlers: Vec<Value> = self.server_state.get_middleware().to_vec();

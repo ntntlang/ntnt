@@ -1,6 +1,10 @@
-//! Auth route protection over the real async `ntnt run` server: auth decides
-//! on the canonical path the router matches, so repeated or trailing slashes
-//! cannot select a protected handler while missing its rule.
+//! Auth route protection over the real async `ntnt run` server.
+//!
+//! - The public exemption under the auth `route_prefix` covers std/auth's own
+//!   handlers only. A custom handler sharing that prefix gets the protection
+//!   the app asked for: `use_middleware(require_auth())` or a protected path.
+//! - Auth decides on the canonical path the router matches, so repeated or
+//!   trailing slashes cannot select a protected handler while missing its rule.
 #[path = "support/system_fixture.rs"]
 mod fixture;
 
@@ -136,6 +140,124 @@ fn session_cookie(addr: SocketAddr) -> String {
     let pair = cookie.split(';').next().unwrap().trim().to_string();
     assert!(pair.starts_with("ntnt_session="), "{cookie}");
     pair
+}
+
+#[test]
+fn require_auth_middleware_protects_custom_handlers_under_the_auth_prefix() {
+    let mut server = fixture::Fixture::start(REQUIRE_AUTH_APP, &["run"], &[]);
+    let addr = server.ready();
+    for (method, target, output) in [
+        ("GET", "/auth/profile", "custom-profile"),
+        ("GET", "/auth/account/settings", "custom-settings"),
+        ("GET", "//auth/account/settings", "custom-settings"),
+        ("POST", "/auth/sessions/revoke", "custom-revoke"),
+    ] {
+        let reply = send(addr, method, target, &[]);
+        assert_sent_to_login(&reply, &format!("{method} {target}"), output);
+    }
+    // An API client gets the guard's JSON 401 instead of a redirect.
+    let reply = send(
+        addr,
+        "POST",
+        "/auth/sessions/revoke",
+        &[("Accept", "application/json")],
+    );
+    assert_eq!(reply.status, 401, "{reply}");
+    assert!(reply.body.contains("Authentication required"), "{reply}");
+    assert!(!reply.body.contains("custom-revoke"), "{reply}");
+}
+
+#[test]
+fn require_auth_middleware_keeps_std_auth_handlers_public() {
+    let mut server = fixture::Fixture::start(REQUIRE_AUTH_APP, &["run"], &[]);
+    let addr = server.ready();
+    // Built-in login page: one provider, so it forwards to that provider.
+    let reply = send(addr, "GET", "/auth", &[]);
+    assert_eq!(
+        (reply.status, reply.location()),
+        (302, Some("/auth/github")),
+        "{reply}"
+    );
+    // The app-wired convenience handlers start and finish the OAuth flow.
+    let reply = send(addr, "GET", "/auth/github", &[]);
+    assert_eq!(reply.status, 302, "{reply}");
+    assert!(
+        reply
+            .location()
+            .is_some_and(|to| to.starts_with(GITHUB_AUTHORIZE)),
+        "{reply}"
+    );
+    let reply = send(addr, "GET", "/auth/github/callback", &[]);
+    assert_eq!(
+        (reply.status, reply.location()),
+        (302, Some("/")),
+        "{reply}"
+    );
+    // auth_me answers an anonymous caller itself.
+    let reply = send(addr, "GET", "/auth/me", &[]);
+    assert_eq!(reply.status, 401, "{reply}");
+    assert!(reply.body.contains("Not authenticated"), "{reply}");
+    // Built-in logout.
+    let reply = send(addr, "POST", "/auth/logout", &[]);
+    assert_eq!(
+        (reply.status, reply.location()),
+        (302, Some("/")),
+        "{reply}"
+    );
+    assert!(reply.header("set-cookie").is_some(), "{reply}");
+}
+
+#[test]
+fn protected_path_rule_protects_custom_handler_under_the_auth_prefix() {
+    let mut server = fixture::Fixture::start(PROTECTED_PATHS_APP, &["run"], &[]);
+    let addr = server.ready();
+    let spellings = [
+        "/auth/admin/panel",
+        "//auth/admin/panel",
+        "/auth//admin/panel",
+    ];
+    for target in spellings {
+        let reply = send(addr, "GET", target, &[]);
+        assert_sent_to_login(&reply, &format!("GET {target}"), "auth-admin-panel");
+    }
+
+    let cookie = session_cookie(addr);
+    for target in spellings {
+        let reply = send(addr, "GET", target, &[("Cookie", &cookie)]);
+        assert_eq!(reply.status, 200, "GET {target} with a session: {reply}");
+        assert!(reply.body.contains("auth-admin-panel"), "{reply}");
+    }
+
+    // `/auth/*` also covers the built-in auth routes; they stay public.
+    let reply = send(addr, "GET", "/auth", &[]);
+    assert_eq!(
+        (reply.status, reply.location()),
+        (302, Some("/auth/github")),
+        "{reply}"
+    );
+    let reply = send(addr, "GET", "/auth/github", &[]);
+    assert!(
+        reply.status == 302
+            && reply
+                .location()
+                .is_some_and(|to| to.starts_with(GITHUB_AUTHORIZE)),
+        "{reply}"
+    );
+    let reply = send(addr, "GET", "/auth/github/callback", &[]);
+    assert_eq!(
+        (reply.status, reply.location()),
+        (302, Some("/")),
+        "{reply}"
+    );
+    let reply = send(addr, "GET", "/auth/health", &[]);
+    assert_eq!(reply.status, 200, "{reply}");
+    assert!(reply.body.contains("\"ok\":true"), "{reply}");
+    let reply = send(addr, "POST", "/auth/logout", &[]);
+    assert_eq!(
+        (reply.status, reply.location()),
+        (302, Some("/")),
+        "{reply}"
+    );
 }
 
 #[test]
