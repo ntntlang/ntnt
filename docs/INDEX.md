@@ -39,7 +39,12 @@ Source files:
 | Document | Description |
 |----------|-------------|
 | [Roadmap](../ROADMAP.md) | Implementation phases and progress |
-| [v0.5.4 Proposed Release Notes](release-notes-v0.5.4.md) | Native byte crypto, secure filesystem primitives, bounded TCP listeners, HTTP fixture options (unreleased) |
+| [v0.6.2 Release Notes](release-notes/v0.6.2.md) | Database setup (`ntnt db init`/`new`), PostgreSQL TLS and migration time limits |
+| [v0.6.1 Release Notes](release-notes/v0.6.1.md) | Native WebSockets and runtime hardening |
+| [v0.6.0 Release Notes](release-notes/v0.6.0.md) | Reviewed database changes and native live updates |
+| [v0.5.6 Release Notes](release-notes-v0.5.6.md) | Task helpers, local TOTP QR codes and host CA trust |
+| [v0.5.5 Release Notes](release-notes-v0.5.5.md) | Faster Redis jobs, auth fixes and probe deadlines |
+| [v0.5.4 Release Notes](release-notes-v0.5.4.md) | Native byte crypto, secure filesystem primitives, bounded TCP listeners, HTTP fixture options |
 | [v0.5.3 Release Notes](release-notes/v0.5.3.md) | Native Intent tests, HTTP security, SNMP GET/WALK, supervised processes, source-mapped Markdown, and binary downloads |
 | [v0.5.2 Development Notes (Unpublished)](release-notes/v0.5.2.md) | Historical SNMP GET slice notes; changes included in v0.5.3 |
 | [v0.5.1 Release Notes](release-notes/v0.5.1.md) | Passwordless magic-link flow, opaque provider-neutral secrets, compatibility guarantees, and auth hardening |

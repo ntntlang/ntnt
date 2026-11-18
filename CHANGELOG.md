@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased (0.6.2)
+## Unreleased
 
-See [unreleased notes](docs/release-notes/unreleased.md).
+No changes recorded since 0.6.2.
+
+## 0.6.2
+
+See the [versioned announcement and upgrade guidance](docs/release-notes/v0.6.2.md).
 
 ### Added
 
@@ -18,6 +22,13 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   `statement_seconds` (scripts and concurrent index builds) and
   `migrator_wait_seconds`, bounded, bound into plans, with deadlines that fit
   them (#346).
+
+### Changed
+
+- `ntnt db` plans bind the PostgreSQL transport, so `migrate` needs a plan made by
+  0.6.2: regenerate plans made by 0.6.1 (#344).
+- A competing `ntnt db` migrator fails with `DB_LOCK_CONFLICT` instead of a
+  statement timeout (#346).
 
 ### Fixed
 

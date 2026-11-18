@@ -6,7 +6,7 @@ NTNT is an agent-native programming language designed for AI-driven web developm
 
 This document describes the current implementation architecture as of v0.4.7.
 
-## Native system primitives (v0.5.4, unreleased)
+## Native system primitives (v0.5.4)
 
 `std/net/tcp.rs` owns server-side socket descriptors through shared opaque owners.
 Each open descriptor carries one of 128 RAII capacity permits; weak tracking exists

@@ -9,6 +9,13 @@ binary, and write `docs/release-notes/vX.Y.Z.md`. Its first line must be
 references and dependency versions intact. Compare against the last **published**
 release, not merely the previous development package version.
 
+Build the versioned file from `docs/release-notes/unreleased.md`, then reset that
+file, turn the CHANGELOG's Unreleased section into `## X.Y.Z` below a new empty
+Unreleased section, and add the release to the table in `docs/INDEX.md`. The
+versioned file is also the GitHub release body, where relative links do not
+resolve, so link to documentation with tag-pinned URLs
+(`https://github.com/ntntlang/ntnt/blob/vX.Y.Z/...`).
+
 The tag workflow reads the exact versioned file for the GitHub release title/body.
 It refuses missing, empty or mismatched headings before publication; GitHub’s
 automatically generated change list follows the curated announcement. A development
