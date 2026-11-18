@@ -70,13 +70,23 @@ at `~/.local/share/licenses/ntnt/LICENSE.openssl`.
 ## Windows installer
 
 `install.ps1` installs the latest `ntnt-windows-x64.zip` release binary into
-`%USERPROFILE%\.local\bin`. Like `install.sh`, it has no source fallback: if the
-latest release cannot be resolved, downloaded, extracted or run, it stops with an
-error. It does **not** install Rust, clone or update a checkout, or compile code;
-build your chosen tag manually instead. It does not yet select a version or
-verify the `.sha256` sidecar. Its optional starter kit (docs, examples, agent
-guides from `main`) is copied into a new `.\ntnt` only; an existing `.\ntnt` is
-never modified.
+`%USERPROFILE%\.local\bin`. As with `install.sh`, the archive must match the
+SHA256 in the same release's `ntnt-windows-x64.zip.sha256` sidecar (a single
+`<hex>  ntnt-windows-x64.zip` entry; CRLF and either hex case are accepted)
+before anything is extracted. The candidate `ntnt.exe` is staged next to the
+destination and must run and report the release version (`ntnt X.Y.Z` for tag
+`vX.Y.Z`) before it replaces an existing `ntnt.exe`. A missing or malformed
+sidecar, a checksum mismatch, an extraction failure, or a binary that does not
+run or reports another version stops the installer with exit code 1 and leaves
+any existing `ntnt.exe` in place. Checksums detect corruption; they are fetched
+from the same release and are not an independent signature. Like `install.sh`,
+it has no source fallback: it does **not** install Rust, clone or update a
+checkout, or compile code; build your chosen tag manually instead. It does not
+yet select a version. Its optional starter kit (docs, examples, agent guides) is
+fetched from the **same release tag**, is not covered by the binary checksum,
+and is copied into a new `.\ntnt` only; an existing `.\ntnt` is never modified.
+`tests/release/test_windows_installer.py` runs the installer offline under
+`pwsh` when it is on PATH and skips those tests otherwise.
 
 ## ARMv7 build recipe
 

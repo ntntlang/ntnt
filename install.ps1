@@ -1,7 +1,10 @@
 # NTNT Language Installer for Windows
 # Usage: irm https://raw.githubusercontent.com/ntntlang/ntnt/main/install.ps1 | iex
-# No source fallback: if the release binary cannot be installed, the installer
-# stops. It never installs Rust, clones or updates a checkout, or compiles code.
+# The release archive must match its .sha256 sidecar before extraction, and the
+# new ntnt.exe must run and report the release version before it replaces an
+# existing one. No source fallback: if the release binary cannot be installed,
+# the installer stops. It never installs Rust, clones or updates a checkout, or
+# compiles code.
 #
 # Requirements: PowerShell 5.0+ (Windows 10+ has this by default)
 
@@ -9,6 +12,10 @@ $ErrorActionPreference = "Continue"
 $script:ExitCode = 0
 $script:Repo = "ntntlang/ntnt"
 $script:InstallDir = "$env:USERPROFILE\.local\bin"
+$script:Archive = "ntnt-windows-x64.zip"
+# The installed release tag. Not $script:Version: the main block assigns
+# $version, and PowerShell variable names ignore case.
+$script:ReleaseTag = $null
 
 # Check PowerShell version
 if ($PSVersionTable.PSVersion.Major -lt 5) {
@@ -40,6 +47,32 @@ function Get-LatestVersion {
     }
 }
 
+# Return the SHA-256 that a release .sha256 sidecar records for $archiveName.
+# The release workflow writes "<hex>  <name>" with CRLF. Accept LF or no line
+# end, a byte order mark, either hex case and a "*" binary-mode marker, but only
+# a single entry that names this exact archive.
+function Read-ReleaseChecksum($checksumFile, $archiveName) {
+    # ReadAllText drops a byte order mark.
+    $text = [System.IO.File]::ReadAllText($checksumFile).Replace("`r", "").Trim()
+    $entry = [regex]::Match($text, '^([0-9A-Fa-f]{64})[ \t]+\*?(\S+)$')
+    if (-not $entry.Success) {
+        throw "Malformed release checksum file $archiveName.sha256; nothing installed"
+    }
+    if ($entry.Groups[2].Value -cne $archiveName) {
+        throw "Release checksum names a different archive ($($entry.Groups[2].Value)); nothing installed"
+    }
+    return $entry.Groups[1].Value
+}
+
+# Run ntnt.exe --version and return what it printed; throw if it cannot run.
+function Get-NtntVersionOutput($exe) {
+    $output = & $exe --version
+    if ($LASTEXITCODE -ne 0) {
+        throw "exit code $LASTEXITCODE"
+    }
+    return ($output | Out-String).Trim()
+}
+
 function Try-DownloadBinary {
     Write-Host "Checking for pre-built binary..."
     Write-Host ""
@@ -49,74 +82,108 @@ function Try-DownloadBinary {
         Write-Host "Could not determine latest version (no releases yet or API unavailable)." -ForegroundColor Yellow
         return $false
     }
+    if ($version -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$') {
+        Write-Host "Latest release has an invalid version tag: $version" -ForegroundColor Yellow
+        return $false
+    }
 
     Write-Host "Latest version: $version"
 
-    $url = "https://github.com/$script:Repo/releases/download/$version/ntnt-windows-x64.zip"
+    $url = "https://github.com/$script:Repo/releases/download/$version/$script:Archive"
     $tmpDir = Join-Path $env:TEMP "ntnt-install-$(Get-Random)"
-    $tmpFile = Join-Path $tmpDir "ntnt.zip"
+    $tmpFile = Join-Path $tmpDir $script:Archive
+    $checksumFile = "$tmpFile.sha256"
+    $extractDir = Join-Path $tmpDir "extract"
+    $stagedPath = $null
 
     Write-Host "Downloading: $url"
     Write-Host ""
 
     try {
         # Create temp directory
-        New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+        New-Item -ItemType Directory -Force -Path $tmpDir -ErrorAction Stop | Out-Null
 
         # Download with timeout
         $webClient = New-Object System.Net.WebClient
         $webClient.DownloadFile($url, $tmpFile)
 
         # Verify file was downloaded and has content
-        if (-not (Test-Path $tmpFile)) {
+        if (-not (Test-Path -LiteralPath $tmpFile)) {
             throw "Download failed - file not created"
         }
-        $fileSize = (Get-Item $tmpFile).Length
+        $fileSize = (Get-Item -LiteralPath $tmpFile).Length
         if ($fileSize -lt 1000) {
             throw "Download failed - file too small ($fileSize bytes)"
         }
 
         Write-Host "Downloaded $([math]::Round($fileSize / 1MB, 2)) MB"
 
+        # Verify the archive against the checksum published with it before
+        # extracting anything.
+        try {
+            $webClient.DownloadFile("$url.sha256", $checksumFile)
+        } catch {
+            throw "Release checksum unavailable ($url.sha256); nothing installed: $_"
+        }
+        $expectedHash = Read-ReleaseChecksum $checksumFile $script:Archive
+        $actualHash = (Get-FileHash -LiteralPath $tmpFile -Algorithm SHA256 -ErrorAction Stop).Hash
+        if ($actualHash -ine $expectedHash) {
+            throw "SHA256 mismatch for $script:Archive (expected $($expectedHash.ToLowerInvariant()), got $($actualHash.ToLowerInvariant())); nothing installed"
+        }
+        Write-Host "[OK] SHA256 verified"
+
         # Extract
         try {
-            Expand-Archive -Path $tmpFile -DestinationPath $tmpDir -Force
+            Expand-Archive -LiteralPath $tmpFile -DestinationPath $extractDir -Force -ErrorAction Stop
         } catch {
             throw "Failed to extract archive: $_"
         }
 
         # Find the binary (might be in root or subdirectory)
-        $ntntExe = Get-ChildItem -Path $tmpDir -Filter "ntnt.exe" -Recurse | Select-Object -First 1
+        $ntntExe = Get-ChildItem -LiteralPath $extractDir -Filter "ntnt.exe" -Recurse | Select-Object -First 1
         if (-not $ntntExe) {
             throw "Binary not found in archive"
         }
 
-        # Install to ~/.local/bin
-        New-Item -ItemType Directory -Force -Path $script:InstallDir | Out-Null
+        # Stage the candidate next to ~/.local/bin/ntnt.exe and run it there; an
+        # existing ntnt.exe is replaced only after it reports this release.
+        New-Item -ItemType Directory -Force -Path $script:InstallDir -ErrorAction Stop | Out-Null
         $destPath = Join-Path $script:InstallDir "ntnt.exe"
-        Move-Item -Path $ntntExe.FullName -Destination $destPath -Force
+        if (Test-Path -LiteralPath $destPath -PathType Container) {
+            throw "Install destination is a directory: $destPath"
+        }
+        $stagedPath = Join-Path $script:InstallDir ".ntnt-$(Get-Random).exe"
+        Copy-Item -LiteralPath $ntntExe.FullName -Destination $stagedPath -ErrorAction Stop
 
-        # Cleanup temp
-        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
-
-        # Verify it runs
+        $expectedOutput = "ntnt $($version.Substring(1))"
         try {
-            $testOutput = & $destPath --version 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                throw "Binary returned error code $LASTEXITCODE"
-            }
+            $reported = Get-NtntVersionOutput $stagedPath
         } catch {
-            Remove-Item -Force $destPath -ErrorAction SilentlyContinue
-            throw "Binary downloaded but won't run: $_"
+            throw "Binary cannot run on this system ($_); existing installation unchanged"
+        }
+        if ($reported -cne $expectedOutput) {
+            throw "Binary reports '$reported', expected '$expectedOutput'; existing installation unchanged"
         }
 
-        Write-Host "[OK] Downloaded and installed ntnt to $script:InstallDir" -ForegroundColor Green
+        try {
+            Move-Item -LiteralPath $stagedPath -Destination $destPath -Force -ErrorAction Stop
+        } catch {
+            throw "Could not replace $destPath (is ntnt running?): $_"
+        }
+        $stagedPath = $null
+        $script:ReleaseTag = $version
+
+        Write-Host "[OK] Installed $reported to $script:InstallDir" -ForegroundColor Green
         return $true
 
     } catch {
-        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
-        Write-Host "Download failed: $_" -ForegroundColor Yellow
+        Write-Host "Install failed: $_" -ForegroundColor Yellow
         return $false
+    } finally {
+        if ($stagedPath) {
+            Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -174,8 +241,9 @@ if (-not $inPath) {
     Write-Host ""
 }
 
-# Download docs, examples, and agent helper files into a new .\ntnt directory.
-# An existing .\ntnt (a project or clone) is never modified.
+# Download docs, examples, and agent helper files from the installed release's
+# tag (never main) into a new .\ntnt directory. An existing .\ntnt (a project or
+# clone) is never modified.
 function Download-StarterKit {
     $ntntHome = Join-Path (Get-Location) "ntnt"
     Write-Host ""
@@ -183,12 +251,12 @@ function Download-StarterKit {
         Write-Host "Skipping starter kit: .\ntnt already exists." -ForegroundColor Yellow
         return $false
     }
-    Write-Host "Downloading NTNT starter kit (docs, examples, agent guides)..."
+    Write-Host "Downloading NTNT $script:ReleaseTag starter kit (docs, examples, agent guides)..."
 
     # Download zip from GitHub (no git required)
     $tmpDir = Join-Path $env:TEMP "ntnt-starter-$(Get-Random)"
     $zipFile = Join-Path $tmpDir "ntnt.zip"
-    $zipUrl = "https://github.com/$script:Repo/archive/refs/heads/main.zip"
+    $zipUrl = "https://github.com/$script:Repo/archive/refs/tags/$($script:ReleaseTag).zip"
 
     try {
         New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
