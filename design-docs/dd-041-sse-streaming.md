@@ -1,6 +1,6 @@
 # DD-041: Native SSE and WebSockets
 
-**Status:** Slice A (native SSE) shipped in v0.6.0. The v0.6.1 candidate implements bounded process-local WebSockets, worker callbacks, broadcast `source`, finite socket lifetime, reload closing, setup-source parity and different-source worker quarantine. The accepted design is not fully closed; current limits and deferred guarantees are separated below.
+**Status:** Slice A (native SSE) shipped in v0.6.0. Bounded process-local WebSockets, worker callbacks, broadcast `source`, finite socket lifetime, reload closing, setup-source parity and different-source worker quarantine shipped in v0.6.1. The accepted design is not fully closed; current limits and deferred guarantees are separated below.
 **Author:** Larri
 **Created:** 2026-03-17
 **Revised:** 2026-10-25
@@ -68,9 +68,10 @@ exit the process, while Rust embedding must account for non-preemptible work.
 - Default development uses one worker. With `NTNT_WORKERS>1`, only worker 0 reloads;
   other workers can serve old HTTP code and refuse current WebSocket work until
   restart. Coordinated reload is #361, not a delivered production-upgrade protocol.
-- Per-application realtime isolation, full frozen program/endpoint attestation,
-  inherited task provenance, aggregate downstream transport-buffer accounting
-  and hard SSE socket-write/teardown guarantees remain deferred or unproven.
+- Per-application realtime isolation (#389), full frozen program/endpoint
+  attestation and inherited task provenance (#390), and aggregate downstream
+  transport-buffer accounting and hard SSE socket-write/teardown guarantees (#391)
+  remain deferred or unproven.
 
 See the [agent guide](../docs/AI_AGENT_GUIDE.md#websockets),
 [release announcement](../docs/release-notes/v0.6.1.md) and current async tests.
@@ -128,7 +129,7 @@ Ordinary response builders, normal middleware before streaming, named buses shar
 
 ## 3. Public surface: small and additive
 
-The SSE APIs (`broadcast`, `publish`, `sse`) are implemented for v0.6.0; the WebSocket APIs below are implemented in the 0.6.1 candidate. Later lifecycle/isolation requirements in the accepted target are not all delivered; consult the implemented boundary and agent guide. None of these APIs was available in v0.5.6. No new parser syntax or route DSL is required.
+The SSE APIs (`broadcast`, `publish`, `sse`) shipped in v0.6.0, and the WebSocket APIs below shipped in v0.6.1. Later lifecycle/isolation requirements in the accepted target are not all delivered; consult the implemented boundary and agent guide. None of these APIs was available in v0.5.6. No new parser syntax or route DSL is required.
 
 - `std/concurrent.broadcast(name, options?) -> Broadcast`: a named, runtime-scoped native fan-out source.
 - `std/concurrent.publish(bus, value, event_options?) -> Result<Unit, String>`: validate and JSON-encode once, then publish without waiting for any client. Zero subscribers is a successful no-op, not replay storage. Optional `event` and `id` fields are SSE metadata; neither is an authorization grant.
@@ -300,4 +301,4 @@ Additional reference behavior was checked in the pinned tower-http 0.5.2 timeout
 
 ## 10. Accepted direction and implementation gate
 
-The maintainer accepted process-local live delivery and explicit state, without replay/brokers/rooms/generators. SSE is published in 0.6.0 and the 0.6.1 candidate provides the WebSocket APIs and scoped source/worker protections described above. Their availability is not full closure of every accepted target invariant. Keep the remaining isolation/identity, coordinated-reload, combined-load and transport-bound work explicit. Requirements for cross-process push, durable replay, arbitrary request-local closures or immediate revocation materially change the scope and need their own contract.
+The maintainer accepted process-local live delivery and explicit state, without replay/brokers/rooms/generators. SSE shipped in 0.6.0, and 0.6.1 shipped the WebSocket APIs and scoped source/worker protections described above. Their availability is not full closure of every accepted target invariant. The remaining isolation (#389), identity (#390), coordinated-reload (#361) and transport-bound (#391) work is tracked in those issues. Requirements for cross-process push, durable replay, arbitrary request-local closures or immediate revocation materially change the scope and need their own contract.
