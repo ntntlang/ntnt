@@ -2,8 +2,9 @@ use super::{Diagnostic, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub(super) const MAX_INPUT_BYTES: usize = 1_048_576;
@@ -247,6 +248,15 @@ pub(crate) fn identifier(s: &str) -> bool {
 /// Capture one bounded regular file and reject links or detected replacement/mutation.
 /// Callers retain these bytes instead of reopening a validated path during execution.
 pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
+    Ok(capture(path, super::input_file::open, |_| Ok(()))?.1)
+}
+/// `file_bytes` through `open`, running `before_read` on the opened handle (`ntnt db
+/// init` locks the manifest there) and returning the handle with the bytes.
+pub(super) fn capture(
+    path: &Path,
+    open: fn(&Path) -> std::io::Result<File>,
+    before_read: impl FnOnce(&File) -> Result<()>,
+) -> Result<(File, Vec<u8>)> {
     let bad = || {
         Diagnostic::new(
             "DB_INPUT_IO",
@@ -257,7 +267,8 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_INPUT_BYTES as u64 {
         return Err(bad());
     }
-    let file = super::input_file::open(path).map_err(|_| bad())?;
+    let file = open(path).map_err(|_| bad())?;
+    before_read(&file)?;
     let opened = file.metadata().map_err(|_| bad())?;
     if !opened.is_file()
         || opened.file_type().is_symlink()
@@ -280,7 +291,7 @@ pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
     {
         return Err(bad());
     }
-    Ok(bytes)
+    Ok((file, bytes))
 }
 impl CapturedInputs {
     /// Effective execution limits: the declared table or the defaults.
@@ -318,16 +329,20 @@ impl CapturedInputs {
             state: "adopted".into(),
         })
     }
-    /// Capture the manifest and exactly one logical database's ordered migration inputs.
-    /// Ambiguous selection and malformed registry entries fail before credential lookup;
-    /// unselected stores' directories are not visited. Exact bytes and logical selection
-    /// participate in plan identity, while secret resolution remains a later operation.
-    pub fn load(manifest: &Path, target: &str, database: Option<&str>) -> Result<Self> {
-        let bytes = file_bytes(manifest)?;
-        let document: toml::Value = std::str::from_utf8(&bytes)
+    /// Parse captured manifest bytes; invalid UTF-8 or TOML is a configuration error.
+    pub(super) fn parse(bytes: &[u8]) -> Result<toml::Value> {
+        std::str::from_utf8(bytes)
             .ok()
             .and_then(|s| s.parse().ok())
-            .ok_or_else(|| invalid("Invalid UTF-8/TOML manifest."))?;
+            .ok_or_else(|| invalid("Invalid UTF-8/TOML manifest."))
+    }
+    /// Select exactly one named logical database and validate its definition.
+    /// `database` may be omitted only when exactly one is declared. Only the selected
+    /// definition is interpreted; no directory, target or secret is accessed here.
+    pub(super) fn select(
+        document: &toml::Value,
+        database: Option<&str>,
+    ) -> Result<(String, Database)> {
         if document.get("database").is_some() {
             return Err(invalid("Use named [databases.<name>] tables instead of the prototype [database] table; the two forms cannot be mixed."));
         }
@@ -414,6 +429,11 @@ impl CapturedInputs {
         {
             return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED", "Adoption checks require bounded names and the supported schema-qualified SELECT expression subset."));
         }
+        Ok((database_name, config))
+    }
+    /// Resolve the selected target and validate its endpoint, scratch and approval
+    /// references. Secret names are validated here; their values are never read.
+    pub(super) fn endpoint(config: &Database, target: &str) -> Result<Endpoint> {
         let endpoint = config
             .targets
             .get(target)
@@ -450,6 +470,11 @@ impl CapturedInputs {
                 "Approval must use a separately named secret, never a connection secret.",
             ));
         }
+        Ok(endpoint)
+    }
+    /// Resolve the confined migration directory relative to the manifest. Every
+    /// component must already exist as a directory, never a link.
+    pub(super) fn migrations_dir(manifest: &Path, config: &Database) -> Result<PathBuf> {
         // Portable lexical confinement; never reinterpret backslashes/drives on a different OS.
         if config.migrations_dir.is_empty()
             || config.migrations_dir.contains(['\\', ':', '\0'])
@@ -475,6 +500,18 @@ impl CapturedInputs {
                 return Err(invalid("Migration directories cannot be links."));
             }
         }
+        Ok(dir)
+    }
+    /// Capture the manifest and exactly one logical database's ordered migration inputs.
+    /// Ambiguous selection and malformed registry entries fail before credential lookup;
+    /// unselected stores' directories are not visited. Exact bytes and logical selection
+    /// participate in plan identity, while secret resolution remains a later operation.
+    pub fn load(manifest: &Path, target: &str, database: Option<&str>) -> Result<Self> {
+        let bytes = file_bytes(manifest)?;
+        let document = Self::parse(&bytes)?;
+        let (database_name, config) = Self::select(&document, database)?;
+        let endpoint = Self::endpoint(&config, target)?;
+        let dir = Self::migrations_dir(manifest, &config)?;
         let mut sources = BTreeMap::new();
         let mut total_bytes = 0usize;
         for entry in

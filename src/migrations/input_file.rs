@@ -28,6 +28,32 @@ pub(super) fn open(path: &Path) -> std::io::Result<File> {
     }
     options.open(path)
 }
+/// `open` for a file the caller locks and then replaces by rename while holding the
+/// lock. The handle is also open for writing, though nothing is written through it:
+/// the Linux NFS client emulates `flock` with a byte-range lock, which is exclusive
+/// only on a descriptor open for writing. A file the caller cannot open for writing is
+/// opened read-only, so the caller can still validate it before refusing it as
+/// unwritable. Windows keeps Rust's default sharing (read, write and delete):
+/// `std::fs::rename` can replace a file only when every open handle to it shares deletion.
+pub(super) fn open_replaceable(path: &Path) -> std::io::Result<File> {
+    let open = |write: bool| {
+        let mut options = OpenOptions::new();
+        options.read(true).write(write);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        options.open(path)
+    };
+    open(true).or_else(|_| open(false))
+}
 #[cfg(unix)]
 pub(super) fn single_link(_file: &File, metadata: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;

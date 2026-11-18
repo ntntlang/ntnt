@@ -45,7 +45,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Inspect SQL migration history, catalogs, drift and plans (not source migration).
+    /// Scaffold, inspect, plan and apply SQL migrations (not source migration).
     Db(ntnt::migrations::DbArgs),
     /// Start the interactive REPL
     Repl,
