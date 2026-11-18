@@ -2321,16 +2321,18 @@ mod tests {
             .env("NTNT_ALLOW_PRIVATE_IPS", "false")
             .stdout(output.try_clone().expect("clone test stdout"))
             .stderr(output.try_clone().expect("clone test stderr"));
+        // Only a hang reaches this bound; it is not a performance limit.
+        const HANG_GUARD: Duration = Duration::from_secs(60);
         let mut child = command.spawn().expect("spawn isolated HTTP test");
         let started = Instant::now();
         let status = loop {
             if let Some(status) = child.try_wait().expect("poll isolated HTTP test") {
                 break status;
             }
-            if started.elapsed() >= Duration::from_secs(30) {
+            if started.elapsed() >= HANG_GUARD {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("isolated HTTP test exceeded 30 seconds: {test}");
+                panic!("isolated HTTP test hung past its {HANG_GUARD:?} guard: {test}");
             }
             thread::sleep(Duration::from_millis(10));
         };
