@@ -370,6 +370,13 @@ fn validate_resolved_addresses(
     for address in &addrs {
         let ip = address.ip();
 
+        // Metadata endpoints are denied on every resolved address of every
+        // request and redirect hop, before and independent of the loopback and
+        // private-network allowances (a DNS name can point at them).
+        if is_metadata_ip(ip) {
+            return Err("Cloud metadata endpoint blocked for security".to_string());
+        }
+
         // A blocked address stays blocked behind any DNS name.
         let resolved = CanonicalHost::Ip(ip.to_canonical());
         if config
@@ -4304,6 +4311,123 @@ mod tests {
             &["93.184.216.34:80"],
         );
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn ssrf_resolved_metadata_addresses_are_denied_despite_network_allowances() {
+        let config = permissive_ssrf_config("");
+        let public: SocketAddr = "93.184.216.34:80".parse().unwrap();
+        for resolved in [
+            "169.254.169.254:80",
+            "169.254.170.2:80",
+            "[fd00:ec2::254]:80",
+            "[::ffff:169.254.169.254]:80",
+            "[::ffff:169.254.170.2]:80",
+            "[::169.254.169.254]:80",
+            "[::169.254.170.2]:80",
+        ] {
+            let address: SocketAddr = resolved.parse().unwrap();
+            // Every address in the answer is checked, wherever it appears.
+            for answer in [vec![address], vec![public, address]] {
+                let error = validate_resolved_addresses(&config, false, "a.test".into(), answer)
+                    .expect_err(resolved);
+                assert!(
+                    error.contains("Cloud metadata endpoint blocked"),
+                    "{resolved}: {error}"
+                );
+            }
+        }
+        // The private-network and loopback allowances still admit other targets.
+        for resolved in [
+            "10.0.0.5:80",
+            "169.254.1.1:80",
+            "[fd00:ec2::253]:80",
+            "[::ffff:10.0.0.5]:80",
+            "127.0.0.1:80",
+        ] {
+            let answer = vec![resolved.parse().unwrap()];
+            assert!(
+                validate_resolved_addresses(&config, false, "a.test".into(), answer).is_ok(),
+                "{resolved}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssrf_dns_alias_to_metadata_is_denied_after_resolution() {
+        let config = permissive_ssrf_config("");
+        for answer in [
+            "169.254.169.254:80",
+            "[::ffff:169.254.169.254]:80",
+            "[fd00:ec2::254]:80",
+        ] {
+            let (result, lookups) = target_with_dns(
+                &config,
+                "http://rebinding.example/latest/meta-data/",
+                &[answer],
+            );
+            let error = result.expect_err(answer);
+            assert!(
+                error.contains("Cloud metadata endpoint blocked"),
+                "{answer}: {error}"
+            );
+            assert_eq!(lookups, 1);
+        }
+    }
+
+    #[test]
+    fn ssrf_redirect_hop_to_metadata_is_denied() {
+        if run_http_environment_case("ssrf_redirect_hop_to_metadata_is_denied") {
+            return;
+        }
+        // The first hop is a permitted loopback fixture; the redirect target is
+        // the IPv4-mapped spelling of the metadata address.
+        let source = ChainFixture::new(|_, _| {
+            redirect_response(302, "http://[::ffff:169.254.169.254]/latest/meta-data/")
+        });
+        let result = http_fetch(&source.options());
+        assert_eq!(source.finish().len(), 1);
+        let error = result_error(result.unwrap());
+        assert!(error.contains("Cloud metadata endpoint blocked"), "{error}");
+    }
+
+    #[test]
+    fn validated_target_is_contacted_without_resolving_the_name_again() {
+        // `.invalid` never resolves (RFC 6761). Reaching the fixture through that
+        // name proves the client connects to the validated address set instead of
+        // resolving the name again at connection time, where DNS could rebind it.
+        let fixture = ChainFixture::new(|_, _| {
+            "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\npinned".into()
+        });
+        let address: SocketAddr = fixture
+            .url
+            .trim_start_matches("http://")
+            .trim_end_matches("/start")
+            .parse()
+            .unwrap();
+        let url = format!("http://rebind.invalid:{}/start", address.port());
+        let lookups = std::cell::Cell::new(0);
+        let resolve = |host: &str, port: u16| {
+            lookups.set(lookups.get() + 1);
+            assert_eq!((host, port), ("rebind.invalid", address.port()));
+            Ok(vec![address])
+        };
+        let target = validated_http_target_with(&permissive_ssrf_config(""), false, &url, &resolve)
+            .unwrap()
+            .expect("protected target");
+        let client = build_http_client_for_target(false, false, Some(target)).unwrap();
+        let body = client.get(&url).send().unwrap().text().unwrap();
+        assert_eq!(body, "pinned");
+        assert_eq!(lookups.get(), 1);
+        let requests = fixture.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains(&format!("host: rebind.invalid:{}", address.port())),
+            "{}",
+            requests[0]
+        );
     }
 
     #[test]
