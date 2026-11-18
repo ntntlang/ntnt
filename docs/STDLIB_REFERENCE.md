@@ -3315,6 +3315,8 @@ Usage patterns:
 
 Under the auth route prefix, std/auth's own handlers (login page, OAuth start and callback, logout, health, `auth_me`) stay public; app handlers there are protected like any other route. Paths match as the router matches them, so `//admin` and `/admin/` are both `/admin`.
 
+Path rules (`require_auth(path)` patterns and `enable_auth()`'s `protected_paths`) are never removed while the server runs: setup that runs again then, in another worker or a development reload, only adds rules. Restart the server to remove one.
+
 **Parameters:**
 
 - `target` — Optional request object, single path pattern, or array of path patterns

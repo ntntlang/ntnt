@@ -10223,9 +10223,10 @@ impl Interpreter {
         }
         println!();
 
-        // Serving starts: setup-only calls (ws_endpoint) now fail, as in the
-        // async server.
+        // Serving starts: setup-only calls (ws_endpoint) now fail, and a
+        // reload only adds std/auth protection rules, as in the async server.
         self.setup_frozen = true;
+        let _serving = crate::stdlib::auth::ServingScope::start();
         // Handle requests in a loop
         // In test mode, use recv_timeout and check shutdown flag
         loop {
@@ -10760,6 +10761,11 @@ impl Interpreter {
         let source_file = self.main_source_file.clone().unwrap_or_default();
         let mut worker_handles = Vec::new();
         let generation = CommittedGeneration::default();
+        // From here on setup runs again while requests may be served: in
+        // secondary workers (at startup and after a restart) and in this
+        // worker's development reloads. std/auth then only adds protection
+        // rules, so none is missing while that setup catches up.
+        let _serving = crate::stdlib::auth::ServingScope::start();
         if realtime_startup {
             // Every realtime worker must have loaded exactly the primary's
             // source where setup reached listen; mixed code never serves.

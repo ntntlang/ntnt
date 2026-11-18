@@ -68,10 +68,10 @@ use cookies::{
 #[cfg(test)]
 use guards::path_matches_protected_pattern;
 use guards::validate_auth_challenge_kind;
-pub(crate) use guards::RouteDispatch;
 pub use guards::{
     enforce_auth_for_request, get_protected_paths, register_protected_paths, reset_protected_paths,
 };
+pub(crate) use guards::{RouteDispatch, ServingScope};
 use local::{
     begin_totp_enrollment_record, bootstrap_local_user_record, confirm_totp_enrollment_record,
     consume_magic_link_record, consume_password_reset_record, issue_magic_link_record,
@@ -646,11 +646,6 @@ static REDIS_URL: std::sync::LazyLock<Arc<Mutex<Option<String>>>> =
 // Global auth config
 static AUTH_CONFIG: std::sync::LazyLock<Arc<Mutex<Option<AuthConfig>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
-
-// Protected path patterns registered via enable_auth(..., map { "protected_paths": [...] })
-// and require_auth("/admin/*") helper calls.
-static AUTH_PROTECTED_PATHS: std::sync::LazyLock<Arc<Mutex<Vec<String>>>> =
-    std::sync::LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
 pub fn get_auth_config() -> Option<AuthConfig> {
     AUTH_CONFIG.lock().unwrap().clone()
@@ -3389,6 +3384,11 @@ pub fn init() -> HashMap<String, Value> {
     // start and callback, logout, health, `auth_me`) stay public; app handlers
     // there are protected like any other route. Paths match as the router
     // matches them, so `//admin` and `/admin/` are both `/admin`.
+    //
+    // Path rules (`require_auth(path)` patterns and `enable_auth()`'s
+    // `protected_paths`) are never removed while the server runs: setup that
+    // runs again then, in another worker or a development reload, only adds
+    // rules. Restart the server to remove one.
     //
     // @param target Optional request object, single path pattern, or array of path patterns
     // @returns Middleware function, Unit for path registration, or a redirect/401 response when called with a request
@@ -7203,6 +7203,72 @@ mod tests {
             vec!["/admin/*", "/reports/daily", "/*", "/"]
         );
         reset_protected_paths();
+    }
+
+    fn protected_paths_config(paths: &[&str]) -> AuthConfig {
+        AuthConfig {
+            protected_paths: paths.iter().map(|path| path.to_string()).collect(),
+            ..AuthConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_enable_auth_while_serving_adds_protected_paths_without_removing_any() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        // Initial setup: enable_auth() with protected_paths, then require_auth(path).
+        init_auth(protected_paths_config(&["/billing/*"]));
+        register_protected_paths(&["/admin/*".to_string()]);
+
+        let serving = ServingScope::start();
+        // The setup runs again while serving (another worker starts, or a
+        // development reload) and has reached enable_auth() but not yet its
+        // require_auth() call.
+        init_auth(protected_paths_config(&["/billing/*", "/reports/*"]));
+        assert_eq!(
+            get_protected_paths(),
+            vec!["/billing/*", "/admin/*", "/reports/*"]
+        );
+        let anonymous = Value::Map(HashMap::from([(
+            "path".to_string(),
+            Value::String("/admin/panel".to_string()),
+        )]));
+        assert!(
+            enforce_auth_for_request(&anonymous, false).is_err(),
+            "/admin/panel must stay protected"
+        );
+        // When it reaches require_auth(), the rule is not duplicated.
+        register_protected_paths(&["/admin/*".to_string()]);
+        assert_eq!(
+            get_protected_paths(),
+            vec!["/billing/*", "/admin/*", "/reports/*"]
+        );
+
+        drop(serving);
+        reset_auth_test_state();
+    }
+
+    #[test]
+    fn test_enable_auth_replaces_protected_paths_while_no_server_serves() {
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        // During initial setup each enable_auth() defines the rules afresh.
+        init_auth(protected_paths_config(&["/billing/*"]));
+        register_protected_paths(&["/admin/*".to_string()]);
+        init_auth(protected_paths_config(&["/reports/*"]));
+        assert_eq!(get_protected_paths(), vec!["/reports/*"]);
+
+        // Rules are only added while any server serves...
+        let first = ServingScope::start();
+        let second = ServingScope::start();
+        drop(first);
+        init_auth(protected_paths_config(&["/billing/*"]));
+        assert_eq!(get_protected_paths(), vec!["/reports/*", "/billing/*"]);
+        // ...and replaced again once none does.
+        drop(second);
+        init_auth(protected_paths_config(&["/admin/*"]));
+        assert_eq!(get_protected_paths(), vec!["/admin/*"]);
+        reset_auth_test_state();
     }
 
     #[test]

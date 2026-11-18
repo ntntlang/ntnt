@@ -5,11 +5,16 @@
 //!   the app asked for: `use_middleware(require_auth())` or a protected path.
 //! - Auth decides on the canonical path the router matches, so repeated or
 //!   trailing slashes cannot select a protected handler while missing its rule.
+//! - Path rules never disappear while the server serves: setup that runs
+//!   again then (another worker starting, a development reload) only adds
+//!   rules.
 #[path = "support/system_fixture.rs"]
 mod fixture;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
+use std::time::Duration;
 
 /// Where the auth guard sends a browser that has no session.
 const LOGIN_PAGE: &str = "/auth";
@@ -60,6 +65,59 @@ get("/admin", admin_home)
 get("/admin/panel", admin_panel)
 get("/reports/daily", daily_report)
 get("/auth/admin/panel", auth_admin_panel)
+listen(0, map { "fixture": true, "readiness": "json" })
+"#;
+
+/// Path rules from `protected_paths` and from `require_auth(path)`, for a
+/// server with two workers. Worker 0 sets up and starts serving before the
+/// second worker evaluates the same setup; that second setup waits after its
+/// `enable_auth()` and before its `require_auth()` until `continue` exists
+/// in `gate`.
+fn second_setup_held_app(gate: &Path) -> String {
+    let literal = |name: &str| serde_json::to_string(gate.join(name).to_str().unwrap()).unwrap();
+    let (first_done, release) = (literal("first-setup-done"), literal("continue"));
+    format!(
+        r#"
+import {{ enable_auth, require_auth }} from "std/auth"
+import {{ sleep_ms }} from "std/concurrent"
+import {{ exists, write_file }} from "std/fs"
+import {{ text }} from "std/http/server"
+
+fn admin_panel(req: Request) -> Response {{ return text("admin-panel") }}
+fn invoices(req: Request) -> Response {{ return text("billing-invoices") }}
+fn public_page(req: Request) -> Response {{ return text("public-page") }}
+
+enable_auth([], map {{ "session_secret": "fixture-session-secret-0123456789abcdef", "protected_paths": ["/billing/*"] }})
+if exists({first_done}) {{
+    print("SECOND_SETUP_HELD")
+    while !exists({release}) {{ sleep_ms(10) }}
+}} else {{
+    unwrap(write_file({first_done}, "done"))
+}}
+require_auth("/admin/*")
+get("/admin/panel", admin_panel)
+get("/billing/invoices", invoices)
+get("/public", public_page)
+print("SETUP_DONE")
+listen(0, map {{ "fixture": true, "readiness": "json" }})
+"#
+    )
+}
+
+/// One `require_auth(path)` rule, edited during a development reload test.
+const RELOADED_RULE_APP: &str = r#"
+import { enable_auth, require_auth } from "std/auth"
+import { text } from "std/http/server"
+
+fn admin_panel(req: Request) -> Response { return text("admin-panel") }
+fn daily_report(req: Request) -> Response { return text("daily-report") }
+fn public_page(req: Request) -> Response { return text("public-page-v1") }
+
+enable_auth([], map { "session_secret": "fixture-session-secret-0123456789abcdef" })
+require_auth("/admin/*")
+get("/admin/panel", admin_panel)
+get("/reports/daily", daily_report)
+get("/public", public_page)
 listen(0, map { "fixture": true, "readiness": "json" })
 "#;
 
@@ -140,6 +198,26 @@ fn session_cookie(addr: SocketAddr) -> String {
     let pair = cookie.split(';').next().unwrap().trim().to_string();
     assert!(pair.starts_with("ntnt_session="), "{cookie}");
     pair
+}
+
+/// Wait until the server has printed `marker` at least `count` times.
+fn wait_for_output(server: &mut fixture::Fixture, marker: &str, count: usize) {
+    let deadline = std::time::Instant::now() + fixture::HANG_GUARD;
+    while server.stdout().matches(marker).count() < count {
+        assert!(
+            server.child.try_wait().unwrap().is_none(),
+            "server exited before printing {marker}: {} {}",
+            server.stdout(),
+            server.stderr()
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "hang guard: waiting for {count} x {marker}: {} {}",
+            server.stdout(),
+            server.stderr()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -312,4 +390,90 @@ fn auth_exemption_uses_the_path_the_router_serves() {
             .is_some_and(|to| to.starts_with(GITHUB_AUTHORIZE)),
         "{reply}"
     );
+}
+
+#[test]
+fn path_rules_stay_in_force_while_another_worker_runs_setup() {
+    let gate = tempfile::tempdir().unwrap();
+    let mut server = fixture::Fixture::start(
+        &second_setup_held_app(gate.path()),
+        &["run"],
+        &[("NTNT_ENV", "production"), ("NTNT_WORKERS", "2")],
+    );
+    let addr = server.ready();
+    let protected = [
+        ("/admin/panel", "admin-panel"),
+        ("/billing/invoices", "billing-invoices"),
+    ];
+    // The second worker is held inside its setup, after enable_auth() and
+    // before require_auth(), so worker 0 serves these requests alone.
+    wait_for_output(&mut server, "SECOND_SETUP_HELD", 1);
+    for (target, output) in protected {
+        let reply = send(addr, "GET", target, &[]);
+        assert_sent_to_login(
+            &reply,
+            &format!("GET {target} while the second worker runs setup"),
+            output,
+        );
+    }
+
+    std::fs::write(gate.path().join("continue"), "continue").unwrap();
+    wait_for_output(&mut server, "SETUP_DONE", 2);
+    // Both workers serve now; whichever takes a request denies it.
+    for _ in 0..4 {
+        for (target, output) in protected {
+            let reply = send(addr, "GET", target, &[]);
+            assert_sent_to_login(&reply, &format!("GET {target}"), output);
+        }
+    }
+    let reply = send(addr, "GET", "/public", &[]);
+    assert_eq!(reply.status, 200, "{reply}");
+    assert!(reply.body.contains("public-page"), "{reply}");
+}
+
+#[test]
+fn development_reload_adds_path_rules_and_keeps_removed_ones_until_restart() {
+    // Development mode, one worker: a reload applies on the next request.
+    let mut server = fixture::Fixture::start(RELOADED_RULE_APP, &["run"], &[("NTNT_WORKERS", "1")]);
+    let addr = server.ready();
+    let reply = send(addr, "GET", "/admin/panel", &[]);
+    assert_sent_to_login(&reply, "GET /admin/panel", "admin-panel");
+    let reply = send(addr, "GET", "/reports/daily", &[]);
+    assert_eq!(reply.status, 200, "unprotected before the reload: {reply}");
+
+    // The edit protects /reports/* instead of /admin/*. Move the modification
+    // time forward rather than sleeping past coarse filesystem timestamps.
+    let app = server.dir.path().join("fixture.tnt");
+    let previous = std::fs::metadata(&app).unwrap().modified().unwrap();
+    let edited = RELOADED_RULE_APP
+        .replace(
+            r#"require_auth("/admin/*")"#,
+            r#"require_auth("/reports/*")"#,
+        )
+        .replace("public-page-v1", "public-page-v2");
+    std::fs::write(&app, edited).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&app)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(previous + Duration::from_secs(2)))
+        .unwrap();
+    let reply = send(addr, "GET", "/public", &[]);
+    assert!(
+        reply.status == 200 && reply.body.contains("public-page-v2"),
+        "the reload must run before this request: {reply}\n{}",
+        server.stderr()
+    );
+
+    // A rule the reloaded code adds applies at once.
+    let reply = send(addr, "GET", "/reports/daily", &[]);
+    assert_sent_to_login(
+        &reply,
+        "GET /reports/daily after the reload",
+        "daily-report",
+    );
+    // A rule it no longer registers stays until restart: workers that have
+    // not reloaded may still serve the old code that relies on it.
+    let reply = send(addr, "GET", "/admin/panel", &[]);
+    assert_sent_to_login(&reply, "GET /admin/panel after the reload", "admin-panel");
 }

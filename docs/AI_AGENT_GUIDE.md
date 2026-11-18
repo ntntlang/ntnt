@@ -983,7 +983,9 @@ DB query or `fetch()`, the others keep handling requests. A DB-heavy app that
 serializes on one worker gets near-linear gains from more (8 concurrent
 200ms-blocking requests: 1.6s on 1 worker, 0.4s on 4). Crashed workers are
 respawned automatically. With `NTNT_WORKERS>1` outside production, only
-worker 0 hot-reloads — restart to propagate edits to all workers.
+worker 0 hot-reloads — restart to propagate edits to all workers. A reload
+adds std/auth path rules (`require_auth(path)`, `protected_paths`) but never
+removes one; restart to remove a rule.
 
 **Hot-reload** watches your `.tnt` files and imported modules for changes, automatically reloading on the next request. Disable in production for zero filesystem overhead per request.
 

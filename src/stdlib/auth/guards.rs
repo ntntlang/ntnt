@@ -62,9 +62,58 @@ fn dedupe_protected_paths(paths: &mut Vec<String>) {
     paths.retain(|path| seen.insert(path.clone()));
 }
 
+/// The protection rules every worker enforces: `enable_auth()`'s
+/// `protected_paths` and `require_auth(path)` patterns, normalized.
+struct ProtectedPaths {
+    patterns: Vec<String>,
+    /// Live [`ServingScope`]s.
+    serving: usize,
+}
+
+static PROTECTED_PATHS: std::sync::Mutex<ProtectedPaths> = std::sync::Mutex::new(ProtectedPaths {
+    patterns: Vec::new(),
+    serving: 0,
+});
+
+impl ProtectedPaths {
+    fn add(&mut self, paths: &[String]) {
+        for path in paths {
+            let normalized = normalize_protected_path(path);
+            if !normalized.is_empty() {
+                self.patterns.push(normalized);
+            }
+        }
+        dedupe_protected_paths(&mut self.patterns);
+    }
+}
+
+/// Held by a server for as long as it may serve requests. Meanwhile setup can
+/// run again (secondary workers start or restart, a development reload runs)
+/// while other workers serve, so protection rules are only added; see
+/// [`replace_protected_paths_unless_serving`].
+#[must_use = "protection rules are kept only while the scope is alive"]
+pub struct ServingScope(());
+
+impl ServingScope {
+    pub fn start() -> Self {
+        PROTECTED_PATHS.lock().unwrap().serving += 1;
+        Self(())
+    }
+}
+
+impl Drop for ServingScope {
+    fn drop(&mut self) {
+        // May run while unwinding, where a second panic would abort.
+        let mut protected = PROTECTED_PATHS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        protected.serving -= 1;
+    }
+}
+
 fn with_protected_paths<T>(f: impl FnOnce(&[String]) -> T) -> T {
-    let protected = AUTH_PROTECTED_PATHS.lock().unwrap();
-    f(&protected)
+    let protected = PROTECTED_PATHS.lock().unwrap();
+    f(&protected.patterns)
 }
 
 pub(super) fn validate_auth_challenge_kind(kind: &str) -> std::result::Result<String, String> {
@@ -101,24 +150,31 @@ pub(super) fn encode_url_path_segment(text: &str) -> String {
     encoded
 }
 
+/// Remove every protection rule, whether or not a server is serving.
 pub fn reset_protected_paths() {
-    let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
-    protected.clear();
+    PROTECTED_PATHS.lock().unwrap().patterns.clear();
 }
 
 pub fn register_protected_paths(paths: &[String]) {
-    let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
-    for path in paths {
-        let normalized = normalize_protected_path(path);
-        if !normalized.is_empty() {
-            protected.push(normalized);
-        }
+    PROTECTED_PATHS.lock().unwrap().add(paths);
+}
+
+/// `enable_auth()`'s `protected_paths`. Before any server serves they replace
+/// the rules. While one serves they are added to the rules instead: the setup
+/// running again re-registers its `require_auth(path)` rules only when it
+/// reaches them, other workers serve meanwhile, and a worker that has not
+/// reloaded still runs code that relies on the old rules. Removing a rule
+/// takes a restart.
+pub(super) fn replace_protected_paths_unless_serving(paths: &[String]) {
+    let mut protected = PROTECTED_PATHS.lock().unwrap();
+    if protected.serving == 0 {
+        protected.patterns.clear();
     }
-    dedupe_protected_paths(&mut protected);
+    protected.add(paths);
 }
 
 pub fn get_protected_paths() -> Vec<String> {
-    AUTH_PROTECTED_PATHS.lock().unwrap().clone()
+    PROTECTED_PATHS.lock().unwrap().patterns.clone()
 }
 
 #[cfg(test)]
