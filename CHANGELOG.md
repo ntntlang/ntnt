@@ -1,8 +1,25 @@
 # Changelog
 
-## Unreleased
+## Unreleased (0.6.3)
 
-No changes recorded since 0.6.2.
+See [unreleased notes](docs/release-notes/unreleased.md).
+
+### Security
+
+- `std/auth`: `require_auth()` and protected-path rules cover application handlers
+  under the auth route prefix; only std/auth's own handlers there stay public. Auth
+  matches the canonical path the router serves, so repeated slashes no longer
+  bypass a rule.
+- Process-execution and `fetch()` network policy come from the environment that
+  starts `ntnt`, captured before application code runs; `load_env` skips reserved
+  policy keys with a warning.
+- `fetch()` and `download()` block cloud metadata endpoints in any spelling and after
+  DNS resolution, even when private or localhost addresses are allowed.
+- `to_html_safe()` drops links and images whose scheme is not http, https or mailto,
+  and ignores heading attributes.
+- The `${...}` interpolation warning scans each string literal in one bounded pass.
+- `install.ps1` no longer builds from source when the download fails, and never
+  reuses or overwrites `.\ntnt`.
 
 ## 0.6.2
 
