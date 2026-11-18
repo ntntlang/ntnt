@@ -270,6 +270,8 @@ impl InterpreterHandle {
     /// Send a request to the interpreter and wait for response
     pub async fn call(&self, request: BridgeRequest) -> Result<BridgeResponse> {
         let (reply_tx, reply_rx) = oneshot::channel();
+        #[cfg(test)]
+        let path = request.path.clone();
 
         let handler_request = HandlerRequest { request, reply_tx };
 
@@ -277,10 +279,22 @@ impl InterpreterHandle {
             .send_async(handler_request)
             .await
             .map_err(|_| IntentError::runtime_error("Interpreter channel closed".to_string()))?;
+        #[cfg(test)]
+        trace_queued(&path);
 
         reply_rx
             .await
             .map_err(|_| IntentError::runtime_error("Interpreter did not respond".to_string()))
+    }
+}
+
+/// Unit-test builds only: with `NTNT_TEST_TRACE_QUEUE` set, print a line once
+/// a request is queued for the workers, so a test can wait for that event
+/// rather than a duration. Absent from library and CLI builds.
+#[cfg(test)]
+fn trace_queued(path: &str) {
+    if std::env::var_os("NTNT_TEST_TRACE_QUEUE").is_some() {
+        println!("HTTP_QUEUED {path}");
     }
 }
 

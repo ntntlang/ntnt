@@ -7,6 +7,7 @@ use super::sqlite::{self, Sqlite};
 use super::{Diagnostic, Result};
 use serde::Serialize;
 use serde_json::Value;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub(super) enum Access {
@@ -94,11 +95,12 @@ impl Adapter {
             Self::Sqlite(db) => db.begin_readonly().await,
         }
     }
-    /// PostgreSQL owns the session across commits. SQLite reserves the native
-    /// writer in begin_migration and revalidates on *every* acquisition instead.
-    pub async fn own_migrations(&self) -> Result<()> {
+    /// PostgreSQL owns the session across commits, waiting up to `wait` for
+    /// another migrator. SQLite reserves the native writer in begin_migration
+    /// and revalidates on *every* acquisition instead.
+    pub async fn own_migrations(&self, wait: Duration) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.own_migrations().await,
+            Self::Postgres(pg) => pg.own_migrations(wait).await,
             Self::Sqlite(_) => Ok(()),
         }
     }
@@ -122,9 +124,14 @@ impl Adapter {
             Self::Sqlite(_) => Ok(None),
         }
     }
-    pub async fn build_concurrent_index(&self, migration: &Migration, schema: &str) -> Result<()> {
+    pub async fn build_concurrent_index(
+        &self,
+        migration: &Migration,
+        schema: &str,
+        limit: Duration,
+    ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.build_concurrent_index(migration, schema).await,
+            Self::Postgres(pg) => pg.build_concurrent_index(migration, schema, limit).await,
             Self::Sqlite(_) => Err(Diagnostic::new(
                 "DB_REPLAY_UNSUPPORTED",
                 "SQLite has no concurrent index builds.",
@@ -164,9 +171,14 @@ impl Adapter {
             Self::Sqlite(_) => Err(unsupported_attempt()),
         }
     }
-    pub async fn drop_invalid_index(&self, schema: &str, name: &str) -> Result<()> {
+    pub async fn drop_invalid_index(
+        &self,
+        schema: &str,
+        name: &str,
+        limit: Duration,
+    ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.drop_invalid_index(schema, name).await,
+            Self::Postgres(pg) => pg.drop_invalid_index(schema, name, limit).await,
             Self::Sqlite(_) => Ok(()),
         }
     }
@@ -215,9 +227,16 @@ impl Adapter {
             )),
         }
     }
-    pub async fn execute_captured(&self, migration: &Migration, schema: &str) -> Result<()> {
+    /// `limit` is PostgreSQL's statement limit. SQLite keeps its fixed
+    /// per-operation deadline.
+    pub async fn execute_captured(
+        &self,
+        migration: &Migration,
+        schema: &str,
+        limit: Duration,
+    ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.execute_captured(migration, schema).await,
+            Self::Postgres(pg) => pg.execute_captured(migration, schema, limit).await,
             Self::Sqlite(db) => db.execute_captured(migration).await,
         }
     }

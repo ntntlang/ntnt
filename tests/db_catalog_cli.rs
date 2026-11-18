@@ -133,6 +133,117 @@ fn unsupported_metadata_and_unsafe_paths_are_explicit_errors() {
 }
 
 #[test]
+fn configuration_must_be_tables_not_positional_arrays() {
+    let root = project();
+    let manifest = std::fs::read_to_string(root.path().join("ntnt.toml")).unwrap();
+    assert!(manifest.contains("[databases.app]\n"), "{manifest}");
+    let first_diagnostic = |manifest: String| {
+        std::fs::write(root.path().join("ntnt.toml"), manifest).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["db", "status", "--target", "local", "--json"])
+            .env_remove("DB_TARGET")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        report["diagnostics"][0].clone()
+    };
+    // Serde would read these arrays positionally as struct fields.
+    for limits in ["[]", "[90]", "[1, 300]"] {
+        let d = first_diagnostic(manifest.replacen(
+            "[databases.app]\n",
+            &format!("[databases.app]\nlimits = {limits}\n"),
+            1,
+        ));
+        assert_eq!(d["code"], "DB_CONFIG", "{limits}: {d}");
+        assert!(
+            d["message"]
+                .as_str()
+                .unwrap()
+                .contains("[databases.app.limits] must be a table"),
+            "{limits}: {d}"
+        );
+    }
+    // A target entry is a struct too: as an array it would otherwise connect.
+    let target = "[databases.app.targets.local]\nconnection_secret = \"DB_TARGET\"\ndatabase = \"target\"\nrole = \"target_role\"\n";
+    assert!(manifest.contains(target), "{manifest}");
+    let d = first_diagnostic(manifest.replacen(target, "", 1).replacen(
+        "[databases.app]\n",
+        "[databases.app]\ntargets = { local = [\"DB_TARGET\", \"target\", \"target_role\"] }\n",
+        1,
+    ));
+    assert_eq!(d["code"], "DB_CONFIG", "{d}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("must be TOML tables"),
+        "{d}"
+    );
+}
+
+#[test]
+fn time_limits_are_validated_before_connecting() {
+    let root = project();
+    let manifest = std::fs::read_to_string(root.path().join("ntnt.toml")).unwrap();
+    let first_diagnostic = |limits: &str| {
+        std::fs::write(
+            root.path().join("ntnt.toml"),
+            format!("{manifest}[databases.app.limits]\n{limits}\n"),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["db", "status", "--target", "local", "--json"])
+            .env_remove("DB_TARGET")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        report["diagnostics"][0].clone()
+    };
+    // Valid limits pass configuration; the missing secret stops inspection.
+    for limits in [
+        "statement_seconds = 86400\nmigrator_wait_seconds = 300",
+        "statement_seconds = 2\nmigrator_wait_seconds = 1",
+    ] {
+        let d = first_diagnostic(limits);
+        assert_eq!(d["code"], "DB_SECRET", "{limits}: {d}");
+    }
+    let statement_range = "statement_seconds must be from 2 to 86400 seconds";
+    let wait_range = "migrator_wait_seconds must be from 1 to 300 seconds";
+    for (limits, expected) in [
+        ("statement_seconds = 0", statement_range),
+        // One second would end a brief lock wait as a statement timeout,
+        // which is not retried, before the 1-second lock timeout fires.
+        ("statement_seconds = 1", statement_range),
+        ("statement_seconds = 86401", statement_range),
+        ("migrator_wait_seconds = 0", wait_range),
+        ("migrator_wait_seconds = 301", wait_range),
+        ("statement_seconds = 1.5", "statement_seconds"),
+        (
+            "statement_seconds = \"ntnt346_private_canary\"",
+            "statement_seconds",
+        ),
+        ("deadline_seconds = 600", "migrator_wait_seconds"),
+    ] {
+        let d = first_diagnostic(limits);
+        assert_eq!(d["code"], "DB_CONFIG", "{limits}: {d}");
+        let message = d["message"].as_str().unwrap();
+        assert!(
+            message.contains("[databases.app.limits]") && message.contains(expected),
+            "{limits}: {d}"
+        );
+        assert!(!d.to_string().contains("ntnt346_private_canary"), "{d}");
+        let next_action = d["next_action"].as_str().unwrap();
+        assert!(
+            next_action.contains("statement_seconds 2-86400")
+                && next_action.contains("migrator_wait_seconds 1-300"),
+            "{d}"
+        );
+    }
+}
+
+#[test]
 fn original_source_migrate_command_remains_available() {
     let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
         .args(["migrate", "--help"])

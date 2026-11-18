@@ -27,7 +27,8 @@ bus or explicit realtime listen map exists: errors fail startup, and one shared
 10-second deadline bounds the decision. Use an empty realtime map for request-only
 bus creation. WebSocket endpoint applications also use this realtime startup path.
 Limits change only on
-process restart. The async protocol tests, not synchronous `ntnt test`, exercise SSE.
+process restart. The async protocol tests, not synchronous `ntnt test`, exercise SSE
+over HTTP/1.1 and over HTTP/2 with prior knowledge (h2c).
 
 The bus registry, accounting and cancellation remain **process-scoped**, not
 isolated per embedded server/application generation. There is no replay, durable
@@ -68,8 +69,7 @@ exit the process, while Rust embedding must account for non-preemptible work.
   other workers can serve old HTTP code and refuse current WebSocket work until
   restart. Coordinated reload is #361, not a delivered production-upgrade protocol.
 - Per-application realtime isolation, full frozen program/endpoint attestation,
-  inherited task provenance, combined saturation/fair-recovery coverage beyond
-  existing worker-loss tests, aggregate downstream transport-buffer accounting
+  inherited task provenance, aggregate downstream transport-buffer accounting
   and hard SSE socket-write/teardown guarantees remain deferred or unproven.
 
 See the [agent guide](../docs/AI_AGENT_GUIDE.md#websockets),

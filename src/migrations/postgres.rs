@@ -17,9 +17,10 @@ pub(crate) async fn bounded<T>(
 ) -> Result<T> {
     bounded_for(IO_TIMEOUT, future).await
 }
-/// Authored migration scripts may run much longer than catalog queries (index
-/// builds, rewrites). Kept inside migrate's 100-second work deadline for now.
-pub(crate) const SCRIPT_TIMEOUT: Duration = Duration::from_secs(90);
+/// Authored scripts, index builds and migrator waits get a configured server
+/// limit (see `inventory::Limits`); the client deadline sits this far above
+/// it, so PostgreSQL reports the timeout before the client gives up.
+const SERVER_LIMIT_MARGIN: Duration = Duration::from_secs(5);
 /// Transaction settings NTNT relies on while inspecting, replaying and
 /// executing. Reapplied after each migration's RESET ALL.
 const MIGRATION_SETTINGS: &str = "SET LOCAL synchronous_commit=on; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces=''; SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout=5000;";
@@ -408,13 +409,23 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     /// Acquire database-local ownership of the single reserved ledger namespace.
     /// This session lock survives per-migration commits. Drop discards the socket;
     /// it cannot leak into a pool. PostgreSQL lock_timeout bounds competing owners.
-    /// A second migrator waits a few seconds for the first, then gives up.
-    pub async fn own_migrations(&self) -> Result<()> {
-        self.batch("SET lock_timeout = '5s'").await?;
-        let owned = self
-            .rows("SELECT pg_catalog.pg_advisory_lock(1853124212, 245)", &[])
-            .await;
-        self.batch("SET lock_timeout = '2s'").await?;
+    /// A second migrator waits up to `wait` for the first, then gives up with a
+    /// lock conflict: the statement and client deadlines sit above that wait.
+    pub async fn own_migrations(&self, wait: Duration) -> Result<()> {
+        self.batch(&format!(
+            "SET lock_timeout = '{}s'; SET statement_timeout = '{}s'",
+            wait.as_secs(),
+            wait.as_secs() + 1
+        ))
+        .await?;
+        let owned = bounded_for(
+            wait + SERVER_LIMIT_MARGIN,
+            self.client
+                .query("SELECT pg_catalog.pg_advisory_lock(1853124212, 245)", &[]),
+        )
+        .await;
+        self.batch("SET lock_timeout = '2s'; SET statement_timeout = 5000")
+            .await?;
         owned.map(|_| ())
     }
 
@@ -455,17 +466,17 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     /// default; lift that only for this call. Uses replay's storage settings
     /// so the result matches the plan's catalog. Settings are restored on
     /// every path, and a build error is reported in preference to a restore
-    /// error.
-    async fn outside_transaction(&self, sql: &str, schema: &str) -> Result<()> {
+    /// error. `limit` bounds the statement, waits and table scan included.
+    async fn outside_transaction(&self, sql: &str, schema: &str, limit: Duration) -> Result<()> {
         let result = async {
             self.batch(&format!(
                 "SET default_transaction_read_only=off; SET search_path=pg_catalog,{}; SET default_tablespace=''; SET temp_tablespaces=''; SET lock_timeout=0; SET statement_timeout='{}s';",
                 quote(schema),
-                SCRIPT_TIMEOUT.as_secs()
+                limit.as_secs()
             ))
             .await?;
             bounded_for(
-                SCRIPT_TIMEOUT + Duration::from_secs(5),
+                limit + SERVER_LIMIT_MARGIN,
                 self.client.batch_execute(sql),
             )
             .await
@@ -477,12 +488,17 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         result.and(restored)
     }
     /// Build a reviewed CREATE INDEX CONCURRENTLY. It takes only SHARE UPDATE
-    /// EXCLUSIVE, which does not block reads or writes, and waits (up to the
-    /// script limit) for earlier transactions instead of timing out on them.
-    pub async fn build_concurrent_index(&self, migration: &Migration, schema: &str) -> Result<()> {
+    /// EXCLUSIVE, which does not block reads or writes, and waits (up to
+    /// `limit`) for earlier transactions instead of timing out on them.
+    pub async fn build_concurrent_index(
+        &self,
+        migration: &Migration,
+        schema: &str,
+        limit: Duration,
+    ) -> Result<()> {
         // Index expressions coerce values like any DDL; see execute_captured.
         self.reject_custom_casts().await?;
-        self.outside_transaction(&migration.sql, schema)
+        self.outside_transaction(&migration.sql, schema, limit)
             .await
             .map_err(|mut d| {
                 d.source = Some(migration.name.clone());
@@ -514,7 +530,12 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         Ok(())
     }
     /// A failed or interrupted concurrent build leaves an invalid index.
-    pub async fn drop_invalid_index(&self, schema: &str, name: &str) -> Result<()> {
+    pub async fn drop_invalid_index(
+        &self,
+        schema: &str,
+        name: &str,
+        limit: Duration,
+    ) -> Result<()> {
         self.outside_transaction(
             &format!(
                 "DROP INDEX CONCURRENTLY IF EXISTS {}.{}",
@@ -522,6 +543,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 quote(name)
             ),
             schema,
+            limit,
         )
         .await
     }
@@ -790,7 +812,14 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
 
     /// Shared execution primitive: consumes captured bytes only, within a caller-
     /// owned transaction. Replay and authorized migration use exactly this primitive.
-    pub async fn execute_captured(&self, migration: &Migration, schema: &str) -> Result<()> {
+    /// `limit` bounds each statement and its deferred checks; the whole script
+    /// gets `SERVER_LIMIT_MARGIN` more on the client.
+    pub async fn execute_captured(
+        &self,
+        migration: &Migration,
+        schema: &str,
+        limit: Duration,
+    ) -> Result<()> {
         // A lone CREATE INDEX CONCURRENTLY replays as the equivalent plain
         // CREATE INDEX inside this transaction; the target runs it outside one.
         let concurrent = super::analysis::concurrent_index(&migration.sql, schema);
@@ -832,12 +861,12 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         // seed rows into FORCE ROW LEVEL SECURITY tables obey their policies.
         self.batch(&format!(
             "SET LOCAL search_path=\"{schema}\"; SET LOCAL row_security=on; SET LOCAL statement_timeout='{}s';",
-            SCRIPT_TIMEOUT.as_secs()
+            limit.as_secs()
         ))
         .await?;
         // Do not split on semicolons: PostgreSQL receives the captured full script.
         bounded_for(
-            SCRIPT_TIMEOUT + Duration::from_secs(5),
+            limit + SERVER_LIMIT_MARGIN,
             self.client.batch_execute(script),
         )
         .await
@@ -850,7 +879,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         // in one transaction, and pending trigger events would otherwise block
         // the next migration's ALTER TABLE.
         bounded_for(
-            SCRIPT_TIMEOUT + Duration::from_secs(5),
+            limit + SERVER_LIMIT_MARGIN,
             self.client.batch_execute("SET CONSTRAINTS ALL IMMEDIATE"),
         )
         .await
@@ -960,7 +989,7 @@ fn canonical_roles(value: &mut Value, role: &str) {
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
-            "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"not_implemented", "baseline_adoption":"reviewed_prefix_checkpoint"},
+            "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"lone_named_create_index_concurrently", "baseline_adoption":"reviewed_prefix_checkpoint"},
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "managed_schema_extensions":"version", "custom_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
@@ -1101,6 +1130,16 @@ mod tests {
                 assert_eq!(error.code, "DB_CONNECTION_CONFIG", "{case}: {error}");
             }
         });
+    }
+
+    #[test]
+    fn capabilities_report_concurrent_index_builds_as_supported() {
+        // Shipped in 0.6.1 (ntnt db reconcile); reports must not call it unimplemented.
+        let capabilities = Postgres::capabilities(170_000);
+        assert_eq!(
+            capabilities["operations"]["concurrent_indexes"],
+            "lone_named_create_index_concurrently"
+        );
     }
 
     #[test]

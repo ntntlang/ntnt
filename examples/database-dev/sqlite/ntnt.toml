@@ -1,0 +1,17 @@
+# Local development only; see ../README.md.
+[databases.app]
+engine = "sqlite"
+schema = "main"
+migrations_dir = "migrations"
+approval_secret = "APP_MIGRATION_APPROVAL"
+
+[databases.app.targets.development]
+connection_secret = "APP_DATABASE_FILE"
+
+[databases.app.scratch]
+connection_secret = "APP_REPLAY_FILE"
+disposable = true
+
+[secrets.APP_DATABASE_FILE]
+[secrets.APP_REPLAY_FILE]
+[secrets.APP_MIGRATION_APPROVAL]
