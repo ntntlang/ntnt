@@ -58,5 +58,12 @@ valid. A competing migrator now fails with `DB_LOCK_CONFLICT` instead of a
 statement timeout. See
 [Time limits](../DATABASE_MIGRATIONS.md#time-limits) (#346).
 
+## Fixes
+
+- **macOS `std/process`:** starting a command that exits immediately could fail
+  with `failed to configure process monitoring: No such process (os error 3)`. The
+  child had exited before NTNT began watching it; it is now treated as exited and
+  its result is returned as usual (#381).
+
 See [NTNT v0.6.1](v0.6.1.md) for the published announcement, upgrade guidance,
 known limits and retained implementation measurements.

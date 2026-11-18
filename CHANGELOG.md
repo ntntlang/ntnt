@@ -16,6 +16,12 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   `migrator_wait_seconds`, bounded, bound into plans, with deadlines that fit
   them (#346).
 
+### Fixed
+
+- On macOS, `std/process` `run` and `start` could fail with `failed to configure
+  process monitoring: No such process` when the command exited before NTNT began
+  watching it. Such a child is now treated as exited (#381).
+
 ## 0.6.1
 
 See the [versioned announcement and upgrade guidance](docs/release-notes/v0.6.1.md).
