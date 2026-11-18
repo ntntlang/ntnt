@@ -10316,8 +10316,8 @@ import { to_html, to_html_safe, parse_blocks } from "std/markdown"
 |----------|-------------|
 | [`parse_blocks`](#parse_blocks) | Parse Markdown into ordered, non-overlapping top-level blocks. |
 | [`replace_source_range`](#replace_source_range) | Replace an inclusive-start, exclusive-end UTF-8 byte range in Markdown source. This pairs with parse_blocks() offsets while preserving every byte outside the range. |
-| [`to_html`](#to_html) | Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted. |
-| [`to_html_safe`](#to_html_safe) | Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content. |
+| [`to_html`](#to_html) | Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags, heading attributes and link or image URLs of any scheme (including javascript:) pass through as-is. Use to_html_safe() if the input is untrusted. |
+| [`to_html_safe`](#to_html_safe) | Convert user-supplied or untrusted Markdown to HTML without raw HTML, heading attributes or link and image URLs of unsafe schemes. |
 
 #### `parse_blocks`
 
@@ -10390,7 +10390,7 @@ replace_source_range("# Chaptér\n\nOld", 12, 15, "New")  // => "# Chaptér\n\nN
 to_html(markdown: String) -> String
 ```
 
-Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted.
+Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags, heading attributes and link or image URLs of any scheme (including javascript:) pass through as-is. Use to_html_safe() if the input is untrusted.
 
 ---
 
@@ -10400,7 +10400,24 @@ Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, st
 to_html_safe(markdown: String) -> String
 ```
 
-Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content.
+Convert user-supplied or untrusted Markdown to HTML without raw HTML, heading attributes or link and image URLs of unsafe schemes.
+
+Embedded HTML tags, HTML blocks and comments are dropped. Heading attribute syntax (`{#id .class key=value}`) stays literal text. Every href and src is relative (including `//host/path`, `?query` and `#fragment`) or uses http, https or mailto: a link with any other scheme (javascript:, data:, vbscript:, file:, ...) renders as its plain text, and such an image as its alt text. Schemes are compared the way browsers read them: after entity decoding, ignoring case, tabs, line breaks and leading or trailing spaces and control characters. Everything else matches to_html(). The guarantee covers the returned HTML only; escape anything you add around it.
+
+**Parameters:**
+
+- `markdown` — Markdown source, possibly user-supplied.
+
+**Returns:** HTML without raw HTML, heading attributes or unsafe link and image URLs.
+
+**Examples:**
+
+```ntnt
+to_html_safe("[x](javascript:alert(1)) <b>hi</b>")  // => "<p>x hi</p>\n"  // Unsafe links keep only their text
+to_html_safe("[docs](/guide) ![logo](https://example.com/logo.png)")  // => "<p><a href=\"/guide\">docs</a> <img src=\"https://example.com/logo.png\" alt=\"logo\" /></p>\n"  // Relative and https URLs are kept
+```
+
+**See also:** `to_html`, `parse_blocks`
 
 ---
 

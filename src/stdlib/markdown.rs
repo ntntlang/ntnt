@@ -42,7 +42,8 @@ pub fn init() -> HashMap<String, Value> {
     // @signature to_html(markdown: String) -> String
     // Convert a Markdown string to HTML. Supports GitHub Flavored Markdown:
     // tables, strikethrough, task lists, footnotes, heading attributes.
-    // Does NOT sanitize HTML — embedded HTML tags pass through as-is.
+    // Does NOT sanitize HTML — embedded HTML tags, heading attributes and link or
+    // image URLs of any scheme (including javascript:) pass through as-is.
     // Use to_html_safe() if the input is untrusted.
     module.insert(
         "to_html".to_string(),
@@ -63,8 +64,24 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt to_html_safe
     // @module std/markdown
     // @signature to_html_safe(markdown: String) -> String
-    // Convert a Markdown string to HTML with embedded HTML tags stripped.
-    // Use this when rendering user-supplied or untrusted Markdown content.
+    // Convert user-supplied or untrusted Markdown to HTML without raw HTML, heading
+    // attributes or link and image URLs of unsafe schemes.
+    //
+    // Embedded HTML tags, HTML blocks and comments are dropped. Heading attribute
+    // syntax (`{#id .class key=value}`) stays literal text. Every href and src is
+    // relative (including `//host/path`, `?query` and `#fragment`) or uses http,
+    // https or mailto: a link with any other scheme (javascript:, data:, vbscript:,
+    // file:, ...) renders as its plain text, and such an image as its alt text.
+    // Schemes are compared the way browsers read them: after entity decoding,
+    // ignoring case, tabs, line breaks and leading or trailing spaces and control
+    // characters. Everything else matches to_html(). The guarantee covers the
+    // returned HTML only; escape anything you add around it.
+    // @param markdown Markdown source, possibly user-supplied.
+    // @returns HTML without raw HTML, heading attributes or unsafe link and image URLs.
+    // @see_also to_html, parse_blocks
+    // @tags #text #markdown #security
+    // @example to_html_safe("[x](javascript:alert(1)) <b>hi</b>") => "<p>x hi</p>\n" ~ "Unsafe links keep only their text"
+    // @example to_html_safe("[docs](/guide) ![logo](https://example.com/logo.png)") => "<p><a href=\"/guide\">docs</a> <img src=\"https://example.com/logo.png\" alt=\"logo\" /></p>\n" ~ "Relative and https URLs are kept"
     module.insert(
         "to_html_safe".to_string(),
         Value::NativeFunction {
@@ -184,28 +201,72 @@ fn replace_markdown_source_range(
     Ok(edited)
 }
 
-/// Convert markdown to HTML
-fn markdown_to_html(input: &str, strip_raw_html: bool) -> Value {
-    let options = markdown_options();
+/// URL schemes to_html_safe() keeps in link and image destinations. Destinations
+/// without a scheme (relative paths, `//host/path`, `?query`, `#fragment`) are kept too.
+const SAFE_URL_SCHEMES: [&str; 3] = ["http", "https", "mailto"];
 
-    if strip_raw_html {
-        // Filter out raw HTML events for safe rendering
-        let parser = Parser::new_ext(input, options);
-        let filtered = parser.filter(|event| {
-            !matches!(
-                event,
-                pulldown_cmark::Event::Html(_) | pulldown_cmark::Event::InlineHtml(_)
-            )
-        });
-        let mut html_output = String::new();
-        html::push_html(&mut html_output, filtered);
-        Value::String(html_output)
+/// Convert markdown to HTML; `safe` selects the to_html_safe() rendering.
+fn markdown_to_html(input: &str, safe: bool) -> Value {
+    let mut html_output = String::new();
+    if safe {
+        // `{onclick=...}` after a heading would become an attribute; keep it as text.
+        let mut options = markdown_options();
+        options.remove(Options::ENABLE_HEADING_ATTRIBUTES);
+        html::push_html(
+            &mut html_output,
+            safe_events(Parser::new_ext(input, options)),
+        );
     } else {
-        let parser = Parser::new_ext(input, options);
-        let mut html_output = String::new();
-        html::push_html(&mut html_output, parser);
-        Value::String(html_output)
+        html::push_html(&mut html_output, Parser::new_ext(input, markdown_options()));
     }
+    Value::String(html_output)
+}
+
+/// The to_html_safe() event stream: raw HTML is dropped, and a link or image whose
+/// destination is not allowed loses its start and end tags, so a link renders as
+/// its text and an image as its alt text.
+fn safe_events<'a>(events: impl Iterator<Item = Event<'a>>) -> impl Iterator<Item = Event<'a>> {
+    // Whether each open link or image kept its start tag, so its end tag matches.
+    let mut kept = Vec::new();
+    events.filter(move |event| match event {
+        Event::Html(_) | Event::InlineHtml(_) => false,
+        Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+            let keep = is_allowed_url(dest_url);
+            kept.push(keep);
+            keep
+        }
+        Event::End(TagEnd::Link | TagEnd::Image) => kept.pop().unwrap_or(true),
+        _ => true,
+    })
+}
+
+/// Whether to_html_safe() may emit `url` as an href or src.
+fn is_allowed_url(url: &str) -> bool {
+    url_scheme(url).is_none_or(|scheme| SAFE_URL_SCHEMES.contains(&scheme.as_str()))
+}
+
+/// The lowercase scheme a browser's URL parser reads from `url`, or `None` for a
+/// reference without one. Like the WHATWG URL parser, ignores leading and trailing
+/// C0 controls and spaces and every tab, line feed and carriage return, so
+/// `" JAVA\tSCRIPT:"` is `javascript`. pulldown-cmark has already decoded entity
+/// references such as `jav&#x61;script:` in `url`.
+fn url_scheme(url: &str) -> Option<String> {
+    let mut chars = url
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'));
+    let first = chars.next().filter(char::is_ascii_alphabetic)?;
+    let mut scheme = String::from(first.to_ascii_lowercase());
+    for c in chars {
+        match c {
+            ':' => return Some(scheme),
+            c if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') => {
+                scheme.push(c.to_ascii_lowercase())
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn markdown_options() -> Options {
@@ -509,6 +570,224 @@ mod tests {
             }
             _ => panic!("Expected string"),
         }
+    }
+
+    fn render(input: &str, safe: bool) -> String {
+        match markdown_to_html(input, safe) {
+            Value::String(html) => html,
+            other => panic!("expected string, got {other:?}"),
+        }
+    }
+
+    /// (case, Markdown, exact to_html_safe() output). A link with a disallowed
+    /// scheme keeps only its text, an image only its alt text, and heading
+    /// attribute syntax stays literal text.
+    const UNSAFE_PAYLOADS: &[(&str, &str, &str)] = &[
+        ("javascript", "[x](javascript:alert(1))", "<p>x</p>\n"),
+        ("uppercase", "[x](JAVASCRIPT:alert(1))", "<p>x</p>\n"),
+        ("mixed case", "[x](JaVaScRiPt:alert(1))", "<p>x</p>\n"),
+        ("tab", "[x](<java\tscript:alert(1)>)", "<p>x</p>\n"),
+        ("entity tab", "[x](java&#9;script:alert(1))", "<p>x</p>\n"),
+        (
+            "entity newline",
+            "[x](java&#10;script:alert(1))",
+            "<p>x</p>\n",
+        ),
+        (
+            "entity return",
+            "[x](java&#13;script:alert(1))",
+            "<p>x</p>\n",
+        ),
+        ("leading space", "[x](< javascript:alert(1)>)", "<p>x</p>\n"),
+        (
+            "trailing space",
+            "[x](<javascript:alert(1) >)",
+            "<p>x</p>\n",
+        ),
+        (
+            "leading control",
+            "[x](&#1;javascript:alert(1))",
+            "<p>x</p>\n",
+        ),
+        (
+            "entity letter",
+            "[x](jav&#x61;script:alert(1))",
+            "<p>x</p>\n",
+        ),
+        (
+            "entity colon",
+            "[x](javascript&colon;alert(1))",
+            "<p>x</p>\n",
+        ),
+        (
+            "data",
+            "[x](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)",
+            "<p>x</p>\n",
+        ),
+        ("vbscript", "[x](vbscript:msgbox(1))", "<p>x</p>\n"),
+        ("title", "[x](javascript:alert(1) \"t\")", "<p>x</p>\n"),
+        (
+            "formatted text",
+            "[**x**](javascript:alert(1))",
+            "<p><strong>x</strong></p>\n",
+        ),
+        (
+            "autolink",
+            "<javascript:alert(1)>",
+            "<p>javascript:alert(1)</p>\n",
+        ),
+        (
+            "reference",
+            "[x][r]\n\n[r]: javascript:alert(1)",
+            "<p>x</p>\n",
+        ),
+        (
+            "collapsed reference",
+            "[r][]\n\n[r]: javascript:alert(1)",
+            "<p>r</p>\n",
+        ),
+        (
+            "shortcut reference",
+            "[r]\n\n[r]: javascript:alert(1)",
+            "<p>r</p>\n",
+        ),
+        ("image", "![alt](javascript:alert(1))", "<p>alt</p>\n"),
+        (
+            "data image",
+            "![alt](data:image/svg+xml;base64,PHN2Zz4=)",
+            "<p>alt</p>\n",
+        ),
+        (
+            "reference image",
+            "![alt][r]\n\n[r]: javascript:alert(1)",
+            "<p>alt</p>\n",
+        ),
+        (
+            "safe image in unsafe link",
+            "[![ok](https://example.com/a.png)](javascript:alert(1))",
+            "<p><img src=\"https://example.com/a.png\" alt=\"ok\" /></p>\n",
+        ),
+        (
+            "unsafe image in safe link",
+            "[![ok](javascript:alert(1))](https://example.com)",
+            "<p><a href=\"https://example.com\">ok</a></p>\n",
+        ),
+        (
+            "heading event handler",
+            "# Title {onclick=alert(1)}",
+            "<h1>Title {onclick=alert(1)}</h1>\n",
+        ),
+        (
+            "heading id and class",
+            "## Title {#top .big}",
+            "<h2>Title {#top .big}</h2>\n",
+        ),
+    ];
+
+    #[test]
+    fn safe_mode_neutralizes_unsafe_urls_and_heading_attributes() {
+        let failures = UNSAFE_PAYLOADS
+            .iter()
+            .filter_map(|(case, input, expected)| {
+                let html = render(input, true);
+                (html != *expected).then(|| format!("{case}: {input:?} rendered {html:?}"))
+            })
+            .collect::<Vec<_>>();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn safe_mode_renders_allowed_destinations_like_trusted_mode() {
+        let inputs = [
+            "[x](https://example.com/a?b=1#c)",
+            "[x](http://example.com)",
+            "[x](HTTPS://EXAMPLE.COM)",
+            "[x](mailto:someone@example.com)",
+            "[x](/docs/page)",
+            "[x](docs/page.html)",
+            "[x](./notes:2026.md)",
+            "[x](//example.com/path)",
+            "[x](?page=2)",
+            "[x](#section)",
+            "[x](<docs/a file.md>)",
+            "[x](https://example.com \"Title\")",
+            "<https://example.com>",
+            "<someone@example.com>",
+            "[x][r]\n\n[r]: https://example.com",
+            "![alt](https://example.com/a.png \"Title\")",
+            "![alt](images/a.png)",
+            "![a [b](javascript:alert(1))](https://example.com/i.png)",
+            "Text[^1]\n\n[^1]: Footnote.",
+            "# Title\n\n- [x] done\n\n| A |\n|---|\n| 1 |",
+        ];
+        for input in inputs {
+            assert_eq!(render(input, true), render(input, false), "input {input:?}");
+        }
+        assert_eq!(
+            render("[x](https://example.com)", true),
+            "<p><a href=\"https://example.com\">x</a></p>\n"
+        );
+        assert_eq!(
+            render("<someone@example.com>", true),
+            "<p><a href=\"mailto:someone@example.com\">someone@example.com</a></p>\n"
+        );
+        assert_eq!(
+            render("![alt](images/a.png)", true),
+            "<p><img src=\"images/a.png\" alt=\"alt\" /></p>\n"
+        );
+    }
+
+    #[test]
+    fn url_scheme_follows_browser_normalization() {
+        let cases = [
+            ("javascript:alert(1)", Some("javascript")),
+            (" \u{1}JaVa\tSc\nRi\rPt:x \u{1f}", Some("javascript")),
+            ("HTTPS://example.com", Some("https")),
+            ("web+app.v-1:x", Some("web+app.v-1")),
+            ("mailto:", Some("mailto")),
+            ("/path:x", None),
+            ("./a:b", None),
+            ("a/b:c", None),
+            ("1http:x", None),
+            ("#frag:x", None),
+            ("?q=a:b", None),
+            ("//host/a:b", None),
+            ("java script:x", None),
+            ("java\u{1}script:x", None),
+            ("\u{a0}javascript:x", None),
+            ("javascript", None),
+            ("", None),
+        ];
+        for (url, expected) in cases {
+            assert_eq!(url_scheme(url).as_deref(), expected, "url {url:?}");
+        }
+    }
+
+    #[test]
+    fn to_html_safe_doc_examples_hold() {
+        assert_eq!(
+            render("[x](javascript:alert(1)) <b>hi</b>", true),
+            "<p>x hi</p>\n"
+        );
+        assert_eq!(
+            render(
+                "[docs](/guide) ![logo](https://example.com/logo.png)",
+                true
+            ),
+            "<p><a href=\"/guide\">docs</a> <img src=\"https://example.com/logo.png\" alt=\"logo\" /></p>\n"
+        );
+    }
+
+    #[test]
+    fn trusted_mode_keeps_destinations_and_heading_attributes() {
+        assert_eq!(
+            render("[x](javascript:alert(1))", false),
+            "<p><a href=\"javascript:alert(1)\">x</a></p>\n"
+        );
+        assert_eq!(
+            render("# Title {#top .big}", false),
+            "<h1 id=\"top\" class=\"big\">Title</h1>\n"
+        );
     }
 
     #[test]
