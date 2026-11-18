@@ -17,6 +17,11 @@ runtime, the standard library and the installers.
   the same canonical form, and redirects built from the request path use it too: a
   request for `//evil.example/x` can no longer produce a protocol-relative
   `Location`.
+- **Workers starting or reloading.** Protection rules no longer disappear while
+  other workers start, restart or reload. Each worker re-runs the application's
+  setup, and its `enable_auth()` used to clear the shared rules while worker 0 was
+  already serving, so a path protected only by a rule was briefly public. While a
+  server is serving, `enable_auth()` now adds rules instead of replacing them.
 
 ## Application code cannot change the runtime's security policy
 
@@ -53,9 +58,12 @@ newlines. Relative links, fragments and `to_html()` are unchanged.
 - The warning for JavaScript-style `${...}` interpolation in string literals scans
   each literal once and reports at most 64 candidates, shortening long snippets. A
   crafted literal previously took quadratic time and memory.
-- **Windows installer:** `install.ps1` no longer builds from source when the release
-  download fails; it stops and explains how to build a release tag yourself. It
-  never reuses or overwrites an existing `.\ntnt` directory for the starter kit.
+- **Windows installer:** `install.ps1` verifies the archive against the release's
+  `.sha256` file before extracting it, and replaces an existing `ntnt.exe` only after
+  the new binary runs and reports the release's version; on any failure the previous
+  install stays. It no longer builds from source when the download fails, never
+  reuses or overwrites an existing `.\ntnt` directory, and fetches the starter kit
+  from the release tag instead of `main`.
 - Process tests keep their fixtures in private temporary directories.
 
 ## Upgrade notes
@@ -69,5 +77,8 @@ newlines. Relative links, fragments and `to_html()` are unchanged.
    middleware.
 3. `to_html_safe()` renders `tel:`, `ftp:`, `data:` and other non-allowlisted links
    as plain text. Use `to_html()` for trusted content that needs them.
+4. During development hot reload, a `require_auth(path)` rule or `protected_paths`
+   entry you delete stays enforced until the server restarts; added rules still
+   apply at the reload.
 
 See [NTNT v0.6.2](v0.6.2.md) for the previous release.
