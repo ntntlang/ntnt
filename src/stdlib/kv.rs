@@ -700,22 +700,15 @@ impl RedisKV {
     }
 
     fn connect(url: &str, timeout: Option<std::time::Duration>) -> Result<Self> {
-        // Convert valkey:// to redis:// since the redis crate only recognizes redis://
-        let normalized_url = if url.starts_with("valkey://") {
-            url.replacen("valkey://", "redis://", 1)
-        } else {
-            url.to_string()
-        };
-
-        let client = redis::Client::open(normalized_url.as_str()).map_err(|e| {
+        // valkey:// and valkeys:// map to the redis crate's redis:// and rediss://;
+        // TLS URLs verify the server against the host CA store.
+        let client = crate::stdlib::redis_tls::client(url).map_err(|e| {
             IntentError::runtime_error(format!("Failed to create Redis client: {}", e))
         })?;
 
-        let conn = match timeout {
-            Some(timeout) => client.get_connection_with_timeout(timeout),
-            None => client.get_connection(),
-        }
-        .map_err(|e| IntentError::runtime_error(format!("Failed to connect to Redis: {}", e)))?;
+        let conn = crate::stdlib::redis_tls::connection(&client, timeout).map_err(|e| {
+            IntentError::runtime_error(format!("Failed to connect to Redis: {}", e))
+        })?;
 
         Ok(RedisKV {
             conn,
@@ -1320,12 +1313,18 @@ pub fn create_kv_module() -> HashMap<String, Value> {
     //
     // For SQLite (bundled, zero-config), pass a file path or ":memory:".
     // For Redis/Valkey (production), pass a URL like "redis://host:6379".
-    // @param url Connection string: file path for SQLite, redis:// or valkey:// URL for Redis/Valkey
+    // redis:// and valkey:// connect in plaintext. rediss:// and valkeys://
+    // connect over TLS: the server certificate must chain to the host CA store
+    // (SSL_CERT_FILE / SSL_CERT_DIR select a private CA) and be valid for the
+    // URL's host name. There is no unverified mode (#insecure is rejected) and
+    // no plaintext fallback. Trust is read once per process.
+    // @param url Connection string: file path for SQLite, redis://, rediss://, valkey:// or valkeys:// URL for Redis/Valkey
     // @returns Result containing the KV store handle or an error message
     // @example open("cache.db") ~ "Open SQLite KV store"
     // @example open(":memory:") ~ "Open in-memory SQLite KV store"
     // @example open("redis://localhost:6379") ~ "Open Redis connection"
     // @example open("valkey://localhost:6379/0") ~ "Open Valkey connection with database 0"
+    // @example open("rediss://:secret@cache.example.com:6380/0") ~ "Open Redis over verified TLS"
     module.insert(
         "open".to_string(),
         Value::NativeFunction {
@@ -1352,7 +1351,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 let id = KV_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
                 // Determine backend from URL
-                if url.starts_with("redis://") || url.starts_with("valkey://") {
+                if crate::stdlib::redis_tls::is_redis_url(&url) {
                     // Redis/Valkey backend
                     let kv = RedisKV::new(&url)?;
                     let shared = Arc::new(Mutex::new(kv));
@@ -1361,11 +1360,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                         registry.insert(id, shared);
                     }
 
-                    let backend_name = if url.starts_with("valkey://") {
-                        "valkey"
-                    } else {
-                        "redis"
-                    };
+                    let backend_name = crate::stdlib::redis_tls::backend_name(&url);
                     let mut handle = HashMap::new();
                     handle.insert(
                         "_backend".to_string(),
@@ -2411,7 +2406,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
 pub fn open_kv(url: &str) -> Result<Value> {
     let id = KV_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    if url.starts_with("redis://") || url.starts_with("valkey://") {
+    if crate::stdlib::redis_tls::is_redis_url(url) {
         let kv = RedisKV::new(url)?;
         let shared = Arc::new(Mutex::new(kv));
 
@@ -2419,11 +2414,7 @@ pub fn open_kv(url: &str) -> Result<Value> {
             registry.insert(id, shared);
         }
 
-        let backend_name = if url.starts_with("valkey://") {
-            "valkey"
-        } else {
-            "redis"
-        };
+        let backend_name = crate::stdlib::redis_tls::backend_name(url);
         let mut handle = HashMap::new();
         handle.insert(
             "_backend".to_string(),
@@ -2452,7 +2443,7 @@ pub fn open_kv(url: &str) -> Result<Value> {
 
 /// Open an owned Redis/Valkey connection without allowing connect to stall a worker.
 pub(crate) fn open_owned_kv(url: &str, timeout: std::time::Duration) -> Result<OwnedKvHandle> {
-    if !url.starts_with("redis://") && !url.starts_with("valkey://") {
+    if !crate::stdlib::redis_tls::is_redis_url(url) {
         return Err(IntentError::runtime_error(
             "Bounded owned connections require Redis or Valkey",
         ));
@@ -2463,11 +2454,7 @@ pub(crate) fn open_owned_kv(url: &str, timeout: std::time::Duration) -> Result<O
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .insert(id, Arc::new(Mutex::new(kv)));
-    let backend_name = if url.starts_with("valkey://") {
-        "valkey"
-    } else {
-        "redis"
-    };
+    let backend_name = crate::stdlib::redis_tls::backend_name(url);
     let mut map = HashMap::new();
     map.insert(
         "_backend".to_string(),

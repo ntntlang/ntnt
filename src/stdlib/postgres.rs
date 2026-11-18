@@ -13,7 +13,7 @@
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::{Config, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -23,6 +23,7 @@ use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
 
 mod pool_registry;
+pub(crate) mod runtime_tls;
 use pool_registry::{PoolRegistry, SharedPool};
 
 type Result<T> = std::result::Result<T, IntentError>;
@@ -531,8 +532,14 @@ fn normalized_connection_key(connection_string: &str) -> String {
     )
 }
 
-fn hash_connection_string(connection_string: &str) -> String {
-    hash_pool_key(&normalized_connection_key(connection_string))
+/// Registry key: the normalized driver target plus the effective TLS policy, so
+/// the same server reached with a different sslmode or trust gets its own pool.
+fn pool_key(target: &runtime_tls::Target) -> String {
+    hash_pool_key(&format!(
+        "{}|tls={}",
+        normalized_connection_key(target.rest()),
+        target.policy()
+    ))
 }
 
 fn sanitize_connection_error(error: &str, connection_string: &str) -> String {
@@ -544,13 +551,41 @@ fn sanitize_connection_error(error: &str, connection_string: &str) -> String {
     }
 }
 
+/// A verified pool for `connection_string`, outside the shared registry.
+#[cfg(test)]
 fn create_verified_pool(connection_string: &str) -> std::result::Result<Pool, String> {
-    // Build deadpool-postgres Config from connection string URL.
+    let target = runtime_tls::resolve(connection_string)
+        .map_err(|e| sanitize_connection_error(&e, connection_string))?;
+    create_verified_pool_for(&target, connection_string)
+}
+
+fn create_verified_pool_for(
+    target: &runtime_tls::Target,
+    connection_string: &str,
+) -> std::result::Result<Pool, String> {
+    // deadpool's own defaults (user from $USER, a required dbname, local Unix
+    // sockets or 127.0.0.1 without a host) apply to the TLS-stripped string.
     let mut cfg = Config::new();
-    cfg.url = Some(connection_string.to_string());
-    cfg.manager = Some(ManagerConfig {
+    cfg.url = Some(target.rest().to_string());
+    let mut pg_config = cfg
+        .get_pg_config()
+        .map_err(|e| sanitize_connection_error(&e.to_string(), connection_string))?;
+    target
+        .check_hosts(pg_config.get_hosts())
+        .map_err(|e| sanitize_connection_error(&e, connection_string))?;
+    // Always explicit: without the stripped sslmode tokio-postgres would use
+    // `prefer`, which silently falls back to plaintext.
+    pg_config.ssl_mode(target.ssl_mode());
+    let manager_config = ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
-    });
+    };
+    let manager = match DB_RUNTIME
+        .block_on(target.connector())
+        .map_err(|e| sanitize_connection_error(&e, connection_string))?
+    {
+        Some(tls) => Manager::from_config(pg_config, tls, manager_config),
+        None => Manager::from_config(pg_config, NoTls, manager_config),
+    };
     // Pool size: configurable via NTNT_DB_POOL_SIZE env var, default 5.
     // Each worker has its own process-local shared pools, so total connections =
     // num_workers × num_databases × pool_size. With 8 workers and 2 databases,
@@ -559,13 +594,13 @@ fn create_verified_pool(connection_string: &str) -> std::result::Result<Pool, St
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(5);
-    cfg.pool = Some(deadpool_postgres::PoolConfig {
-        max_size: pool_max_size,
-        ..Default::default()
-    });
-
-    let pool = cfg
-        .create_pool(Some(Runtime::Tokio1), NoTls)
+    let pool = Pool::builder(manager)
+        .config(deadpool_postgres::PoolConfig {
+            max_size: pool_max_size,
+            ..Default::default()
+        })
+        .runtime(Runtime::Tokio1)
+        .build()
         .map_err(|e| sanitize_connection_error(&e.to_string(), connection_string))?;
 
     // Verify newly-created pools before caching them. Later connect(url) calls
@@ -574,6 +609,9 @@ fn create_verified_pool(connection_string: &str) -> std::result::Result<Pool, St
         .block_on(async {
             match pool.get().await {
                 Ok(_client) => Ok(()),
+                Err(deadpool_postgres::PoolError::Backend(e)) => {
+                    Err(runtime_tls::connect_error(&e))
+                }
                 Err(e) => Err(e.to_string()),
             }
         })
@@ -613,8 +651,17 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
         Ok(registry) => registry,
         Err(error) => return Ok(Value::err(Value::String((*error).into()))),
     };
-    let pool = match registry.get_or_create(hash_connection_string(connection_string), || {
-        create_verified_pool(connection_string)
+    let target = match runtime_tls::resolve(connection_string) {
+        Ok(target) => target,
+        Err(error) => {
+            return Ok(Value::err(Value::String(sanitize_connection_error(
+                &error,
+                connection_string,
+            ))))
+        }
+    };
+    let pool = match registry.get_or_create(pool_key(&target), || {
+        create_verified_pool_for(&target, connection_string)
     }) {
         Ok(pool) => pool,
         Err(error) => return Ok(Value::err(Value::String(error))),
@@ -1235,12 +1282,25 @@ pub fn init() -> HashMap<String, Value> {
     // Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE
     // env var). Note: each worker has its own process-local shared pools, so total
     // connections = num_workers × num_databases × pool_size.
+    //
+    // TLS follows sslmode: verify-full checks the certificate chain and host
+    // name (host CA store, or sslrootcert=/absolute/ca.pem), verify-ca the chain
+    // only (sslrootcert required), require encrypts without verifying the
+    // server, disable is plaintext. prefer and allow are rejected because they
+    // can fall back to plaintext. Without sslmode, a connection is plaintext
+    // only when every host is local (127.0.0.1, ::1, localhost, a Unix socket,
+    // or a single-label name such as a Docker service "db"); otherwise it uses
+    // verify-full. sslrootcert alone also means verify-full. TLS never falls
+    // back to plaintext, and the pool identity includes the TLS policy.
+    // Trust is read when a pool is created; restart after changing it.
     // @param connection_string A PostgreSQL connection URI (e.g. "postgres://user:pass@localhost/mydb")
     // @returns Result::Ok containing a Connection map handle, or Result::Err with a description
     // @see_also close, query, execute, begin
     // @since v0.2.0
     // @tags #database
     // @example connect("postgres://user:pass@localhost/mydb") => Result::Ok(Connection) ~ "Open a database connection"
+    // @example connect("postgres://app:secret@db.example.com/app?sslmode=verify-full&sslrootcert=/etc/ssl/db-ca.pem") => Result::Ok(Connection) ~ "Verified TLS with a private CA"
+    // @gotcha Without sslmode, a host name with a dot (db.example.com) gets verify-full against the host CA store; add sslmode=disable only for a trusted private network
     // @error TypeError ~ "connect() requires a connection string" fix: "Pass a String connection URI as the argument"
     module.insert(
         "connect".to_string(),
@@ -1502,12 +1562,52 @@ mod tests {
         assert!(module.contains_key("rollback"));
     }
 
+    fn key_for(connection_string: &str) -> String {
+        pool_key(&runtime_tls::resolve(connection_string).unwrap())
+    }
+
+    #[test]
+    fn pool_key_includes_the_effective_tls_policy() {
+        let host = "host=db.example.com user=app dbname=app";
+        // Absent sslmode on a remote host is verify-full against the host store.
+        assert_eq!(
+            key_for(host),
+            key_for(&format!("{host} sslmode=verify-full"))
+        );
+        assert_ne!(key_for(host), key_for(&format!("{host} sslmode=require")));
+        assert_ne!(key_for(host), key_for(&format!("{host} sslmode=disable")));
+        assert_ne!(
+            key_for(&format!("{host} sslmode=verify-full")),
+            key_for(&format!(
+                "{host} sslmode=verify-full sslrootcert={}",
+                ca_path("a.pem")
+            ))
+        );
+        assert_ne!(
+            key_for(&format!("{host} sslrootcert={}", ca_path("a.pem"))),
+            key_for(&format!("{host} sslrootcert={}", ca_path("b.pem")))
+        );
+        // Absent sslmode on a local host is plaintext, the same as disable.
+        let local = "host=localhost user=app dbname=app";
+        assert_eq!(key_for(local), key_for(&format!("{local} sslmode=disable")));
+        assert_ne!(key_for(local), key_for(&format!("{local} sslmode=require")));
+    }
+
+    /// An absolute CA path on this platform, as a connection string holds it.
+    fn ca_path(name: &str) -> String {
+        if cfg!(windows) {
+            format!("C:/ntnt/{name}")
+        } else {
+            format!("/etc/ntnt/{name}")
+        }
+    }
+
     #[test]
     fn test_postgres_pool_key_normalizes_default_port_and_query_order() {
         let a = "postgres://user:pass@localhost/db?sslmode=disable&application_name=ntnt";
         let b = "postgres://user:pass@localhost:5432/db?application_name=ntnt&sslmode=disable";
 
-        assert_eq!(hash_connection_string(a), hash_connection_string(b));
+        assert_eq!(key_for(a), key_for(b));
     }
 
     #[test]
@@ -1515,7 +1615,7 @@ mod tests {
         let a = "postgres://user:first@localhost/db";
         let b = "postgres://user:second@localhost/db";
 
-        assert_ne!(hash_connection_string(a), hash_connection_string(b));
+        assert_ne!(key_for(a), key_for(b));
     }
 
     #[test]

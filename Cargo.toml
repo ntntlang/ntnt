@@ -104,8 +104,9 @@ rust_decimal = { version = "1.43", features = ["db-postgres", "db-tokio-postgres
 chrono = "0.4"
 chrono-tz = "0.10.4"
 
-# Redis/Valkey KV store
-redis = "0.27"
+# Redis/Valkey KV store. `tls-rustls` (rustls without default features, so the
+# ring provider only; no async runtime integration) serves rediss:// and valkeys://.
+redis = { version = "0.27", features = ["tls-rustls"] }
 
 # JWT for auth
 # jsonwebtoken 10 requires an explicit signing/verification provider.
