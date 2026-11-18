@@ -1,6 +1,6 @@
 # DD-041 implementation plan: native SSE, then WebSockets
 
-**Status:** Slice A (SSE), process resource caps and initial worker readiness shipped in v0.6.0. The v0.6.1 candidate implements bounded process-local WebSockets, setup-source parity and different-source worker quarantine. The original DD is not fully closed: see the current boundary and remaining acceptance work below.
+**Status:** Slice A (SSE), process resource caps and initial worker readiness shipped in v0.6.0. Bounded process-local WebSockets, setup-source parity and different-source worker quarantine shipped in v0.6.1. The original DD is not fully closed: see the current boundary and remaining acceptance work below.
 **Gate 0 baseline (historical):** `58710b9b9b9468575257ccc141dcbaed639d468b` (DD-041 merged); the runtime/Cargo at that baseline matched v0.5.6, not current main.
 **Design:** [DD-041](dd-041-sse-streaming.md).
 **Publication:** Historical implementation plan, feasibility evidence and subsequent implementation record. The task lists describe the accepted target, not a completed release checklist. The current boundary here and in [DD-041](dd-041-sse-streaming.md#implemented-boundary) governs adoption; old baseline observations do not override it. #298 supplied the interpreter-context registration primitive used by the implemented APIs.
@@ -30,10 +30,10 @@
   worker 0 reloads; others can serve old HTTP code and refuse current WebSocket
   work until restart. This is not coordinated application reload (#361).
 - Still deferred or not fully demonstrated: per-embedded-application realtime
-  isolation, complete frozen program/endpoint identity (including post-`listen`
-  lazy inputs and task provenance), coordinated reload, and independent aggregate
-  transport-buffer/hard SSE socket-teardown guarantees. Do not mark these closed
-  because the public WebSocket API exists.
+  isolation (#389), complete frozen program/endpoint identity, including
+  post-`listen` lazy inputs and task provenance (#390), coordinated reload (#361),
+  and independent aggregate transport-buffer/hard SSE socket-teardown guarantees
+  (#391). Do not mark these closed because the public WebSocket API exists.
 
 Use the [agent guide](../docs/AI_AGENT_GUIDE.md#websockets),
 [versioned announcement](../docs/release-notes/v0.6.1.md), and actual async tests
@@ -221,7 +221,7 @@ Probes ran against the real `ntnt run` server and real Worker-mode interpreters,
 
 **SSE over HTTP/2:** the `h2c` tests in `tests/realtime_sse_tests.rs` drive `ntnt run` with an HTTP/2 prior-knowledge client. Three SSE streams sharing one connection receive heartbeats and events. A stream whose flow-control window is never released receives at most that window plus two events, then the overflow event, while its sibling streams and an HTTP/1.1 client receive every event. When the client stops reading the socket, eight streams following separate buses each hold at most the 64 KiB send buffer plus three events once the kernel buffers are full: under 1 MiB in all, so a 2 MiB payload budget is never exhausted (with hyper's 400 KB default it is). Each stream's flow-control window bounds what reaches the socket, so every stalled stream falls behind its bus however much the kernel buffers. Resetting one stream returns its connection permit, frees the bus its request created and releases the events held for it, while its connection stays open. Each test fails with its behavior removed (send-buffer limit, lag close, stream release or stream multiplexing). Kernel socket buffers and codec copies remain outside this accounting.
 
-**Scoped coverage, not full DD closure:** `test_supervised_realtime_worker_restart_serves_only_the_committed_source` exercises changed-source rejection/rejoin, and the worker-failure fixtures cover stale-generation callback rejection, reduced-pool HTTP reservation and one saturated worker-loss recovery. They do not establish complete frozen program/endpoint parity or every combination of callback saturation and worker failure. Those broader checks remain explicit follow-up work.
+**Scoped coverage, not full DD closure:** `test_supervised_realtime_worker_restart_serves_only_the_committed_source` exercises changed-source rejection/rejoin, and the worker-failure fixtures cover stale-generation callback rejection, reduced-pool HTTP reservation and one saturated worker-loss recovery (#372). They do not establish complete frozen program/endpoint parity, which is #390. Other combinations of callback saturation and worker failure are not tested separately.
 
 ### Slice A — useful SSE, complete lifecycle and caps
 
@@ -299,6 +299,6 @@ For ordinary HTTP/CLI/template baseline comparison, reuse `scripts/bench/run-ben
 
 **Actually observed (Gate 0):** disposable probes against the real `ntnt run` server and Worker-mode interpreters, recorded under §4 "Gate 0 outcome". These were feasibility probes, not the feature implementation or its regression suite.
 
-**Historical post-Gate-0 checklist:** request-lease teardown, upgrade ownership, generation/readiness, quarantine and fairness were implementation requirements at that point, not evidence that current APIs are absent. Subsequent tests/implementation are recorded above. The current release boundary identifies remaining full-identity/isolation, coordinated-reload, combined-load and transport-buffer/teardown uncertainty; historical probe measurements do not settle those gaps.
+**Historical post-Gate-0 checklist:** request-lease teardown, upgrade ownership, generation/readiness, quarantine and fairness were implementation requirements at that point, not evidence that current APIs are absent. Subsequent tests/implementation are recorded above. The current release boundary identifies the remaining identity (#390), isolation (#389), coordinated-reload (#361) and transport-buffer/teardown (#391) uncertainty; historical probe measurements do not settle those gaps.
 
 **Independent review disposition:** the reviewer found no blocker to proceeding with Gate 0 and three medium-severity acceptance gaps, not proof that the final feature is feasible. Source inspection confirmed the startup-before-workers ordering, supervised workers rereading source, and the downstream HTTP codec copy paths. This revision addresses them with (1) explicit readiness/generation/quarantine steps and delay/conflict/helper-change cases, (2) a separate HTTP/SSE as well as WS transport-buffer allowance and stalled-writer cases, and (3) live-eligibility admission plus a truthful degraded-capacity contract and combined failure/load test. These are plan corrections, not executed feature regressions or a second reviewer verdict. Numeric limits, final lease policy and any requirement for immediate authorization revocation remain decisions to settle before public API/behavior freeze. At that design-review point no feature implementation had occurred; this historical review disposition is not a verdict on the subsequently implemented runtime.
