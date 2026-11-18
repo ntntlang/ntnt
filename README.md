@@ -200,6 +200,7 @@ ntnt intent studio server.intent
 # Install Rust if needed: https://rustup.rs/
 git clone https://github.com/ntntlang/ntnt.git
 cd ntnt
+git checkout vX.Y.Z   # optional: build a release tag instead of main
 cargo build --release
 cargo install --path . --locked
 ntnt --version

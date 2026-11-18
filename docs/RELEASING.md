@@ -67,6 +67,17 @@ failure is nonfatal after a successful binary install. This optional GitHub sour
 archive is not covered by the binary checksum. The ARM OpenSSL license is retained
 at `~/.local/share/licenses/ntnt/LICENSE.openssl`.
 
+## Windows installer
+
+`install.ps1` installs the latest `ntnt-windows-x64.zip` release binary into
+`%USERPROFILE%\.local\bin`. Like `install.sh`, it has no source fallback: if the
+latest release cannot be resolved, downloaded, extracted or run, it stops with an
+error. It does **not** install Rust, clone or update a checkout, or compile code;
+build your chosen tag manually instead. It does not yet select a version or
+verify the `.sha256` sidecar. Its optional starter kit (docs, examples, agent
+guides from `main`) is copied into a new `.\ntnt` only; an existing `.\ntnt` is
+never modified.
+
 ## ARMv7 build recipe
 
 The separate `armv7` release job uses these pins from

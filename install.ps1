@@ -1,5 +1,7 @@
 # NTNT Language Installer for Windows
 # Usage: irm https://raw.githubusercontent.com/ntntlang/ntnt/main/install.ps1 | iex
+# No source fallback: if the release binary cannot be installed, the installer
+# stops. It never installs Rust, clones or updates a checkout, or compiles code.
 #
 # Requirements: PowerShell 5.0+ (Windows 10+ has this by default)
 
@@ -7,7 +9,6 @@ $ErrorActionPreference = "Continue"
 $script:ExitCode = 0
 $script:Repo = "ntntlang/ntnt"
 $script:InstallDir = "$env:USERPROFILE\.local\bin"
-$script:InstalledFrom = ""
 
 # Check PowerShell version
 if ($PSVersionTable.PSVersion.Major -lt 5) {
@@ -115,157 +116,8 @@ function Try-DownloadBinary {
     } catch {
         Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
         Write-Host "Download failed: $_" -ForegroundColor Yellow
-        Write-Host "Will build from source instead." -ForegroundColor Yellow
         return $false
     }
-}
-
-function Build-FromSource {
-    Write-Host ""
-    Write-Host "Building from source..."
-    Write-Host ""
-
-    # Check for Visual Studio Build Tools by testing compilation
-    $hasBuildTools = $false
-
-    # Quick check: is link.exe in PATH?
-    if (Get-Command link.exe -ErrorAction SilentlyContinue) {
-        $hasBuildTools = $true
-    }
-
-    # Better check: try to compile something
-    if (-not $hasBuildTools -and (Get-Command rustc -ErrorAction SilentlyContinue)) {
-        $testFile = Join-Path $env:TEMP "ntnt_build_test_$(Get-Random).rs"
-        $testExe = $testFile -replace '\.rs$', '.exe'
-        try {
-            "fn main() {}" | Out-File -Encoding ascii $testFile
-            $null = & rustc $testFile -o $testExe 2>&1
-            if ($LASTEXITCODE -eq 0 -and (Test-Path $testExe)) {
-                $hasBuildTools = $true
-            }
-        } finally {
-            Remove-Item $testFile -ErrorAction SilentlyContinue
-            Remove-Item $testExe -ErrorAction SilentlyContinue
-        }
-    }
-
-    if (-not $hasBuildTools) {
-        Write-Host "X Visual Studio Build Tools not found" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "NTNT requires the MSVC linker (link.exe) to compile on Windows."
-        Write-Host ""
-        Write-Host "Install Visual Studio Build Tools:" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "  1. Download from:"
-        Write-Host "     https://visualstudio.microsoft.com/visual-cpp-build-tools/"
-        Write-Host ""
-        Write-Host "  2. Run the installer and select:"
-        Write-Host '     "Desktop development with C++"'
-        Write-Host ""
-        Write-Host "  3. IMPORTANT: After installing, open a NEW terminal"
-        Write-Host "     (or use 'Developer Command Prompt for VS')"
-        Write-Host ""
-        $script:ExitCode = 1
-        Wait-AndExit
-    }
-    Write-Host "[OK] Build tools available" -ForegroundColor Green
-
-    # Check for Git
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        Write-Host "X Git not found" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "Install Git from:" -ForegroundColor Yellow
-        Write-Host "  https://git-scm.com/download/win"
-        Write-Host ""
-        Write-Host "After installing, restart your terminal and re-run this installer."
-        $script:ExitCode = 1
-        Wait-AndExit
-    }
-    Write-Host "[OK] Git available" -ForegroundColor Green
-
-    # Check for Rust/Cargo
-    $cargoPath = "$env:USERPROFILE\.cargo\bin\cargo.exe"
-    $hasRust = (Get-Command cargo -ErrorAction SilentlyContinue) -or (Test-Path $cargoPath)
-
-    if (-not $hasRust) {
-        Write-Host ""
-        Write-Host "Rust not found. Installing via rustup..." -ForegroundColor Yellow
-
-        $rustupInit = Join-Path $env:TEMP "rustup-init-$(Get-Random).exe"
-        try {
-            $webClient = New-Object System.Net.WebClient
-            $webClient.DownloadFile("https://win.rustup.rs/x86_64", $rustupInit)
-
-            Start-Process -FilePath $rustupInit -ArgumentList "-y" -Wait -NoNewWindow
-            Remove-Item $rustupInit -ErrorAction SilentlyContinue
-
-            # Add to current session PATH
-            $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
-
-            Write-Host "[OK] Rust installed" -ForegroundColor Green
-        } catch {
-            Write-Host "X Failed to install Rust: $_" -ForegroundColor Red
-            $script:ExitCode = 1
-            Wait-AndExit
-        }
-    } else {
-        $rustVersion = & rustc --version 2>$null
-        Write-Host "[OK] Rust available: $rustVersion" -ForegroundColor Green
-    }
-
-    # Clone or update repo
-    $ntntDir = Join-Path (Get-Location) "ntnt"
-
-    try {
-        if (Test-Path $ntntDir) {
-            Write-Host "Updating NTNT source in .\ntnt..."
-            Push-Location $ntntDir
-            git fetch --quiet origin 2>$null
-            git reset --quiet --hard origin/main 2>$null
-            git clean --quiet -fd 2>$null
-        } else {
-            Write-Host "Cloning NTNT source to .\ntnt..."
-            $cloneResult = git clone --quiet "https://github.com/$script:Repo.git" $ntntDir 2>&1
-            if (-not (Test-Path $ntntDir)) {
-                throw "Git clone failed: $cloneResult"
-            }
-            Push-Location $ntntDir
-        }
-    } catch {
-        Write-Host "X Failed to download source: $_" -ForegroundColor Red
-        $script:ExitCode = 1
-        Wait-AndExit
-    }
-
-    # Build
-    Write-Host ""
-    Write-Host "Building NTNT (this takes a few minutes)..."
-    Write-Host ""
-
-    try {
-        & cargo install --path . --locked 2>&1 | ForEach-Object { Write-Host $_ }
-        if ($LASTEXITCODE -ne 0) {
-            throw "Build failed with exit code $LASTEXITCODE"
-        }
-    } catch {
-        Pop-Location
-        Write-Host ""
-        Write-Host "X Build failed: $_" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "If this looks like a bug, please report it at:"
-        Write-Host "  https://github.com/$script:Repo/issues" -ForegroundColor Cyan
-        $script:ExitCode = 1
-        Wait-AndExit
-    }
-
-    Pop-Location
-
-    # cargo install puts it in ~/.cargo/bin
-    $script:InstallDir = "$env:USERPROFILE\.cargo\bin"
-    $script:InstalledFrom = "source"
-
-    Write-Host ""
-    Write-Host "[OK] Built and installed ntnt to $script:InstallDir" -ForegroundColor Green
 }
 
 # ============================================
@@ -278,10 +130,14 @@ Write-Host "  NTNT Language Installer for Windows" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
-if (Try-DownloadBinary) {
-    $script:InstalledFrom = "binary"
-} else {
-    Build-FromSource
+if (-not (Try-DownloadBinary)) {
+    Write-Host ""
+    Write-Host "X Could not install the NTNT release binary. No source fallback was attempted." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Re-run the installer once the release download works, or build the release"
+    Write-Host "tag you want yourself; see Build from Source in https://github.com/$script:Repo#readme"
+    $script:ExitCode = 1
+    Wait-AndExit
 }
 
 Write-Host ""
@@ -318,13 +174,16 @@ if (-not $inPath) {
     Write-Host ""
 }
 
-# Download docs, examples, and agent helper files
+# Download docs, examples, and agent helper files into a new .\ntnt directory.
+# An existing .\ntnt (a project or clone) is never modified.
 function Download-StarterKit {
-    $script:NtntHome = Join-Path (Get-Location) "ntnt"
+    $ntntHome = Join-Path (Get-Location) "ntnt"
     Write-Host ""
+    if (Test-Path -LiteralPath $ntntHome) {
+        Write-Host "Skipping starter kit: .\ntnt already exists." -ForegroundColor Yellow
+        return $false
+    }
     Write-Host "Downloading NTNT starter kit (docs, examples, agent guides)..."
-
-    New-Item -ItemType Directory -Force -Path $script:NtntHome | Out-Null
 
     # Download zip from GitHub (no git required)
     $tmpDir = Join-Path $env:TEMP "ntnt-starter-$(Get-Random)"
@@ -343,18 +202,21 @@ function Download-StarterKit {
 
         # Find extracted directory (e.g., ntnt-main)
         $extractedDir = Get-ChildItem -Path $tmpDir -Directory -Filter "ntnt-*" | Select-Object -First 1
-
-        if ($extractedDir) {
-            $src = $extractedDir.FullName
-            if (Test-Path "$src\docs") { Copy-Item -Recurse "$src\docs" $script:NtntHome -Force }
-            if (Test-Path "$src\examples") { Copy-Item -Recurse "$src\examples" $script:NtntHome -Force }
-            if (Test-Path "$src\.github") { Copy-Item -Recurse "$src\.github" $script:NtntHome -Force }
-            if (Test-Path "$src\.claude\skills") {
-                New-Item -ItemType Directory -Force -Path "$script:NtntHome\.claude" | Out-Null
-                Copy-Item -Recurse "$src\.claude\skills" "$script:NtntHome\.claude\" -Force
-            }
-            if (Test-Path "$src\CLAUDE.md") { Copy-Item "$src\CLAUDE.md" $script:NtntHome -Force }
+        if (-not $extractedDir) {
+            throw "Starter kit archive has no ntnt-* directory"
         }
+
+        # Without -Force this fails instead of merging if .\ntnt appeared meanwhile.
+        New-Item -ItemType Directory -Path $ntntHome -ErrorAction Stop | Out-Null
+        $src = $extractedDir.FullName
+        if (Test-Path "$src\docs") { Copy-Item -Recurse "$src\docs" $ntntHome -Force }
+        if (Test-Path "$src\examples") { Copy-Item -Recurse "$src\examples" $ntntHome -Force }
+        if (Test-Path "$src\.github") { Copy-Item -Recurse "$src\.github" $ntntHome -Force }
+        if (Test-Path "$src\.claude\skills") {
+            New-Item -ItemType Directory -Force -Path "$ntntHome\.claude" | Out-Null
+            Copy-Item -Recurse "$src\.claude\skills" "$ntntHome\.claude\" -Force
+        }
+        if (Test-Path "$src\CLAUDE.md") { Copy-Item "$src\CLAUDE.md" $ntntHome -Force }
 
         Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
 
@@ -374,12 +236,7 @@ function Download-StarterKit {
     }
 }
 
-# For binary installs, always download the starter kit
-# For source installs, everything is already in ntnt\
-$script:NtntHome = $null
-if ($script:InstalledFrom -eq "binary") {
-    Download-StarterKit | Out-Null
-}
+$hasStarterKit = Download-StarterKit
 
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
@@ -391,11 +248,7 @@ Write-Host "  ntnt run hello.tnt     Run a file" -ForegroundColor Green
 Write-Host "  ntnt repl              Interactive REPL" -ForegroundColor Green
 Write-Host "  ntnt --help            See all commands" -ForegroundColor Green
 Write-Host ""
-if ($script:InstalledFrom -eq "source") {
-    Write-Host "Examples:    .\ntnt\examples\"
-    Write-Host "Docs:        .\ntnt\docs\"
-    Write-Host "Agent guide: .\ntnt\CLAUDE.md"
-} elseif ($script:NtntHome -and (Test-Path $script:NtntHome)) {
+if ($hasStarterKit) {
     Write-Host "Examples:    .\ntnt\examples\"
     Write-Host "Docs:        .\ntnt\docs\"
     Write-Host "Agent guide: .\ntnt\CLAUDE.md"
