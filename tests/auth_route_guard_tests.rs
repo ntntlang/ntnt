@@ -1,4 +1,5 @@
-//! Auth route protection over the real async `ntnt run` server.
+//! Auth route protection over the real async `ntnt run` server and the
+//! synchronous server that `ntnt test` and `ntnt intent check` run.
 //!
 //! - The public exemption under the auth `route_prefix` covers std/auth's own
 //!   handlers only. A custom handler sharing that prefix gets the protection
@@ -121,6 +122,47 @@ get("/public", public_page)
 listen(0, map { "fixture": true, "readiness": "json" })
 "#;
 
+/// RELOADED_RULE_APP plus `/hold`, for `ntnt test`, whose single-threaded
+/// server serves one request at a time: `/hold` writes `ready` in `gate`,
+/// then holds the server until `go` exists there.
+fn held_reload_app(gate: &Path) -> String {
+    let literal = |name: &str| serde_json::to_string(gate.join(name).to_str().unwrap()).unwrap();
+    let (ready, go) = (literal("ready"), literal("go"));
+    format!(
+        r#"
+import {{ enable_auth, require_auth }} from "std/auth"
+import {{ exists, write_file }} from "std/fs"
+import {{ error, text }} from "std/http/server"
+import {{ monotonic_deadline, monotonic_remaining, sleep }} from "std/time"
+
+fn admin_panel(req: Request) -> Response {{ return text("admin-panel") }}
+fn daily_report(req: Request) -> Response {{ return text("daily-report") }}
+fn public_page(req: Request) -> Response {{ return text("public-page-v1") }}
+
+fn hold(req: Request) -> Response {{
+    unwrap(write_file({ready}, "ready"))
+    let hang_guard_ms = 60000
+    let deadline = unwrap(monotonic_deadline(hang_guard_ms))
+    while !exists({go}) {{
+        if unwrap(monotonic_remaining(deadline)) == 0 {{
+            return error("hang guard: the test never created the go file")
+        }}
+        sleep(10)
+    }}
+    return text("held")
+}}
+
+enable_auth([], map {{ "session_secret": "fixture-session-secret-0123456789abcdef" }})
+require_auth("/admin/*")
+get("/admin/panel", admin_panel)
+get("/reports/daily", daily_report)
+get("/public", public_page)
+get("/hold", hold)
+listen(0, map {{ "fixture": true }})
+"#
+    )
+}
+
 struct Reply {
     status: u16,
     head: String,
@@ -218,6 +260,108 @@ fn wait_for_output(server: &mut fixture::Fixture, marker: &str, count: usize) {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Wait until `path` exists, which the app creates while `run` serves.
+fn wait_for_file(run: &mut fixture::Fixture, path: &Path) {
+    let deadline = std::time::Instant::now() + fixture::HANG_GUARD;
+    while !path.exists() {
+        assert!(
+            run.child.try_wait().unwrap().is_none(),
+            "exited before creating {}: {} {}",
+            path.display(),
+            run.stdout(),
+            run.stderr()
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "hang guard: waiting for {}: {} {}",
+            path.display(),
+            run.stdout(),
+            run.stderr()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Replace the served app's source for a development reload. The
+/// modification time moves forward rather than the test sleeping past
+/// coarse filesystem timestamps.
+fn edit_app(app: &Path, edited: &str) {
+    let previous = std::fs::metadata(app).unwrap().modified().unwrap();
+    std::fs::write(app, edited).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(app)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(previous + Duration::from_secs(2)))
+        .unwrap();
+}
+
+/// Start `ntnt test` on `source` with request flags such as `--get /path`.
+/// Its server binds a free port; its requests start once the server listens.
+fn ntnt_test(source: &str, requests: &[&str]) -> fixture::Fixture {
+    let mut args = vec!["test", "--port", "0"];
+    args.extend_from_slice(requests);
+    // Uncolored output, whatever the environment asks for.
+    fixture::Fixture::start(source, &args, &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "0")])
+}
+
+/// One request as `ntnt test` reports it.
+struct Reported {
+    /// `METHOD PATH`
+    request: String,
+    /// 0 when the request could not be sent.
+    status: u16,
+    body: String,
+}
+
+/// Wait for `ntnt test` to exit and parse what it reports per request:
+/// `[REQUEST n] METHOD PATH`, `[RESPONSE] STATUS (...)`, then the body. It
+/// exits 1 when any response is an error (a 401 too), so callers check the
+/// statuses instead.
+fn reported_requests(run: &mut fixture::Fixture) -> Vec<Reported> {
+    run.wait();
+    let stdout = run.stdout();
+    let report = stdout
+        .find("[REQUEST 1] ")
+        .map_or("", |start| &stdout[start..]);
+    let mut reported: Vec<Reported> = Vec::new();
+    let mut lines = report.lines();
+    while let Some(line) = lines.next() {
+        if line.starts_with("=== ") {
+            break;
+        }
+        let Some((_, request)) = line
+            .strip_prefix("[REQUEST ")
+            .and_then(|line| line.split_once("] "))
+        else {
+            if let Some(last) = reported.last_mut() {
+                last.body.push_str(line);
+                last.body.push('\n');
+            }
+            continue;
+        };
+        let status = lines
+            .next()
+            .and_then(|line| line.strip_prefix("[RESPONSE] "))
+            .and_then(|response| response.split_whitespace().next())
+            .and_then(|status| status.parse().ok())
+            .unwrap_or(0);
+        reported.push(Reported {
+            request: request.to_string(),
+            status,
+            body: String::new(),
+        });
+    }
+    reported
+}
+
+fn statuses(reported: &[Reported]) -> Vec<(&str, u16)> {
+    reported
+        .iter()
+        .map(|reported| (reported.request.as_str(), reported.status))
+        .collect()
 }
 
 #[test]
@@ -441,23 +585,16 @@ fn development_reload_adds_path_rules_and_keeps_removed_ones_until_restart() {
     let reply = send(addr, "GET", "/reports/daily", &[]);
     assert_eq!(reply.status, 200, "unprotected before the reload: {reply}");
 
-    // The edit protects /reports/* instead of /admin/*. Move the modification
-    // time forward rather than sleeping past coarse filesystem timestamps.
-    let app = server.dir.path().join("fixture.tnt");
-    let previous = std::fs::metadata(&app).unwrap().modified().unwrap();
-    let edited = RELOADED_RULE_APP
-        .replace(
-            r#"require_auth("/admin/*")"#,
-            r#"require_auth("/reports/*")"#,
-        )
-        .replace("public-page-v1", "public-page-v2");
-    std::fs::write(&app, edited).unwrap();
-    std::fs::File::options()
-        .write(true)
-        .open(&app)
-        .unwrap()
-        .set_times(std::fs::FileTimes::new().set_modified(previous + Duration::from_secs(2)))
-        .unwrap();
+    // The edit protects /reports/* instead of /admin/*.
+    edit_app(
+        &server.dir.path().join("fixture.tnt"),
+        &RELOADED_RULE_APP
+            .replace(
+                r#"require_auth("/admin/*")"#,
+                r#"require_auth("/reports/*")"#,
+            )
+            .replace("public-page-v1", "public-page-v2"),
+    );
     let reply = send(addr, "GET", "/public", &[]);
     assert!(
         reply.status == 200 && reply.body.contains("public-page-v2"),
@@ -476,4 +613,108 @@ fn development_reload_adds_path_rules_and_keeps_removed_ones_until_restart() {
     // not reloaded may still serve the old code that relies on it.
     let reply = send(addr, "GET", "/admin/panel", &[]);
     assert_sent_to_login(&reply, "GET /admin/panel after the reload", "admin-panel");
+}
+
+#[test]
+fn ntnt_test_server_exempts_only_std_auth_handlers_under_the_auth_prefix() {
+    let mut run = ntnt_test(
+        REQUIRE_AUTH_APP,
+        &[
+            "--get",
+            "/auth/me",
+            "--get",
+            "/auth/profile",
+            "--get",
+            "//auth/profile",
+        ],
+    );
+    let reported = reported_requests(&mut run);
+    let output = format!("{}\n{}", run.stdout(), run.stderr());
+    // auth_me answers an anonymous caller itself; require_auth() sends the
+    // custom handler's caller to the login page in either spelling.
+    assert_eq!(
+        statuses(&reported),
+        [
+            ("GET /auth/me", 401),
+            ("GET /auth/profile", 302),
+            ("GET //auth/profile", 302)
+        ],
+        "{output}"
+    );
+    assert!(reported[0].body.contains("Not authenticated"), "{output}");
+    for denied in &reported[1..] {
+        assert!(
+            !denied.body.contains("custom-profile"),
+            "{} ran the protected handler: {output}",
+            denied.request
+        );
+    }
+}
+
+#[test]
+fn ntnt_test_reload_adds_path_rules_and_keeps_removed_ones_until_restart() {
+    let gate = tempfile::tempdir().unwrap();
+    let source = held_reload_app(gate.path());
+    let mut run = ntnt_test(
+        &source,
+        &[
+            "--get",
+            "/admin/panel",
+            "--get",
+            "/reports/daily",
+            "--get",
+            "/hold",
+            "--get",
+            "/public",
+            "--get",
+            "/reports/daily",
+            "--get",
+            "/admin/panel",
+        ],
+    );
+    // The server holds /hold, so the edit lands between two requests.
+    wait_for_file(&mut run, &gate.path().join("ready"));
+    // The edit protects /reports/* instead of /admin/*.
+    edit_app(
+        &run.dir.path().join("fixture.tnt"),
+        &source
+            .replace(
+                r#"require_auth("/admin/*")"#,
+                r#"require_auth("/reports/*")"#,
+            )
+            .replace("public-page-v1", "public-page-v2"),
+    );
+    std::fs::write(gate.path().join("go"), "go").unwrap();
+
+    let reported = reported_requests(&mut run);
+    let output = format!("{}\n{}", run.stdout(), run.stderr());
+    // After the reload, a rule the new code adds applies at once, and the
+    // one it no longer registers stays until restart.
+    assert_eq!(
+        statuses(&reported),
+        [
+            ("GET /admin/panel", 302),
+            ("GET /reports/daily", 200),
+            ("GET /hold", 200),
+            ("GET /public", 200),
+            ("GET /reports/daily", 302),
+            ("GET /admin/panel", 302)
+        ],
+        "{output}"
+    );
+    assert!(
+        reported[3].body.contains("public-page-v2"),
+        "the reload must run before this request: {output}"
+    );
+    for (denied, handler_output) in [
+        (&reported[0], "admin-panel"),
+        (&reported[4], "daily-report"),
+        (&reported[5], "admin-panel"),
+    ] {
+        assert!(
+            !denied.body.contains(handler_output),
+            "{} ran the protected handler: {output}",
+            denied.request
+        );
+    }
 }
