@@ -22,6 +22,12 @@ project directory that holds `ntnt.toml`. They are for local development only.
 Production uses the Unix-socket secrets provider and a separately protected
 approval; see the rest of this document before deploying.
 
+For a ready-made local setup, [`examples/database-dev`](../examples/database-dev/README.md)
+starts PostgreSQL with matching target and scratch databases in one
+`docker compose up -d --wait`, and has the SQLite equivalent. Each comes with a
+manifest, a `dev.env` and a first migration; `tests/db_dev_recipe.rs` runs both
+exactly as documented.
+
 ### SQLite
 
 ```toml

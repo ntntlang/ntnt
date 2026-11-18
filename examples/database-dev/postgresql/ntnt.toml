@@ -1,0 +1,22 @@
+# Local development only; see README.md. Production uses its own target names,
+# secrets from the Unix-socket provider, and a separately protected approval.
+[databases.app]
+engine = "postgresql"
+schema = "public"
+migrations_dir = "migrations"
+approval_secret = "APP_MIGRATION_APPROVAL"
+
+[databases.app.targets.development]
+connection_secret = "APP_DATABASE"
+database = "app_development"
+role = "app_owner"
+
+[databases.app.scratch]
+connection_secret = "APP_REPLAY_DATABASE"
+database = "app_replay"
+role = "app_replay_owner"
+disposable = true
+
+[secrets.APP_DATABASE]
+[secrets.APP_REPLAY_DATABASE]
+[secrets.APP_MIGRATION_APPROVAL]
