@@ -27,7 +27,7 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   `verify-full`, `verify-ca`, `require` and `disable` are honoured, `prefer` and
   `allow` are rejected, and a connection string without `sslmode` uses verified TLS
   unless every host is local (loopback, a Unix socket, or a single-label name such
-  as a Docker service).
+  as a Docker service) and it names no CA with `sslrootcert`.
 - `std/kv`, `std/jobs` stores and the std/auth session store accept `rediss://` and
   `valkeys://` with verified TLS.
 - The `${...}` interpolation warning scans each string literal in one bounded pass.
