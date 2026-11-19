@@ -13,6 +13,8 @@ import unittest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+# Hang guard only: the pwsh fixture runs offline and finishes in seconds.
+PWSH_HANG_GUARD_SECONDS = 120
 
 
 def pins():
@@ -56,6 +58,37 @@ class WorkflowTests(unittest.TestCase):
                 notes.write_text(heading)
                 malformed = subprocess.run(["bash", "-e", "-c", select["run"]], cwd=root, env=env, capture_output=True, text=True)
                 self.assertNotEqual(malformed.returncode, 0)
+
+    def windows_checksum_step(self):
+        return next(s for s in self.jobs["build"]["steps"] if s.get("name") == "Generate SHA256 checksum (Windows)")
+
+    def test_windows_checksum_is_not_written_with_platform_newlines(self):
+        # Out-File ends the line with the platform newline: CRLF on the Windows
+        # runner, which macOS `shasum -a 256 -c` rejects. pwsh on Linux would write
+        # LF, so the behaviour test below cannot catch that; check the step itself.
+        commands = [line.strip() for line in self.windows_checksum_step()["run"].splitlines()
+                    if line.strip() and not line.strip().startswith("#")]
+        self.assertFalse(any("Out-File" in command for command in commands), commands)
+        self.assertTrue(any("-NoNewline" in command for command in commands), commands)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh")
+    def test_windows_checksum_step_writes_one_sha256sum_line(self):
+        script = self.windows_checksum_step()["run"].replace("${{ matrix.name }}", "windows-x64")
+        with tempfile.TemporaryDirectory(prefix="ntnt-checksum-fixture-") as directory:
+            root = Path(directory)
+            archive = root / "ntnt-windows-x64.zip"
+            archive.write_bytes(b"fixture archive\n")
+            (root / "checksum.ps1").write_text(script)
+            run = subprocess.run([shutil.which("pwsh"), "-NoProfile", "-NonInteractive", "-File", "checksum.ps1"],
+                                 cwd=root, capture_output=True, text=True, timeout=PWSH_HANG_GUARD_SECONDS)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            sidecar = root / "ntnt-windows-x64.zip.sha256"
+            self.assertEqual(sidecar.read_bytes(), f"{digest}  ntnt-windows-x64.zip\n".encode())
+            for check in (["sha256sum", "-c"], ["shasum", "-a", "256", "-c"]):
+                if shutil.which(check[0]):
+                    verified = subprocess.run(check + [sidecar.name], cwd=root, capture_output=True, text=True)
+                    self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
 
     def test_artifact_upload_and_publish_have_same_arm_files(self):
         upload = next(step for step in self.jobs["armv7"]["steps"] if step.get("uses", "").startswith("actions/upload-artifact"))

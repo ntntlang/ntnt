@@ -72,7 +72,7 @@ at `~/.local/share/licenses/ntnt/LICENSE.openssl`.
 `install.ps1` installs the latest `ntnt-windows-x64.zip` release binary into
 `%USERPROFILE%\.local\bin`. As with `install.sh`, the archive must match the
 SHA256 in the same release's `ntnt-windows-x64.zip.sha256` sidecar (a single
-`<hex>  ntnt-windows-x64.zip` entry; CRLF and either hex case are accepted)
+`<hex>  ntnt-windows-x64.zip` entry; LF or CRLF and either hex case are accepted)
 before anything is extracted. The candidate `ntnt.exe` is staged next to the
 destination and must run and report the release version (`ntnt X.Y.Z` for tag
 `vX.Y.Z`) before it replaces an existing `ntnt.exe`. A missing or malformed
