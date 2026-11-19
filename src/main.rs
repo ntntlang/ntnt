@@ -921,6 +921,9 @@ fn install_run_shutdown_handler() -> anyhow::Result<()> {
 }
 
 fn main() {
+    // Host security policy comes from the environment that started ntnt,
+    // captured before any command can evaluate application code.
+    ntnt::stdlib::capture_host_policy();
     // Internal native-case transport. It is not an authority or sandbox boundary:
     // callers already have permission to execute local NTNT code.
     let internal_args: Vec<_> = std::env::args_os().collect();
@@ -2756,10 +2759,20 @@ fn test_http_server(
     let shutdown_flag_clone = shutdown_flag.clone();
     let results_clone = results.clone();
 
-    // Spawn thread to make HTTP requests after a short delay
+    // The server reports the address it listens on (a free one for
+    // `--port 0`); `None` once it has stopped without listening.
+    let (listening_tx, listening_rx) = std::sync::mpsc::channel::<Option<std::net::SocketAddr>>();
+
+    // Spawn thread to make HTTP requests once the server listens
     let request_handle = thread::spawn(move || {
-        // Wait for server to start
-        thread::sleep(Duration::from_millis(200));
+        let Some(addr) = listening_rx.recv().ok().flatten() else {
+            // No server: no request can connect.
+            let mut results = results_clone.lock().unwrap();
+            for (method, req_path, _) in requests {
+                results.push((method, req_path, 0, "Connection failed".to_string()));
+            }
+            return;
+        };
 
         for (method, req_path, req_body) in requests {
             let path_with_slash = if req_path.starts_with('/') {
@@ -2771,13 +2784,13 @@ fn test_http_server(
             let body_content = req_body.unwrap_or_default();
             let request = if body_content.is_empty() {
                 format!(
-                    "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-                    method, path_with_slash, port
+                    "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                    method, path_with_slash, addr
                 )
             } else {
                 format!(
-                    "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                    method, path_with_slash, port, body_content.len(), body_content
+                    "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    method, path_with_slash, addr, body_content.len(), body_content
                 )
             };
 
@@ -2787,7 +2800,7 @@ fn test_http_server(
             let mut response_data = None;
 
             while attempts < max_attempts {
-                if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                if let Ok(mut stream) = TcpStream::connect(addr) {
                     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
                     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
@@ -2850,6 +2863,7 @@ fn test_http_server(
     interpreter.set_main_source_file(&path_str);
 
     interpreter.set_test_mode(port, requests_to_make, shutdown_flag.clone());
+    interpreter.report_test_server_address(listening_tx.clone());
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
@@ -2859,6 +2873,8 @@ fn test_http_server(
 
     // Run the server (will exit when shutdown_flag is set)
     let _ = interpreter.eval(&ast);
+    // Release the request thread if the server never listened.
+    let _ = listening_tx.send(None);
 
     // Shutdown concurrency runtime to prevent leaked tasks/schedules
     ntnt::stdlib::shutdown_runtimes();

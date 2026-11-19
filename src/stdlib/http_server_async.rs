@@ -416,7 +416,7 @@ pub fn parse_route_pattern(pattern: &str) -> Vec<RouteSegment> {
 
 /// Match a URL path against a route
 pub fn match_route(path: &str, route: &Route) -> Option<HashMap<String, String>> {
-    let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let path_segments: Vec<&str> = crate::stdlib::http_server::route_path_segments(path).collect();
     let route_segments = &route.segments;
 
     // Handle root path specially

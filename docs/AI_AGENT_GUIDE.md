@@ -963,6 +963,8 @@ server 8080 {
 | `NTNT_PROCESS_ALLOW` | platform-delimited paths | Optionally restricts `std/process` to exact canonical executable paths |
 | `NTNT_WORKERS` | `1` (dev) / CPU cores (prod) | Number of interpreter worker threads. Auto-scales in production. |
 
+Host security policy comes from the environment that starts `ntnt`, read before application code runs: `NTNT_PROCESS_ENABLE`, `NTNT_PROCESS_ALLOW`, the `fetch()` SSRF settings (`NTNT_SSRF_PROTECTION`, `NTNT_ALLOW_LOCALHOST`, `NTNT_ALLOW_PRIVATE_IPS`, `NTNT_BLOCKED_HOSTS`), `NTNT_NET_ALLOW_PRIVATE`, `NTNT_NETMON_ENABLE` and every `NTNT_SECRETS_*` key. `load_env` skips these keys with a warning, so put them in the shell, service unit or container environment, not in `.env`.
+
 ```bash
 # Development (default) - hot-reload enabled, single worker
 ntnt run server.tnt
@@ -981,7 +983,9 @@ DB query or `fetch()`, the others keep handling requests. A DB-heavy app that
 serializes on one worker gets near-linear gains from more (8 concurrent
 200ms-blocking requests: 1.6s on 1 worker, 0.4s on 4). Crashed workers are
 respawned automatically. With `NTNT_WORKERS>1` outside production, only
-worker 0 hot-reloads — restart to propagate edits to all workers.
+worker 0 hot-reloads — restart to propagate edits to all workers. A reload
+adds std/auth path rules (`require_auth(path)`, `protected_paths`) but never
+removes one; restart to remove a rule.
 
 **Hot-reload** watches your `.tnt` files and imported modules for changes, automatically reloading on the next request. Disable in production for zero filesystem overhead per request.
 
@@ -3574,6 +3578,8 @@ let database_url = get_env("DATABASE_URL") ?? "sqlite:./app.db"
 
 `std/env` is unchanged in v0.5.1. `get_env`, `load_env`, and `.env` files continue to work when `NTNT_ENV=production`. The optional `std/secrets` subsystem does not intercept, migrate, disable, or reinterpret those values.
 
+`load_env` does not change host security policy. It skips `NTNT_PROCESS_ENABLE`, `NTNT_PROCESS_ALLOW`, `NTNT_SSRF_PROTECTION`, `NTNT_ALLOW_LOCALHOST`, `NTNT_ALLOW_PRIVATE_IPS`, `NTNT_BLOCKED_HOSTS`, `NTNT_NET_ALLOW_PRIVATE`, `NTNT_NETMON_ENABLE` and every `NTNT_SECRETS_*` key (one stderr warning per key) and loads the rest of the file. `NTNT_ENV` still loads; selecting production that way can tighten `fetch()` loopback blocking but never relaxes the policy the host started with.
+
 Use `std/secrets` only when the application deliberately wants opaque values with restricted sinks:
 
 ```ntnt
@@ -4411,7 +4417,7 @@ Failed statuses, cancellation, truncated responses, and write errors preserve an
 
 ## Native Processes
 
-`std/process` invokes an executable directly with a structured argument array. It never interprets shell syntax. Process execution requires `NTNT_PROCESS_ENABLE=1`; when `NTNT_PROCESS_ALLOW` is set, every executable must match one of its canonical paths. The allowlist uses the platform path delimiter (`:` on Unix and `;` on Windows).
+`std/process` invokes an executable directly with a structured argument array. It never interprets shell syntax. Process execution requires `NTNT_PROCESS_ENABLE=1`; when `NTNT_PROCESS_ALLOW` is set, every executable must match one of its canonical paths. Both are read from the environment that starts `ntnt` before application code runs; `load_env` cannot set them. The allowlist uses the platform path delimiter (`:` on Unix and `;` on Windows).
 
 ```ntnt
 import { run, start, try_wait, wait, terminate, kill } from "std/process"

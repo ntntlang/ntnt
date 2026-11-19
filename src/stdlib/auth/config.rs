@@ -171,10 +171,7 @@ pub fn init_auth(config: AuthConfig) {
     let mut auth_config = AUTH_CONFIG.lock().unwrap();
     *auth_config = Some(config.clone());
 
-    reset_protected_paths();
-    if !config.protected_paths.is_empty() {
-        register_protected_paths(&config.protected_paths);
-    }
+    super::guards::replace_protected_paths_unless_serving(&config.protected_paths);
 }
 
 fn ignore_duplicate_column_sqlite(

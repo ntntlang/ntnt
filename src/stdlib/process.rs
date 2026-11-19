@@ -3,7 +3,8 @@
 //! `run()` waits for one command; `start()` returns an opaque `Process` handle for
 //! `wait()`, `try_wait()`, `terminate()`, and `kill()`. Both launch executables
 //! directly, require `NTNT_PROCESS_ENABLE`, and honor an optional exact-path
-//! `NTNT_PROCESS_ALLOW` allowlist. All active commands are registered for runtime
+//! `NTNT_PROCESS_ALLOW` allowlist; both are captured from the host environment
+//! before application code runs. All active commands are registered for runtime
 //! shutdown, started processes are monitored autonomously, captured pipes use
 //! cancellable workers that are joined after a bounded drain, and completed results
 //! remain in a bounded cache for repeated handle operations.
@@ -16,7 +17,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -653,24 +654,79 @@ fn resolve_program(program: &str) -> std::result::Result<PathBuf, String> {
     Err(format!("cannot resolve process executable '{program}'"))
 }
 
+/// Host-owned process-execution policy (`NTNT_PROCESS_ENABLE`,
+/// `NTNT_PROCESS_ALLOW`). It is captured from the real process environment
+/// before application code runs, so later environment changes made by the
+/// application (for example through `load_env`) cannot authorize launches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProcessPolicy {
+    enabled: bool,
+    allowlist: Option<std::ffi::OsString>,
+}
+
+impl ProcessPolicy {
+    fn from_environment() -> Self {
+        let enabled = std::env::var("NTNT_PROCESS_ENABLE")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
+        Self {
+            enabled,
+            allowlist: std::env::var_os("NTNT_PROCESS_ALLOW"),
+        }
+    }
+}
+
+static HOST_PROCESS_POLICY: OnceLock<ProcessPolicy> = OnceLock::new();
+
+/// Returns the process-execution policy, capturing it from the environment on
+/// the first call in this process. `crate::stdlib::capture_host_policy` makes
+/// that first call before any application code is evaluated.
+pub(crate) fn capture_host_policy() -> &'static ProcessPolicy {
+    HOST_PROCESS_POLICY.get_or_init(ProcessPolicy::from_environment)
+}
+
+/// Test-only replacement for the captured policy; production always uses the
+/// startup snapshot.
+#[cfg(test)]
+static TEST_PROCESS_POLICY: Mutex<Option<ProcessPolicy>> = Mutex::new(None);
+
+fn active_process_policy() -> ProcessPolicy {
+    #[cfg(test)]
+    if let Some(policy) = TEST_PROCESS_POLICY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+    {
+        return policy;
+    }
+    capture_host_policy().clone()
+}
+
 fn authorize_program(program: &str) -> std::result::Result<PathBuf, String> {
-    let enabled = std::env::var("NTNT_PROCESS_ENABLE")
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        });
-    if !enabled {
-        return Err("process execution is disabled; set NTNT_PROCESS_ENABLE=1".to_string());
+    authorize_program_with(&active_process_policy(), program)
+}
+
+fn authorize_program_with(
+    policy: &ProcessPolicy,
+    program: &str,
+) -> std::result::Result<PathBuf, String> {
+    if !policy.enabled {
+        return Err(
+            "process execution is disabled; set NTNT_PROCESS_ENABLE=1 in the environment that starts ntnt"
+                .to_string(),
+        );
     }
     let resolved = resolve_program(program)?;
     validate_windows_program(&resolved)?;
-    let Some(allowlist) = std::env::var_os("NTNT_PROCESS_ALLOW") else {
+    let Some(allowlist) = &policy.allowlist else {
         return Ok(resolved);
     };
-    let allowed = std::env::split_paths(&allowlist)
+    let allowed = std::env::split_paths(allowlist)
         .filter_map(|path| std::fs::canonicalize(path).ok())
         .any(|path| path == resolved);
     if !allowed {
@@ -1732,7 +1788,9 @@ pub fn init() -> HashMap<String, Value> {
     // Run a native program directly and wait for its bounded result.
     //
     // The operating-system process API receives every argument literally; no shell is
-    // invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW.
+    // invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW;
+    // both are read from the environment that starts ntnt, before application code
+    // runs, and load_env cannot change them.
     // Options: cwd (String), env (Map<String, String | Secret>), clear_env (Bool),
     // stdin/stdout/stderr mode maps, timeout_ms, termination_grace_ms, and
     // max_output_bytes. stdin modes are null, inherit, file, string, and bytes;
@@ -1746,7 +1804,7 @@ pub fn init() -> HashMap<String, Value> {
     // @since v0.5.3
     // @tags #process #system
     // @example run("/usr/bin/ffmpeg", ["-version"]) => Ok({...}) ~ "Run without a shell"
-    // @error RuntimeError ~ "process execution is disabled" fix: "Set NTNT_PROCESS_ENABLE=1 for a trusted application"
+    // @error RuntimeError ~ "process execution is disabled" fix: "Set NTNT_PROCESS_ENABLE=1 in the environment that starts ntnt for a trusted application"
     // @error RuntimeError ~ "Windows batch scripts are not direct executables" fix: "Invoke an explicitly allowlisted cmd.exe only when shell authority is intentional"
     module.insert(
         "run".to_string(),
@@ -1896,34 +1954,68 @@ mod tests {
         (executable.to_string_lossy().into_owned(), args)
     }
 
-    fn with_process_capability<T>(executable: &str, action: impl FnOnce() -> T) -> T {
-        /// Restores the process-capability variables on drop, including when
-        /// `action` panics, so one failing test cannot leak them to others.
-        struct RestoreEnv {
-            enable: Option<std::ffi::OsString>,
-            allow: Option<std::ffi::OsString>,
+    /// Restores the process-capability variables on drop, including when a
+    /// test panics, so one failing test cannot leak them to others.
+    struct RestoreEnv {
+        enable: Option<std::ffi::OsString>,
+        allow: Option<std::ffi::OsString>,
+    }
+
+    impl RestoreEnv {
+        fn capture() -> Self {
+            Self {
+                enable: std::env::var_os("NTNT_PROCESS_ENABLE"),
+                allow: std::env::var_os("NTNT_PROCESS_ALLOW"),
+            }
         }
-        impl Drop for RestoreEnv {
-            fn drop(&mut self) {
-                for (name, value) in [
-                    ("NTNT_PROCESS_ENABLE", self.enable.take()),
-                    ("NTNT_PROCESS_ALLOW", self.allow.take()),
-                ] {
-                    match value {
-                        Some(value) => std::env::set_var(name, value),
-                        None => std::env::remove_var(name),
-                    }
+    }
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (name, value) in [
+                ("NTNT_PROCESS_ENABLE", self.enable.take()),
+                ("NTNT_PROCESS_ALLOW", self.allow.take()),
+            ] {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
                 }
             }
         }
+    }
+
+    /// Replaces the captured host policy for one test; restores it on drop.
+    struct TestPolicyGuard(Option<ProcessPolicy>);
+
+    impl Drop for TestPolicyGuard {
+        fn drop(&mut self) {
+            *TEST_PROCESS_POLICY
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = self.0.take();
+        }
+    }
+
+    /// Runs `action` under an explicit process policy. The production rule
+    /// (policy captured once from the startup environment) is unchanged; tests
+    /// state the policy they need instead of mutating the environment.
+    fn with_process_policy<T>(policy: ProcessPolicy, action: impl FnOnce() -> T) -> T {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _restore = RestoreEnv {
-            enable: std::env::var_os("NTNT_PROCESS_ENABLE"),
-            allow: std::env::var_os("NTNT_PROCESS_ALLOW"),
-        };
-        std::env::set_var("NTNT_PROCESS_ENABLE", "1");
-        std::env::set_var("NTNT_PROCESS_ALLOW", executable);
+        let previous = TEST_PROCESS_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .replace(policy);
+        let _policy = TestPolicyGuard(previous);
         action()
+    }
+
+    fn with_process_capability<T>(executable: &str, action: impl FnOnce() -> T) -> T {
+        with_process_policy(
+            ProcessPolicy {
+                enabled: true,
+                allowlist: Some(executable.into()),
+            },
+            action,
+        )
     }
 
     fn result_variant(value: Value) -> (String, Value) {
@@ -1957,19 +2049,61 @@ mod tests {
 
     #[test]
     fn run_is_disabled_without_explicit_capability() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old_enable = std::env::var_os("NTNT_PROCESS_ENABLE");
-        std::env::remove_var("NTNT_PROCESS_ENABLE");
         let (program, args) = current_test_command("fixture_print_args", &[]);
+        let disabled = ProcessPolicy {
+            enabled: false,
+            allowlist: None,
+        };
 
-        let result = run_from_args(&run_args(program, args)).expect("run result");
+        let result = with_process_policy(disabled, || {
+            run_from_args(&run_args(program, args)).expect("run result")
+        });
 
-        if let Some(value) = old_enable {
-            std::env::set_var("NTNT_PROCESS_ENABLE", value);
-        }
         let (variant, error) = result_variant(result);
         assert_eq!(variant, "Err");
         assert!(error.to_string().contains("NTNT_PROCESS_ENABLE=1"));
+    }
+
+    #[test]
+    fn host_process_policy_is_captured_once() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreEnv::capture();
+        let captured = capture_host_policy().clone();
+        std::env::set_var(
+            "NTNT_PROCESS_ENABLE",
+            if captured.enabled { "0" } else { "1" },
+        );
+        std::env::set_var("NTNT_PROCESS_ALLOW", "changed-after-capture");
+
+        assert_ne!(ProcessPolicy::from_environment(), captured);
+        assert_eq!(capture_host_policy(), &captured);
+    }
+
+    #[test]
+    fn launches_consult_the_captured_policy_not_the_live_environment() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreEnv::capture();
+        let captured = capture_host_policy().clone();
+        // The live environment now says the opposite of the captured policy.
+        std::env::set_var(
+            "NTNT_PROCESS_ENABLE",
+            if captured.enabled { "0" } else { "1" },
+        );
+        std::env::remove_var("NTNT_PROCESS_ALLOW");
+        let (program, _) = current_test_command("fixture_print_args", &[]);
+
+        let denied_as_disabled = authorize_program(&program)
+            .is_err_and(|error| error.contains("process execution is disabled"));
+
+        assert_eq!(denied_as_disabled, !captured.enabled);
+    }
+
+    #[test]
+    fn interpreter_construction_captures_host_process_policy() {
+        // Process-per-test runners start with no snapshot, so this observes the
+        // capture that Interpreter::new() performs before any source is evaluated.
+        let _interpreter = crate::interpreter::Interpreter::new();
+        assert!(HOST_PROCESS_POLICY.get().is_some());
     }
 
     #[test]
@@ -2298,23 +2432,13 @@ mod tests {
     #[test]
     fn run_rejects_executable_outside_allowlist() {
         let (program, args) = current_test_command("fixture_print_args", &[]);
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old_enable = std::env::var_os("NTNT_PROCESS_ENABLE");
-        let old_allow = std::env::var_os("NTNT_PROCESS_ALLOW");
-        std::env::set_var("NTNT_PROCESS_ENABLE", "1");
-        std::env::set_var(
-            "NTNT_PROCESS_ALLOW",
-            std::env::temp_dir().join("not-allowed"),
-        );
-        let result = run_from_args(&run_args(program, args)).expect("run result");
-        match old_enable {
-            Some(value) => std::env::set_var("NTNT_PROCESS_ENABLE", value),
-            None => std::env::remove_var("NTNT_PROCESS_ENABLE"),
-        }
-        match old_allow {
-            Some(value) => std::env::set_var("NTNT_PROCESS_ALLOW", value),
-            None => std::env::remove_var("NTNT_PROCESS_ALLOW"),
-        }
+        let policy = ProcessPolicy {
+            enabled: true,
+            allowlist: Some(std::env::temp_dir().join("not-allowed").into_os_string()),
+        };
+        let result = with_process_policy(policy, || {
+            run_from_args(&run_args(program, args)).expect("run result")
+        });
         let (variant, error) = result_variant(result);
         assert_eq!(variant, "Err");
         assert!(error.to_string().contains("is not allowed"));

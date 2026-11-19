@@ -1235,6 +1235,8 @@ pub struct Interpreter {
     server_state: crate::stdlib::http_server::ServerState,
     /// Test mode: if Some, contains (port, max_requests, shutdown_flag)
     test_mode: Option<(u16, usize, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// Told the test server's address once it listens (`ntnt test`).
+    test_server_listening: Option<std::sync::mpsc::Sender<Option<std::net::SocketAddr>>>,
     /// Main source file path for hot-reload (single-file apps)
     main_source_file: Option<String>,
     /// Main source file last modification time
@@ -1507,6 +1509,9 @@ impl Interpreter {
     }
 
     pub fn new() -> Self {
+        // Host security policy is fixed before this interpreter can evaluate
+        // any source; see `stdlib::capture_host_policy`.
+        crate::stdlib::capture_host_policy();
         let env = Environment::shared(Environment::new());
         let mut interpreter = Interpreter {
             #[cfg(test)]
@@ -1539,6 +1544,7 @@ impl Interpreter {
             current_file: None,
             server_state: crate::stdlib::http_server::ServerState::new(),
             test_mode: None,
+            test_server_listening: None,
             main_source_file: None,
             main_source_mtime: None,
             imported_files: HashMap::new(),
@@ -1595,6 +1601,15 @@ impl Interpreter {
         shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
         self.test_mode = Some((port, max_requests, shutdown_flag));
+    }
+
+    /// Send `Some(address)` on `listening` once the test server listens, so
+    /// requests wait for the server rather than for a fixed delay.
+    pub fn report_test_server_address(
+        &mut self,
+        listening: std::sync::mpsc::Sender<Option<std::net::SocketAddr>>,
+    ) {
+        self.test_server_listening = Some(listening);
     }
 
     /// Set the request timeout for the HTTP server (in seconds)
@@ -10174,6 +10189,10 @@ impl Interpreter {
         if options.readiness {
             http_server::emit_readiness(bound)?;
         }
+        if let Some(listening) = self.test_server_listening.take() {
+            // Whoever asked may have stopped waiting; nothing to report then.
+            let _ = listening.send(Some(bound));
+        }
         // Print startup message
         if is_test_mode {
             println!("Starting test server on http://{}", bound);
@@ -10220,9 +10239,10 @@ impl Interpreter {
         }
         println!();
 
-        // Serving starts: setup-only calls (ws_endpoint) now fail, as in the
-        // async server.
+        // Serving starts: setup-only calls (ws_endpoint) now fail, and a
+        // reload only adds std/auth protection rules, as in the async server.
         self.setup_frozen = true;
+        let _serving = crate::stdlib::auth::ServingScope::start();
         // Handle requests in a loop
         // In test mode, use recv_timeout and check shutdown flag
         loop {
@@ -10365,6 +10385,10 @@ impl Interpreter {
                         }
                     }
                 }
+
+                // The auth guard exempts std/auth's public routes by the
+                // handler selected here; it applies to middleware and the handler.
+                let _auth_dispatch = crate::stdlib::auth::RouteDispatch::enter(&handler);
 
                 // Process request to get request Value
                 match http_server::process_request(request, route_params) {
@@ -10753,6 +10777,11 @@ impl Interpreter {
         let source_file = self.main_source_file.clone().unwrap_or_default();
         let mut worker_handles = Vec::new();
         let generation = CommittedGeneration::default();
+        // From here on setup runs again while requests may be served: in
+        // secondary workers (at startup and after a restart) and in this
+        // worker's development reloads. std/auth then only adds protection
+        // rules, so none is missing while that setup catches up.
+        let _serving = crate::stdlib::auth::ServingScope::start();
         if realtime_startup {
             // Every realtime worker must have loaded exactly the primary's
             // source where setup reached listen; mixed code never serves.
@@ -11071,6 +11100,10 @@ impl Interpreter {
 
             // Convert to NTNT Value
             let req_value = full_request.to_value();
+
+            // The auth guard exempts std/auth's public routes by the handler
+            // selected here; it applies to middleware and the handler.
+            let _auth_dispatch = crate::stdlib::auth::RouteDispatch::enter(&handler);
 
             // Run middleware
             let middleware_handlers: Vec<Value> = self.server_state.get_middleware().to_vec();

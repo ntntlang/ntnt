@@ -10,21 +10,8 @@ fn normalize_auth_route_prefix(prefix: &str) -> std::result::Result<String, Stri
         return Err("[auth] route_prefix must not be empty".to_string());
     }
 
-    let with_leading = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{}", trimmed.trim_start_matches('/'))
-    };
-
-    let normalized = if with_leading.len() > 1 {
-        with_leading.trim_end_matches('/').to_string()
-    } else {
-        with_leading
-    };
-
-    if normalized.is_empty() || !normalized.starts_with('/') {
-        return Err("[auth] route_prefix must start with /".to_string());
-    }
+    // The router's canonical form, which the auth guard compares against.
+    let normalized = crate::stdlib::http_server::canonical_route_path(trimmed);
 
     if normalized == "/" {
         return Err(
@@ -114,6 +101,24 @@ pub fn auth_server_routes(config: &AuthConfig) -> Vec<AuthServerRoute> {
     routes.retain(|route| !shadows_provider(config, route));
     routes
 }
+
+/// std/auth's own handlers that serve visitors without a session: the
+/// built-in routes above and the convenience handlers an app can mount itself
+/// (`get("/auth/{provider}", auth_start)`). `auth_me` answers an anonymous
+/// caller with its own 401. Under the route prefix, the auth guard exempts a
+/// request only when the router selected one of these.
+pub(super) const PUBLIC_AUTH_HANDLERS: [&str; 10] = [
+    "_auth_index",
+    "_auth_health",
+    "_auth_logout",
+    "_auth_start",
+    "_auth_callback",
+    "auth_start",
+    "auth_callback",
+    "auth_logout",
+    "auth_health",
+    "auth_me",
+];
 
 /// True when a fixed one-segment GET route would hide a configured provider.
 fn shadows_provider(config: &AuthConfig, route: &AuthServerRoute) -> bool {
@@ -893,6 +898,58 @@ mod tests {
             auth_route_manifest(&config),
             routes.iter().map(|r| r.path.clone()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn route_prefix_uses_the_router_canonical_path() {
+        // Repeated slashes would leave the guard comparing against a prefix
+        // no canonical request path has, and make the login redirect
+        // protocol-relative.
+        for (prefix, canonical) in [
+            ("//account", "/account"),
+            ("account//", "/account"),
+            ("/my//account/", "/my/account"),
+        ] {
+            assert_eq!(
+                normalize_auth_route_prefix_option(prefix).as_deref(),
+                Ok(canonical),
+                "{prefix}"
+            );
+        }
+        assert!(normalize_auth_route_prefix_option("//").is_err());
+        let config = AuthConfig {
+            route_prefix: "//account".to_string(),
+            ..AuthConfig::default()
+        };
+        assert_eq!(auth_route_path(&config, ""), "/account");
+    }
+
+    #[test]
+    fn public_auth_handlers_name_exactly_std_auth_handlers() {
+        // Every built-in route handler is public, for any provider set.
+        for providers in [vec![], vec!["github"], vec!["health", "google"]] {
+            let config = AuthConfig {
+                providers: providers
+                    .into_iter()
+                    .map(|name| ProviderConfig {
+                        name: name.to_string(),
+                        ..ProviderConfig::default()
+                    })
+                    .collect(),
+                ..AuthConfig::default()
+            };
+            for route in auth_server_routes(&config) {
+                assert!(PUBLIC_AUTH_HANDLERS.contains(&route.name), "{}", route.name);
+            }
+        }
+        // The others are std/auth exports apps mount themselves.
+        let module = super::super::init();
+        for name in PUBLIC_AUTH_HANDLERS.iter().filter(|n| !n.starts_with('_')) {
+            assert!(
+                matches!(module.get(*name), Some(Value::NativeFunction { name: native, .. }) if native == name),
+                "{name} must be a std/auth native handler"
+            );
+        }
     }
 
     #[test]

@@ -46,47 +46,77 @@ type Result<T> = std::result::Result<T, IntentError>;
 // SSRF Protection Configuration
 // =============================================================================
 
-/// SSRF protection configuration loaded from environment variables
+/// SSRF protection policy for `fetch()`, captured from the host environment
+/// before application code runs (see `crate::stdlib::capture_host_policy`).
 #[derive(Debug, Clone)]
 struct SsrfConfig {
     /// Whether SSRF protection is enabled (default: true)
     enabled: bool,
     /// Allow localhost requests (default: false in production, true in development)
     allow_localhost: bool,
+    /// `NTNT_ALLOW_LOCALHOST` was unset, so `allow_localhost` is the mode
+    /// default. A production mode selected after startup (for example through
+    /// `load_env`) still blocks loopback; a later mode change never loosens it.
+    localhost_follows_mode: bool,
     /// Allow private IP ranges (default: false)
     allow_private: bool,
-    /// Additional blocked hosts (comma-separated in env var)
-    blocked_hosts: Vec<String>,
+    /// Additional blocked hosts (comma-separated in env var), canonicalized
+    blocked_hosts: Vec<CanonicalHost>,
 }
 
-impl Default for SsrfConfig {
-    fn default() -> Self {
-        let production_mode = std::env::var("NTNT_ENV")
-            .map(|v| v == "production" || v == "prod")
-            .unwrap_or(false);
+impl SsrfConfig {
+    fn from_environment(var: impl Fn(&str) -> Option<String>) -> Self {
+        let production_mode = var("NTNT_ENV").is_some_and(|v| is_production_mode(&v));
+        let explicit_localhost =
+            var("NTNT_ALLOW_LOCALHOST").map(|v| v == "1" || v.to_lowercase() == "true");
 
         SsrfConfig {
-            enabled: std::env::var("NTNT_SSRF_PROTECTION")
+            enabled: var("NTNT_SSRF_PROTECTION")
                 .map(|v| v != "0" && v.to_lowercase() != "false")
                 .unwrap_or(true), // Enabled by default
-            allow_localhost: std::env::var("NTNT_ALLOW_LOCALHOST")
-                .map(|v| v == "1" || v.to_lowercase() == "true")
-                .unwrap_or(!production_mode), // Allow in dev, block in prod
-            allow_private: std::env::var("NTNT_ALLOW_PRIVATE_IPS")
+            // Allow in dev, block in prod
+            allow_localhost: explicit_localhost.unwrap_or(!production_mode),
+            localhost_follows_mode: explicit_localhost.is_none(),
+            allow_private: var("NTNT_ALLOW_PRIVATE_IPS")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false), // Blocked by default
-            blocked_hosts: std::env::var("NTNT_BLOCKED_HOSTS")
-                .map(|v| v.split(',').map(|s| s.trim().to_lowercase()).collect())
+            blocked_hosts: var("NTNT_BLOCKED_HOSTS")
+                .map(|v| {
+                    v.split(',')
+                        .filter_map(CanonicalHost::from_configured)
+                        .collect()
+                })
                 .unwrap_or_default(),
         }
     }
+
+    /// Loopback allowance for one request. `production_now` is the live
+    /// `NTNT_ENV`; it can only tighten the captured policy.
+    fn allows_localhost(&self, production_now: bool) -> bool {
+        self.allow_localhost && !(self.localhost_follows_mode && production_now)
+    }
 }
 
-/// Global SSRF configuration (loaded once from environment)
+fn is_production_mode(value: &str) -> bool {
+    value == "production" || value == "prod"
+}
+
+fn production_mode_now() -> bool {
+    std::env::var("NTNT_ENV").is_ok_and(|value| is_production_mode(&value))
+}
+
+/// Global SSRF configuration, captured once from the host environment.
 static SSRF_CONFIG: OnceLock<SsrfConfig> = OnceLock::new();
 
+/// Captures the `fetch()` SSRF policy on the first call in this process.
+/// `crate::stdlib::capture_host_policy` makes that call before any
+/// application code is evaluated, so `load_env` cannot change it.
+pub(crate) fn capture_host_policy() {
+    get_ssrf_config();
+}
+
 fn get_ssrf_config() -> &'static SsrfConfig {
-    SSRF_CONFIG.get_or_init(SsrfConfig::default)
+    SSRF_CONFIG.get_or_init(|| SsrfConfig::from_environment(|key| std::env::var(key).ok()))
 }
 
 /// Check if an IP address is private/internal
@@ -143,18 +173,135 @@ fn is_link_local_ipv6(ip: &Ipv6Addr) -> bool {
     (segments[0] & 0xffc0) == 0xfe80
 }
 
+/// Cloud metadata services (common SSRF targets).
+const METADATA_HOSTNAMES: [&str; 2] = [
+    "metadata.google.internal", // GCP
+    "metadata.goog",            // GCP
+];
+const METADATA_IPV4: [Ipv4Addr; 2] = [
+    Ipv4Addr::new(169, 254, 169, 254), // AWS, GCP, Azure metadata
+    Ipv4Addr::new(169, 254, 170, 2),   // AWS ECS task metadata
+];
+const METADATA_IPV6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254); // AWS IPv6 metadata
+
+/// Whether `ip` is a cloud metadata endpoint, including the IPv4-mapped
+/// (`::ffff:a.b.c.d`) and IPv4-compatible (`::a.b.c.d`) spellings of the IPv4
+/// endpoints.
+fn is_metadata_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => METADATA_IPV4.contains(&ip),
+        IpAddr::V6(ip) => {
+            ip == METADATA_IPV6 || ip.to_ipv4().is_some_and(|ip| METADATA_IPV4.contains(&ip))
+        }
+    }
+}
+
+/// A destination host in comparable form: DNS names are lowercase without
+/// trailing dots, and IP literals are addresses (IPv4-mapped IPv6 folded to
+/// IPv4), so equivalent spellings compare equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CanonicalHost {
+    Name(String),
+    Ip(IpAddr),
+}
+
+impl CanonicalHost {
+    /// `host` as returned by `Url::host_str`, which has already applied WHATWG
+    /// host parsing (IDNA mapping, case folding, numeric IPv4 forms, IPv6
+    /// compression).
+    fn from_url_host(host: &str) -> Self {
+        let literal = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host);
+        match literal.parse::<IpAddr>() {
+            Ok(ip) => Self::Ip(ip.to_canonical()),
+            Err(_) => Self::Name(host.trim_end_matches('.').to_ascii_lowercase()),
+        }
+    }
+
+    /// One `NTNT_BLOCKED_HOSTS` entry, normalized the same way as URL hosts.
+    fn from_configured(entry: &str) -> Option<Self> {
+        let entry = entry.trim();
+        let literal = entry
+            .strip_prefix('[')
+            .and_then(|entry| entry.strip_suffix(']'))
+            .unwrap_or(entry);
+        if let Ok(ip) = literal.parse::<IpAddr>() {
+            return Some(Self::Ip(ip.to_canonical()));
+        }
+        // Only a bare host is run through the URL host parser; anything with
+        // URL syntax keeps its literal spelling, as before.
+        let bare = !entry.is_empty()
+            && !entry.contains(|c: char| {
+                matches!(c, ':' | '/' | '\\' | '@' | '?' | '#') || c.is_whitespace()
+            });
+        let parsed = bare
+            .then(|| reqwest::Url::parse(&format!("http://{entry}/")).ok())
+            .flatten()
+            .and_then(|url| url.host_str().map(Self::from_url_host));
+        match parsed.unwrap_or_else(|| Self::Name(entry.trim_end_matches('.').to_lowercase())) {
+            Self::Name(name) if name.is_empty() => None,
+            host => Some(host),
+        }
+    }
+
+    fn is_cloud_metadata(&self) -> bool {
+        match self {
+            Self::Name(name) => METADATA_HOSTNAMES.contains(&name.as_str()),
+            Self::Ip(ip) => is_metadata_ip(*ip),
+        }
+    }
+
+    /// Whether this blocked entry denies `host`: the same address, the same
+    /// name, or a subdomain of the name.
+    fn blocks(&self, host: &CanonicalHost) -> bool {
+        match (self, host) {
+            (Self::Ip(blocked), Self::Ip(host)) => blocked == host,
+            (Self::Name(blocked), Self::Name(host)) => {
+                host == blocked
+                    || host
+                        .strip_suffix(blocked.as_str())
+                        .is_some_and(|prefix| prefix.ends_with('.'))
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ValidatedHttpTarget {
     host: String,
     addresses: Vec<SocketAddr>,
 }
 
+/// Resolves `host:port` for SSRF validation; IP literals parse without DNS.
+type ResolveHost<'a> = &'a dyn Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>>;
+
+fn resolve_with_system_dns(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    format!("{}:{}", host, port)
+        .to_socket_addrs()
+        .map(Iterator::collect)
+}
+
 /// Validate and resolve a URL for SSRF protection.
 /// The returned addresses are safe to pin into the HTTP client, closing the gap
 /// between validation-time DNS and connection-time DNS.
 fn validated_http_target(url: &str) -> std::result::Result<Option<ValidatedHttpTarget>, String> {
-    let config = get_ssrf_config();
+    validated_http_target_with(
+        get_ssrf_config(),
+        production_mode_now(),
+        url,
+        &resolve_with_system_dns,
+    )
+}
 
+fn validated_http_target_with(
+    config: &SsrfConfig,
+    production_now: bool,
+    url: &str,
+    resolve: ResolveHost<'_>,
+) -> std::result::Result<Option<ValidatedHttpTarget>, String> {
     // If protection is disabled, allow everything without overriding resolution.
     if !config.enabled {
         return Ok(None);
@@ -172,30 +319,25 @@ fn validated_http_target(url: &str) -> std::result::Result<Option<ValidatedHttpT
         scheme => return Err(format!("Blocked URL scheme: {}", scheme)),
     }
 
-    // Get the host
+    // Get the host. This exact spelling is the key the client pins below;
+    // policy comparisons use its canonical form.
     let host = match parsed.host_str() {
         Some(h) => h.to_lowercase(),
         None => return Err("URL has no host".to_string()),
     };
+    let canonical = CanonicalHost::from_url_host(&host);
 
     // Check blocked hosts list
     if config
         .blocked_hosts
         .iter()
-        .any(|blocked| host == *blocked || host.ends_with(&format!(".{}", blocked)))
+        .any(|blocked| blocked.blocks(&canonical))
     {
         return Err(format!("Host '{}' is blocked", host));
     }
 
     // Block cloud metadata endpoints explicitly (common SSRF targets)
-    let metadata_hosts = [
-        "169.254.169.254",          // AWS, GCP, Azure metadata
-        "metadata.google.internal", // GCP
-        "metadata.goog",            // GCP
-        "169.254.170.2",            // AWS ECS task metadata
-        "fd00:ec2::254",            // AWS IPv6 metadata
-    ];
-    if metadata_hosts.iter().any(|&m| host == m) {
+    if canonical.is_cloud_metadata() {
         return Err("Cloud metadata endpoint blocked for security".to_string());
     }
 
@@ -203,19 +345,19 @@ fn validated_http_target(url: &str) -> std::result::Result<Option<ValidatedHttpT
     let port = parsed
         .port()
         .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
-    let socket_addrs = format!("{}:{}", host, port);
 
     // Resolve once, validate every address, and return this exact set to the
     // client builder so connection-time DNS cannot rebind the target.
-    let addrs: Vec<SocketAddr> = match socket_addrs.to_socket_addrs() {
-        Ok(iter) => iter.collect(),
+    let addrs: Vec<SocketAddr> = match resolve(&host, port) {
+        Ok(addrs) => addrs,
         Err(_) => return Err(format!("Could not resolve hostname: {}", host)),
     };
-    validate_resolved_addresses(config, host, addrs).map(Some)
+    validate_resolved_addresses(config, production_now, host, addrs).map(Some)
 }
 
 fn validate_resolved_addresses(
     config: &SsrfConfig,
+    production_now: bool,
     host: String,
     addrs: Vec<SocketAddr>,
 ) -> std::result::Result<ValidatedHttpTarget, String> {
@@ -223,14 +365,33 @@ fn validate_resolved_addresses(
         return Err(format!("Could not resolve hostname: {}", host));
     }
 
+    let allow_localhost = config.allows_localhost(production_now);
     // Check all resolved IPs.
     for address in &addrs {
         let ip = address.ip();
+
+        // Metadata endpoints are denied on every resolved address of every
+        // request and redirect hop, before and independent of the loopback and
+        // private-network allowances (a DNS name can point at them).
+        if is_metadata_ip(ip) {
+            return Err("Cloud metadata endpoint blocked for security".to_string());
+        }
+
+        // A blocked address stays blocked behind any DNS name.
+        let resolved = CanonicalHost::Ip(ip.to_canonical());
+        if config
+            .blocked_hosts
+            .iter()
+            .any(|blocked| blocked.blocks(&resolved))
+        {
+            return Err(format!("Host '{}' is blocked", host));
+        }
+
         let is_loopback = ip.is_loopback();
         let is_private = is_private_ip(&ip);
 
         // Check localhost
-        if is_loopback && !config.allow_localhost {
+        if is_loopback && !allow_localhost {
             return Err(format!(
                 "Localhost requests blocked ({}). Set NTNT_ALLOW_LOCALHOST=true to allow.",
                 ip
@@ -2160,16 +2321,18 @@ mod tests {
             .env("NTNT_ALLOW_PRIVATE_IPS", "false")
             .stdout(output.try_clone().expect("clone test stdout"))
             .stderr(output.try_clone().expect("clone test stderr"));
+        // Only a hang reaches this bound; it is not a performance limit.
+        const HANG_GUARD: Duration = Duration::from_secs(60);
         let mut child = command.spawn().expect("spawn isolated HTTP test");
         let started = Instant::now();
         let status = loop {
             if let Some(status) = child.try_wait().expect("poll isolated HTTP test") {
                 break status;
             }
-            if started.elapsed() >= Duration::from_secs(30) {
+            if started.elapsed() >= HANG_GUARD {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("isolated HTTP test exceeded 30 seconds: {test}");
+                panic!("isolated HTTP test hung past its {HANG_GUARD:?} guard: {test}");
             }
             thread::sleep(Duration::from_millis(10));
         };
@@ -3951,21 +4114,322 @@ mod tests {
         let config = SsrfConfig {
             enabled: true,
             allow_localhost: false,
+            localhost_follows_mode: false,
             allow_private: false,
             blocked_hosts: Vec::new(),
         };
         let public = "8.8.8.8:443".parse().unwrap();
         let blocked = "127.0.0.1:443".parse().unwrap();
+        assert!(validate_resolved_addresses(
+            &config,
+            false,
+            "example.test".into(),
+            vec![public, blocked]
+        )
+        .is_err());
         assert!(
-            validate_resolved_addresses(&config, "example.test".into(), vec![public, blocked])
-                .is_err()
+            validate_resolved_addresses(&config, false, "example.test".into(), vec![]).is_err()
         );
-        assert!(validate_resolved_addresses(&config, "example.test".into(), vec![]).is_err());
         let approved = vec![public, "1.1.1.1:443".parse().unwrap()];
         let target =
-            validate_resolved_addresses(&config, "example.test".into(), approved.clone()).unwrap();
+            validate_resolved_addresses(&config, false, "example.test".into(), approved.clone())
+                .unwrap();
         assert_eq!(target.addresses, approved);
         assert_eq!(target.host, "example.test");
+    }
+
+    fn ssrf_config_from(vars: &[(&str, &str)]) -> SsrfConfig {
+        let vars: HashMap<String, String> = vars
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        SsrfConfig::from_environment(|key| vars.get(key).cloned())
+    }
+
+    #[test]
+    fn ssrf_mode_selected_after_startup_only_tightens_loopback() {
+        // Development host: an application-selected production mode still blocks loopback.
+        let development = ssrf_config_from(&[]);
+        assert!(development.enabled);
+        assert!(development.allows_localhost(false));
+        assert!(!development.allows_localhost(true));
+        // Production host: an application-selected development mode cannot reopen loopback.
+        let production = ssrf_config_from(&[("NTNT_ENV", "production")]);
+        assert!(!production.allows_localhost(false));
+        assert!(!production.allows_localhost(true));
+        // An explicit host decision wins over every mode, as before.
+        let allowed = ssrf_config_from(&[("NTNT_ENV", "prod"), ("NTNT_ALLOW_LOCALHOST", "true")]);
+        assert!(allowed.allows_localhost(true));
+        let denied = ssrf_config_from(&[("NTNT_ALLOW_LOCALHOST", "false")]);
+        assert!(!denied.allows_localhost(false));
+
+        let loopback = vec!["127.0.0.1:80".parse().unwrap()];
+        assert!(validate_resolved_addresses(
+            &development,
+            false,
+            "a.test".into(),
+            loopback.clone()
+        )
+        .is_ok());
+        let error = validate_resolved_addresses(&development, true, "a.test".into(), loopback)
+            .expect_err("production selected by the application blocks loopback");
+        assert!(error.contains("Localhost requests blocked"), "{error}");
+    }
+
+    #[test]
+    fn ssrf_policy_is_captured_once() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("NTNT_SSRF_PROTECTION", value),
+                    None => std::env::remove_var("NTNT_SSRF_PROTECTION"),
+                }
+            }
+        }
+        let captured = get_ssrf_config().enabled;
+        let _restore = Restore(std::env::var_os("NTNT_SSRF_PROTECTION"));
+        std::env::set_var(
+            "NTNT_SSRF_PROTECTION",
+            if captured { "false" } else { "true" },
+        );
+        assert_ne!(
+            SsrfConfig::from_environment(|key| std::env::var(key).ok()).enabled,
+            captured
+        );
+        assert_eq!(get_ssrf_config().enabled, captured);
+        // Requests consult the captured policy: an enabled policy rejects the
+        // scheme before any resolution; a disabled one admits the URL untouched.
+        assert_eq!(
+            validated_http_target("ftp://policy.invalid/").is_err(),
+            captured
+        );
+    }
+
+    #[test]
+    fn interpreter_construction_captures_ssrf_policy() {
+        // Process-per-test runners start with no snapshot, so this observes the
+        // capture that Interpreter::new() performs before any source is evaluated.
+        let _interpreter = crate::interpreter::Interpreter::new();
+        assert!(SSRF_CONFIG.get().is_some());
+    }
+
+    /// Loopback and private targets allowed, so only metadata and blocked-host
+    /// rules can deny a request.
+    fn permissive_ssrf_config(blocked_hosts: &str) -> SsrfConfig {
+        ssrf_config_from(&[
+            ("NTNT_ALLOW_LOCALHOST", "true"),
+            ("NTNT_ALLOW_PRIVATE_IPS", "true"),
+            ("NTNT_BLOCKED_HOSTS", blocked_hosts),
+        ])
+    }
+
+    /// Validates `url` against a synthetic DNS answer (never the network) and
+    /// reports how many lookups were made.
+    fn target_with_dns(
+        config: &SsrfConfig,
+        url: &str,
+        answer: &[&str],
+    ) -> (
+        std::result::Result<Option<ValidatedHttpTarget>, String>,
+        usize,
+    ) {
+        let answer: Vec<SocketAddr> = answer.iter().map(|a| a.parse().unwrap()).collect();
+        let lookups = std::cell::Cell::new(0);
+        let resolve = |_: &str, _: u16| {
+            lookups.set(lookups.get() + 1);
+            Ok(answer.clone())
+        };
+        let result = validated_http_target_with(config, false, url, &resolve);
+        (result, lookups.get())
+    }
+
+    #[test]
+    fn ssrf_metadata_hosts_are_denied_in_every_spelling_before_resolution() {
+        let config = permissive_ssrf_config("");
+        for url in [
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "http://metadata.google.internal./computeMetadata/v1/",
+            "http://METADATA.Google.Internal./computeMetadata/v1/",
+            "http://metadata.goog../computeMetadata/v1/",
+            "http://169.254.169.254./latest/meta-data/",
+            "http://0xA9FEA9FE/latest/meta-data/",
+            "http://[FD00:EC2:0:0:0:0:0:254]/latest/meta-data/",
+            "http://[fd00:ec2::254]/latest/meta-data/",
+            "http://[::ffff:169.254.169.254]/latest/meta-data/",
+            "http://[::ffff:a9fe:aa02]/v2/credentials",
+            "http://[::169.254.169.254]/latest/meta-data/",
+        ] {
+            // The answer is public, so only the host check can deny the request.
+            let (result, lookups) = target_with_dns(&config, url, &["93.184.216.34:80"]);
+            let error = result.expect_err(url);
+            assert!(
+                error.contains("Cloud metadata endpoint blocked"),
+                "{url}: {error}"
+            );
+            assert_eq!(lookups, 0, "{url} was resolved before the metadata denial");
+        }
+    }
+
+    #[test]
+    fn ssrf_blocked_hosts_compare_canonical_names_and_addresses() {
+        let config = permissive_ssrf_config(" Internal.Example. , [2001:DB8:0::7], 10.0.0.9,,");
+        assert_eq!(
+            config.blocked_hosts,
+            vec![
+                CanonicalHost::Name("internal.example".into()),
+                CanonicalHost::Ip("2001:db8::7".parse().unwrap()),
+                CanonicalHost::Ip("10.0.0.9".parse().unwrap()),
+            ]
+        );
+        for url in [
+            "http://internal.example/",
+            "http://internal.example./",
+            "http://INTERNAL.example../",
+            "http://api.internal.example./v1",
+            "http://[2001:db8:0:0:0:0:0:7]/",
+            "http://[::ffff:10.0.0.9]/",
+            "http://10.0.0.9./",
+        ] {
+            let (result, lookups) = target_with_dns(&config, url, &["93.184.216.34:80"]);
+            let error = result.expect_err(url);
+            assert!(error.contains("is blocked"), "{url}: {error}");
+            assert_eq!(
+                lookups, 0,
+                "{url} was resolved before the blocked-host denial"
+            );
+        }
+        // A DNS name that resolves to a blocked address is blocked as well.
+        for answer in ["10.0.0.9:80", "[::ffff:10.0.0.9]:80", "[2001:db8::7]:80"] {
+            let (result, lookups) = target_with_dns(&config, "http://alias.test/", &[answer]);
+            let error = result.expect_err(answer);
+            assert!(error.contains("is blocked"), "{answer}: {error}");
+            assert_eq!(lookups, 1);
+        }
+        // Suffix matching still requires a whole label.
+        let (result, _) = target_with_dns(
+            &config,
+            "http://notinternal.example/",
+            &["93.184.216.34:80"],
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn ssrf_resolved_metadata_addresses_are_denied_despite_network_allowances() {
+        let config = permissive_ssrf_config("");
+        let public: SocketAddr = "93.184.216.34:80".parse().unwrap();
+        for resolved in [
+            "169.254.169.254:80",
+            "169.254.170.2:80",
+            "[fd00:ec2::254]:80",
+            "[::ffff:169.254.169.254]:80",
+            "[::ffff:169.254.170.2]:80",
+            "[::169.254.169.254]:80",
+            "[::169.254.170.2]:80",
+        ] {
+            let address: SocketAddr = resolved.parse().unwrap();
+            // Every address in the answer is checked, wherever it appears.
+            for answer in [vec![address], vec![public, address]] {
+                let error = validate_resolved_addresses(&config, false, "a.test".into(), answer)
+                    .expect_err(resolved);
+                assert!(
+                    error.contains("Cloud metadata endpoint blocked"),
+                    "{resolved}: {error}"
+                );
+            }
+        }
+        // The private-network and loopback allowances still admit other targets.
+        for resolved in [
+            "10.0.0.5:80",
+            "169.254.1.1:80",
+            "[fd00:ec2::253]:80",
+            "[::ffff:10.0.0.5]:80",
+            "127.0.0.1:80",
+        ] {
+            let answer = vec![resolved.parse().unwrap()];
+            assert!(
+                validate_resolved_addresses(&config, false, "a.test".into(), answer).is_ok(),
+                "{resolved}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssrf_dns_alias_to_metadata_is_denied_after_resolution() {
+        let config = permissive_ssrf_config("");
+        for answer in [
+            "169.254.169.254:80",
+            "[::ffff:169.254.169.254]:80",
+            "[fd00:ec2::254]:80",
+        ] {
+            let (result, lookups) = target_with_dns(
+                &config,
+                "http://rebinding.example/latest/meta-data/",
+                &[answer],
+            );
+            let error = result.expect_err(answer);
+            assert!(
+                error.contains("Cloud metadata endpoint blocked"),
+                "{answer}: {error}"
+            );
+            assert_eq!(lookups, 1);
+        }
+    }
+
+    #[test]
+    fn ssrf_redirect_hop_to_metadata_is_denied() {
+        if run_http_environment_case("ssrf_redirect_hop_to_metadata_is_denied") {
+            return;
+        }
+        // The first hop is a permitted loopback fixture; the redirect target is
+        // the IPv4-mapped spelling of the metadata address.
+        let source = ChainFixture::new(|_, _| {
+            redirect_response(302, "http://[::ffff:169.254.169.254]/latest/meta-data/")
+        });
+        let result = http_fetch(&source.options());
+        assert_eq!(source.finish().len(), 1);
+        let error = result_error(result.unwrap());
+        assert!(error.contains("Cloud metadata endpoint blocked"), "{error}");
+    }
+
+    #[test]
+    fn validated_target_is_contacted_without_resolving_the_name_again() {
+        // `.invalid` never resolves (RFC 6761). Reaching the fixture through that
+        // name proves the client connects to the validated address set instead of
+        // resolving the name again at connection time, where DNS could rebind it.
+        let fixture = ChainFixture::new(|_, _| {
+            "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\npinned".into()
+        });
+        let address: SocketAddr = fixture
+            .url
+            .trim_start_matches("http://")
+            .trim_end_matches("/start")
+            .parse()
+            .unwrap();
+        let url = format!("http://rebind.invalid:{}/start", address.port());
+        let lookups = std::cell::Cell::new(0);
+        let resolve = |host: &str, port: u16| {
+            lookups.set(lookups.get() + 1);
+            assert_eq!((host, port), ("rebind.invalid", address.port()));
+            Ok(vec![address])
+        };
+        let target = validated_http_target_with(&permissive_ssrf_config(""), false, &url, &resolve)
+            .unwrap()
+            .expect("protected target");
+        let client = build_http_client_for_target(false, false, Some(target)).unwrap();
+        let body = client.get(&url).send().unwrap().text().unwrap();
+        assert_eq!(body, "pinned");
+        assert_eq!(lookups.get(), 1);
+        let requests = fixture.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains(&format!("host: rebind.invalid:{}", address.port())),
+            "{}",
+            requests[0]
+        );
     }
 
     #[test]

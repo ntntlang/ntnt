@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.6.2
+> Last updated: v0.6.3
 
 ## Table of Contents
 
@@ -3313,6 +3313,10 @@ Usage patterns:
 
 - `require_auth(req)` may be called directly inside custom middleware.
 
+Under the auth route prefix, std/auth's own handlers (login page, OAuth start and callback, logout, health, `auth_me`) stay public; app handlers there are protected like any other route. Paths match as the router matches them, so `//admin` and `/admin/` are both `/admin`.
+
+Path rules (`require_auth(path)` patterns and `enable_auth()`'s `protected_paths`) are never removed while the server runs: setup that runs again then, in another worker or a development reload, only adds rules. Restart the server to remove one.
+
 **Parameters:**
 
 - `target` — Optional request object, single path pattern, or array of path patterns
@@ -6488,6 +6492,8 @@ Loads environment variables from a .env file.
 
 Reads the file line by line, parsing KEY=VALUE pairs. Lines starting with # are treated as comments and skipped. Variables are set in the current process environment. Loading `.env` files remains supported in production and is not replaced or restricted by optional `std/secrets`.
 
+Host runtime-policy keys are reserved and skipped with one stderr warning per key, while the rest of the file still loads: NTNT_PROCESS_ENABLE, NTNT_PROCESS_ALLOW, NTNT_SSRF_PROTECTION, NTNT_ALLOW_LOCALHOST, NTNT_ALLOW_PRIVATE_IPS, NTNT_BLOCKED_HOSTS, NTNT_NET_ALLOW_PRIVATE, NTNT_NETMON_ENABLE, and every NTNT_SECRETS_* key (matched case-insensitively). Set them in the environment that starts ntnt. NTNT_ENV is not reserved.
+
 **Parameters:**
 
 - `path` — Path to the .env file
@@ -6500,6 +6506,10 @@ Reads the file line by line, parsing KEY=VALUE pairs. Lines starting with # are 
 load_env(".env")  // Load default .env file
 load_env(".env.local")  // Load environment-specific file
 ```
+
+**Gotchas:**
+
+- Reserved runtime-policy keys in the file are ignored with a warning; process execution and fetch() SSRF policy come from the environment that starts ntnt
 
 **See also:** `get_env`
 
@@ -10308,8 +10318,8 @@ import { to_html, to_html_safe, parse_blocks } from "std/markdown"
 |----------|-------------|
 | [`parse_blocks`](#parse_blocks) | Parse Markdown into ordered, non-overlapping top-level blocks. |
 | [`replace_source_range`](#replace_source_range) | Replace an inclusive-start, exclusive-end UTF-8 byte range in Markdown source. This pairs with parse_blocks() offsets while preserving every byte outside the range. |
-| [`to_html`](#to_html) | Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted. |
-| [`to_html_safe`](#to_html_safe) | Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content. |
+| [`to_html`](#to_html) | Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags, heading attributes and link or image URLs of any scheme (including javascript:) pass through as-is. Use to_html_safe() if the input is untrusted. |
+| [`to_html_safe`](#to_html_safe) | Convert user-supplied or untrusted Markdown to HTML without raw HTML, heading attributes or link and image URLs of unsafe schemes. |
 
 #### `parse_blocks`
 
@@ -10382,7 +10392,7 @@ replace_source_range("# Chaptér\n\nOld", 12, 15, "New")  // => "# Chaptér\n\nN
 to_html(markdown: String) -> String
 ```
 
-Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted.
+Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags, heading attributes and link or image URLs of any scheme (including javascript:) pass through as-is. Use to_html_safe() if the input is untrusted.
 
 ---
 
@@ -10392,7 +10402,24 @@ Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, st
 to_html_safe(markdown: String) -> String
 ```
 
-Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content.
+Convert user-supplied or untrusted Markdown to HTML without raw HTML, heading attributes or link and image URLs of unsafe schemes.
+
+Embedded HTML tags, HTML blocks and comments are dropped. Heading attribute syntax (`{#id .class key=value}`) stays literal text. Every href and src is relative (including `//host/path`, `?query` and `#fragment`) or uses http, https or mailto: a link with any other scheme (javascript:, data:, vbscript:, file:, ...) renders as its plain text, and such an image as its alt text. Schemes are compared the way browsers read them: after entity decoding, ignoring case, tabs, line breaks and leading or trailing spaces and control characters. Everything else matches to_html(). The guarantee covers the returned HTML only; escape anything you add around it.
+
+**Parameters:**
+
+- `markdown` — Markdown source, possibly user-supplied.
+
+**Returns:** HTML without raw HTML, heading attributes or unsafe link and image URLs.
+
+**Examples:**
+
+```ntnt
+to_html_safe("[x](javascript:alert(1)) <b>hi</b>")  // => "<p>x hi</p>\n"  // Unsafe links keep only their text
+to_html_safe("[docs](/guide) ![logo](https://example.com/logo.png)")  // => "<p><a href=\"/guide\">docs</a> <img src=\"https://example.com/logo.png\" alt=\"logo\" /></p>\n"  // Relative and https URLs are kept
+```
+
+**See also:** `to_html`, `parse_blocks`
 
 ---
 
@@ -12718,7 +12745,7 @@ run(program: String, args: Array<String>, options?: Map) -> Result<Map, String>
 
 Run a native program directly and wait for its bounded result.
 
-The operating-system process API receives every argument literally; no shell is invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW. Options: cwd (String), env (Map<String, String | Secret>), clear_env (Bool), stdin/stdout/stderr mode maps, timeout_ms, termination_grace_ms, and max_output_bytes. stdin modes are null, inherit, file, string, and bytes; stdout/stderr modes are capture, inherit, null, and file. File modes require path, output files optionally accept append, and string/bytes input requires data. run() has no default timeout; set timeout_ms whenever execution must be time-bounded.
+The operating-system process API receives every argument literally; no shell is invoked. Execution requires NTNT_PROCESS_ENABLE=1 and respects NTNT_PROCESS_ALLOW; both are read from the environment that starts ntnt, before application code runs, and load_env cannot change them. Options: cwd (String), env (Map<String, String | Secret>), clear_env (Bool), stdin/stdout/stderr mode maps, timeout_ms, termination_grace_ms, and max_output_bytes. stdin modes are null, inherit, file, string, and bytes; stdout/stderr modes are capture, inherit, null, and file. File modes require path, output files optionally accept append, and string/bytes input requires data. run() has no default timeout; set timeout_ms whenever execution must be time-bounded.
 
 **Parameters:**
 
@@ -12736,7 +12763,7 @@ run("/usr/bin/ffmpeg", ["-version"])  // => Ok({...})  // Run without a shell
 
 **Errors:**
 
-- **RuntimeError**: process execution is disabled — *Fix: Set NTNT_PROCESS_ENABLE=1 for a trusted application*
+- **RuntimeError**: process execution is disabled — *Fix: Set NTNT_PROCESS_ENABLE=1 in the environment that starts ntnt for a trusted application*
 - **RuntimeError**: Windows batch scripts are not direct executables — *Fix: Invoke an explicitly allowlisted cmd.exe only when shell authority is intentional*
 
 *Since v0.5.3*

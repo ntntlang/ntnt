@@ -1,36 +1,59 @@
 use super::cookies::build_signed_session_cookie_with_max_age;
 use super::sessions::{get_session_for_request, SessionAccessEffect};
 use super::*;
+use crate::stdlib::http_server::canonical_route_path;
+use std::cell::Cell;
 
+thread_local! {
+    /// Whether the request this thread is serving was routed to one of
+    /// std/auth's public handlers. Only [`RouteDispatch`] changes it.
+    static SERVING_PUBLIC_AUTH_HANDLER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Records, for one request, whether the router selected one of std/auth's
+/// public handlers (`super::routes::PUBLIC_AUTH_HANDLERS`). The interpreter
+/// holds it while middleware and the handler run, so the guard can exempt
+/// std/auth's own routes without exempting an app handler that shares their
+/// prefix. Dropping it restores the previous state.
+#[must_use = "the selected handler is recorded only while this value is alive"]
+pub struct RouteDispatch {
+    previous: bool,
+}
+
+impl RouteDispatch {
+    pub fn enter(handler: &Value) -> Self {
+        let public = matches!(
+            handler,
+            Value::NativeFunction { name, .. }
+                if super::routes::PUBLIC_AUTH_HANDLERS.contains(&name.as_str())
+        );
+        Self {
+            previous: SERVING_PUBLIC_AUTH_HANDLER.with(|serving| serving.replace(public)),
+        }
+    }
+}
+
+impl Drop for RouteDispatch {
+    fn drop(&mut self) {
+        SERVING_PUBLIC_AUTH_HANDLER.with(|serving| serving.set(self.previous));
+    }
+}
+
+/// A protected path pattern in the router's canonical form (see
+/// `canonical_route_path`), keeping a trailing `/*` subtree marker.
 fn normalize_protected_path(pattern: &str) -> String {
     let trimmed = pattern.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
-    let normalized_input = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{}", trimmed.trim_start_matches('/'))
-    };
-
-    if normalized_input == "/" || normalized_input == "/*" {
-        return normalized_input;
-    }
-
-    if let Some(base) = normalized_input.strip_suffix("/*") {
-        let normalized = if base.len() > 1 {
-            base.trim_end_matches('/')
-        } else {
-            base
-        };
-        return format!("{}/*", normalized);
-    }
-
-    if normalized_input.len() > 1 {
-        normalized_input.trim_end_matches('/').to_string()
-    } else {
-        normalized_input
+    let rooted = format!("/{trimmed}");
+    match rooted.strip_suffix("/*") {
+        Some(base) => match canonical_route_path(base).as_str() {
+            "/" => "/*".to_string(),
+            base => format!("{base}/*"),
+        },
+        None => canonical_route_path(&rooted),
     }
 }
 
@@ -39,9 +62,58 @@ fn dedupe_protected_paths(paths: &mut Vec<String>) {
     paths.retain(|path| seen.insert(path.clone()));
 }
 
+/// The protection rules every worker enforces: `enable_auth()`'s
+/// `protected_paths` and `require_auth(path)` patterns, normalized.
+struct ProtectedPaths {
+    patterns: Vec<String>,
+    /// Live [`ServingScope`]s.
+    serving: usize,
+}
+
+static PROTECTED_PATHS: std::sync::Mutex<ProtectedPaths> = std::sync::Mutex::new(ProtectedPaths {
+    patterns: Vec::new(),
+    serving: 0,
+});
+
+impl ProtectedPaths {
+    fn add(&mut self, paths: &[String]) {
+        for path in paths {
+            let normalized = normalize_protected_path(path);
+            if !normalized.is_empty() {
+                self.patterns.push(normalized);
+            }
+        }
+        dedupe_protected_paths(&mut self.patterns);
+    }
+}
+
+/// Held by a server for as long as it may serve requests. Meanwhile setup can
+/// run again (secondary workers start or restart, a development reload runs)
+/// while other workers serve, so protection rules are only added; see
+/// [`replace_protected_paths_unless_serving`].
+#[must_use = "protection rules are kept only while the scope is alive"]
+pub struct ServingScope(());
+
+impl ServingScope {
+    pub fn start() -> Self {
+        PROTECTED_PATHS.lock().unwrap().serving += 1;
+        Self(())
+    }
+}
+
+impl Drop for ServingScope {
+    fn drop(&mut self) {
+        // May run while unwinding, where a second panic would abort.
+        let mut protected = PROTECTED_PATHS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        protected.serving -= 1;
+    }
+}
+
 fn with_protected_paths<T>(f: impl FnOnce(&[String]) -> T) -> T {
-    let protected = AUTH_PROTECTED_PATHS.lock().unwrap();
-    f(&protected)
+    let protected = PROTECTED_PATHS.lock().unwrap();
+    f(&protected.patterns)
 }
 
 pub(super) fn validate_auth_challenge_kind(kind: &str) -> std::result::Result<String, String> {
@@ -78,29 +150,36 @@ pub(super) fn encode_url_path_segment(text: &str) -> String {
     encoded
 }
 
+/// Remove every protection rule, whether or not a server is serving.
 pub fn reset_protected_paths() {
-    let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
-    protected.clear();
+    PROTECTED_PATHS.lock().unwrap().patterns.clear();
 }
 
 pub fn register_protected_paths(paths: &[String]) {
-    let mut protected = AUTH_PROTECTED_PATHS.lock().unwrap();
-    for path in paths {
-        let normalized = normalize_protected_path(path);
-        if !normalized.is_empty() {
-            protected.push(normalized);
-        }
+    PROTECTED_PATHS.lock().unwrap().add(paths);
+}
+
+/// `enable_auth()`'s `protected_paths`. Before any server serves they replace
+/// the rules. While one serves they are added to the rules instead: the setup
+/// running again re-registers its `require_auth(path)` rules only when it
+/// reaches them, other workers serve meanwhile, and a worker that has not
+/// reloaded still runs code that relies on the old rules. Removing a rule
+/// takes a restart.
+pub(super) fn replace_protected_paths_unless_serving(paths: &[String]) {
+    let mut protected = PROTECTED_PATHS.lock().unwrap();
+    if protected.serving == 0 {
+        protected.patterns.clear();
     }
-    dedupe_protected_paths(&mut protected);
+    protected.add(paths);
 }
 
 pub fn get_protected_paths() -> Vec<String> {
-    AUTH_PROTECTED_PATHS.lock().unwrap().clone()
+    PROTECTED_PATHS.lock().unwrap().patterns.clone()
 }
 
 #[cfg(test)]
 pub(super) fn path_matches_protected_pattern(path: &str, pattern: &str) -> bool {
-    let normalized_path = normalize_protected_path(path);
+    let normalized_path = canonical_route_path(path);
     let normalized_pattern = normalize_protected_path(pattern);
 
     path_matches_normalized_protected_pattern(&normalized_path, &normalized_pattern)
@@ -129,18 +208,28 @@ fn path_matches_normalized_protected_pattern(path: &str, pattern: &str) -> bool 
     path == pattern
 }
 
-fn is_auth_exempt_path(path: &str) -> bool {
-    let normalized = normalize_protected_path(path);
+/// std/auth's public routes (login page, OAuth start and callback, logout,
+/// health) need no session. The exemption follows the handler the router
+/// selected, so an app handler under the same prefix keeps the protection
+/// the app gave it with `require_auth()` or a protected path.
+fn is_auth_exempt(path: &str) -> bool {
+    SERVING_PUBLIC_AUTH_HANDLER.with(Cell::get) && is_under_auth_prefix(path)
+}
+
+fn is_under_auth_prefix(path: &str) -> bool {
     let prefix = get_auth_config()
         .map(|config| super::routes::auth_route_prefix(&config))
         .unwrap_or_else(|| "/auth".to_string());
-    normalized == prefix || normalized.starts_with(&format!("{}/", prefix))
+    path == prefix || path.starts_with(&format!("{}/", prefix))
 }
 
+/// The request path in the canonical form the router matched (repeated and
+/// trailing slashes removed). Auth decisions and redirects use only this, so a
+/// different spelling of a protected route cannot miss its rule.
 pub(super) fn request_path(request: &Value) -> String {
     if let Value::Map(req_map) = request {
         if let Some(Value::String(path)) = req_map.get("path") {
-            return path.clone();
+            return canonical_route_path(path);
         }
     }
     "/".to_string()
@@ -259,17 +348,16 @@ fn auth_required_response(request: &Value) -> Value {
     redirect_response(&login_path, None)
 }
 
+/// `path` is canonical (see `request_path`), like the stored patterns.
 fn path_requires_auth(path: &str) -> bool {
-    if is_auth_exempt_path(path) {
+    if is_auth_exempt(path) {
         return false;
     }
-
-    let normalized_path = normalize_protected_path(path);
 
     with_protected_paths(|patterns| {
         patterns
             .iter()
-            .any(|pattern| path_matches_normalized_protected_pattern(&normalized_path, pattern))
+            .any(|pattern| path_matches_normalized_protected_pattern(path, pattern))
     })
 }
 
@@ -280,7 +368,7 @@ pub fn enforce_auth_for_request(
 ) -> std::result::Result<Option<String>, Box<Value>> {
     let path = request_path(request);
 
-    if is_auth_exempt_path(&path) {
+    if is_auth_exempt(&path) {
         return Ok(None);
     }
 
