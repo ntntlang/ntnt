@@ -579,8 +579,11 @@ fn create_verified_pool_for(
     let manager_config = ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     };
+    // Every connection this pool opens, the verification below included, gives
+    // a server that accepted TLS this long to finish the handshake.
+    let handshake = runtime_tls::handshake_timeout(&pg_config);
     let manager = match DB_RUNTIME
-        .block_on(target.connector())
+        .block_on(target.connector(handshake))
         .map_err(|e| sanitize_connection_error(&e, connection_string))?
     {
         Some(tls) => Manager::from_config(pg_config, tls, manager_config),
@@ -1292,7 +1295,9 @@ pub fn init() -> HashMap<String, Value> {
     // or a single-label name such as a Docker service "db"); otherwise it uses
     // verify-full. sslrootcert alone also means verify-full. TLS never falls
     // back to plaintext, and the pool identity includes the TLS policy.
-    // Trust is read when a pool is created; restart after changing it.
+    // Trust is read when a pool is created; restart after changing it. A
+    // server that accepts TLS must finish the handshake within connect_timeout
+    // (10 seconds when unset), or the connection is closed with an Err.
     // @param connection_string A PostgreSQL connection URI (e.g. "postgres://user:pass@localhost/mydb")
     // @returns Result::Ok containing a Connection map handle, or Result::Err with a description
     // @see_also close, query, execute, begin

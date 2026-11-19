@@ -11,10 +11,14 @@
 //! (`verify-full` against the host CA store) otherwise; an `sslrootcert` alone also
 //! selects `verify-full`. A TLS mode never falls back to plaintext, and errors never
 //! echo the connection string.
+//!
+//! A server that accepted TLS must finish the handshake within `connect_timeout`
+//! (10 seconds when unset), or the connection is closed with an error.
 use crate::migrations::postgres_tls::{self, MakeRustls, Mode, Transport};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio_postgres::config::{Host, SslMode};
 use zeroize::Zeroizing;
 
@@ -91,6 +95,18 @@ fn is_single_label(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// How long a runtime connection gives a server that accepted TLS to finish the
+/// handshake: the connection string's `connect_timeout` when set (libpq applies
+/// it to the whole attempt, TLS included, but tokio-postgres only to opening the
+/// socket), otherwise `postgres_tls::TLS_HANDSHAKE_TIMEOUT`. Each host or
+/// address tried gets its own bound, as with libpq's per-host connect_timeout.
+pub(crate) fn handshake_timeout(config: &tokio_postgres::Config) -> Duration {
+    config
+        .get_connect_timeout()
+        .copied()
+        .unwrap_or(postgres_tls::TLS_HANDSHAKE_TIMEOUT)
+}
+
 impl Target {
     pub(crate) fn mode(&self) -> Mode {
         self.transport.mode()
@@ -137,18 +153,26 @@ impl Target {
         Ok(config)
     }
     /// The rustls connector for a TLS mode (`None` for plaintext), loading trust
-    /// off the runtime thread under a deadline.
-    pub(crate) async fn connector(&self) -> Result<Option<MakeRustls>, String> {
+    /// off the runtime thread under a deadline. Each handshake may take at most
+    /// `handshake` (see `handshake_timeout`).
+    pub(crate) async fn connector(
+        &self,
+        handshake: Duration,
+    ) -> Result<Option<MakeRustls>, String> {
         self.transport
             .connector()
             .await
-            .map(|(connector, _)| connector)
+            .map(|(connector, _)| connector.map(|tls| tls.with_handshake_timeout(handshake)))
             .map_err(|diagnostic| diagnostic.message)
     }
     /// The same connector, loading trust on the calling thread.
-    pub(crate) fn connector_blocking(&self) -> Result<Option<MakeRustls>, String> {
+    pub(crate) fn connector_blocking(
+        &self,
+        handshake: Duration,
+    ) -> Result<Option<MakeRustls>, String> {
         self.transport
             .connector_blocking()
+            .map(|connector| connector.map(|tls| tls.with_handshake_timeout(handshake)))
             .map_err(|diagnostic| diagnostic.message)
     }
 }
@@ -172,6 +196,8 @@ struct Prepared {
 /// Open a synchronous client (the auth store) under the runtime TLS policy.
 /// The configuration and trust anchors are resolved once per connection string,
 /// so a request does not re-read `sslrootcert`; restart after changing trust.
+/// A TLS handshake gets `handshake_timeout`: the sync driver waits for the
+/// connection with no deadline of its own beyond `connect_timeout` on the socket.
 pub(crate) fn connect_sync(connection_string: &str) -> Result<postgres::Client, String> {
     let prepared = prepared(connection_string)?;
     let connected = match &prepared.tls {
@@ -191,9 +217,10 @@ fn prepared(connection_string: &str) -> Result<Arc<Prepared>, String> {
         }
     }
     let target = resolve(connection_string)?;
+    let config = target.driver_config()?;
     let prepared = Arc::new(Prepared {
-        config: target.driver_config()?.into(),
-        tls: target.connector_blocking()?,
+        tls: target.connector_blocking(handshake_timeout(&config))?,
+        config: config.into(),
     });
     *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((digest, prepared.clone()));
     Ok(prepared)
@@ -392,6 +419,30 @@ mod tests {
         let config = url.driver_config().unwrap();
         assert_eq!(config.get_ssl_mode(), SslMode::Require);
         assert_eq!(config.get_application_name(), Some("x"));
+    }
+
+    #[test]
+    fn the_tls_handshake_bound_is_connect_timeout_or_ten_seconds() {
+        let bound =
+            |secret: &str| handshake_timeout(&resolve(secret).unwrap().driver_config().unwrap());
+        assert_eq!(postgres_tls::TLS_HANDSHAKE_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(
+            bound("host=db.example.com user=u dbname=d"),
+            postgres_tls::TLS_HANDSHAKE_TIMEOUT
+        );
+        assert_eq!(
+            bound("host=db.example.com connect_timeout=3 user=u dbname=d"),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            bound("postgres://u@db.example.com/d?connect_timeout=25&sslmode=require"),
+            Duration::from_secs(25)
+        );
+        // Zero means "no limit" to libpq; TLS negotiation keeps the default.
+        assert_eq!(
+            bound("host=db.example.com connect_timeout=0 user=u dbname=d"),
+            postgres_tls::TLS_HANDSHAKE_TIMEOUT
+        );
     }
 
     #[cfg(unix)]

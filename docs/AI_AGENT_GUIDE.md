@@ -1824,6 +1824,8 @@ When admitting a new target at capacity, the registry closes the least-recently-
 
 Every TLS mode requires TLS from the server: a server that refuses TLS is an error (`The server does not accept TLS connections. No plaintext fallback was attempted.`), never a plaintext retry. Errors never echo the connection string. Client certificates (`sslcert`/`sslkey`) are not supported, and TLS over a Unix socket is rejected (PostgreSQL serves sockets in plaintext). The shared pool's identity includes the TLS policy, so the same server reached with a different `sslmode` or CA file gets its own pool. Trust is read when a pool (or the auth store) is first opened; restart after changing the CA store or the `sslrootcert` file.
 
+A server that accepts TLS must finish the handshake within the connection string's `connect_timeout` (10 seconds when it is not set). Otherwise the connection is closed and `connect()` (or auth-store startup) returns `Err` (`The server did not complete the TLS handshake within 10s; the connection was closed. No plaintext fallback was attempted.`). The bound applies to every connection a pool opens, including the one `connect()` verifies, and each host or address tried gets its own; `connect_timeout` also still bounds opening the socket.
+
 ```ntnt
 // Managed PostgreSQL with a provider CA bundle
 let db = unwrap(connect("postgres://app:secret@db.example.com/app?sslmode=verify-full&sslrootcert=/etc/ssl/certs/provider-ca.pem"))

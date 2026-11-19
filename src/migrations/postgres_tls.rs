@@ -34,6 +34,12 @@ const MAX_ROOTS_BYTES: u64 = 1_048_576;
 /// Reading trust anchors runs off the runtime thread under this deadline, so a
 /// slow filesystem cannot stall a command beyond its other bounds.
 const ROOTS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default bound on each TLS handshake after the server accepted TLS (answered
+/// the SSLRequest with `S`), so a server that stops the exchange is an error,
+/// not a hang. Runtime connections use the connection string's
+/// `connect_timeout` instead when it is set. `ntnt db` bounds its whole connect
+/// at 5 seconds, which always ends first, so this never decides its outcome.
+pub(crate) const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The transport requested by the connection secret's `sslmode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,6 +474,7 @@ impl Transport {
             Some(MakeRustls {
                 config: Arc::new(config),
                 negotiated: Arc::default(),
+                handshake_timeout: TLS_HANDSHAKE_TIMEOUT,
             }),
             description,
         ))
@@ -632,6 +639,8 @@ pub(crate) struct MakeRustls {
     config: Arc<rustls::ClientConfig>,
     /// Protocol version of the last completed handshake, as this client saw it.
     negotiated: Arc<Mutex<Option<&'static str>>>,
+    /// Bound on each handshake (each host or address tried gets its own).
+    handshake_timeout: Duration,
 }
 impl MakeRustls {
     /// The TLS version this client negotiated, e.g. "TLSv1.3". A TLS-terminating
@@ -641,6 +650,11 @@ impl MakeRustls {
             .negotiated
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    /// The same connector with another bound on each TLS handshake.
+    pub(crate) fn with_handshake_timeout(mut self, limit: Duration) -> Self {
+        self.handshake_timeout = limit;
+        self
     }
 }
 impl MakeTlsConnect<Socket> for MakeRustls {
@@ -654,6 +668,7 @@ impl MakeTlsConnect<Socket> for MakeRustls {
             config: self.config.clone(),
             name,
             negotiated: self.negotiated.clone(),
+            handshake_timeout: self.handshake_timeout,
         })
     }
 }
@@ -661,6 +676,7 @@ pub(crate) struct RustlsConnect {
     config: Arc<rustls::ClientConfig>,
     name: ServerName<'static>,
     negotiated: Arc<Mutex<Option<&'static str>>>,
+    handshake_timeout: Duration,
 }
 impl TlsConnect<Socket> for RustlsConnect {
     type Stream = RustlsStream;
@@ -668,9 +684,15 @@ impl TlsConnect<Socket> for RustlsConnect {
     type Future = Pin<Box<dyn Future<Output = io::Result<RustlsStream>> + Send>>;
     fn connect(self, stream: Socket) -> Self::Future {
         Box::pin(async move {
-            let stream = tokio_rustls::TlsConnector::from(self.config)
-                .connect(self.name, stream)
-                .await?;
+            let limit = self.handshake_timeout;
+            let handshake =
+                tokio_rustls::TlsConnector::from(self.config).connect(self.name, stream);
+            // On timeout the handshake, and with it the socket, is dropped: the
+            // connection is discarded. Every TLS mode is the driver's `Require`,
+            // so the error ends the attempt; nothing continues in plaintext.
+            let stream = tokio::time::timeout(limit, handshake)
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, HandshakeTimedOut(limit)))??;
             let version = match stream.get_ref().1.protocol_version() {
                 Some(rustls::ProtocolVersion::TLSv1_3) => Some("TLSv1.3"),
                 Some(rustls::ProtocolVersion::TLSv1_2) => Some("TLSv1.2"),
@@ -717,6 +739,16 @@ impl TlsStream for RustlsStream {
     }
 }
 
+/// The server accepted TLS but did not complete the handshake within this bound.
+#[derive(Debug)]
+struct HandshakeTimedOut(Duration);
+impl std::fmt::Display for HandshakeTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the TLS handshake did not complete within {:?}", self.0)
+    }
+}
+impl std::error::Error for HandshakeTimedOut {}
+
 /// A specific, secret-free diagnostic for a failed TLS negotiation, or `None`
 /// when the connect error is not about TLS (refused, authentication, timeout).
 pub(crate) fn classify(error: &tokio_postgres::Error) -> Option<Diagnostic> {
@@ -729,6 +761,14 @@ pub(crate) fn classify(error: &tokio_postgres::Error) -> Option<Diagnostic> {
         return None;
     }
     let cause = std::error::Error::source(error);
+    if let Some(limit) = cause.and_then(handshake_timed_out) {
+        return Some(Diagnostic::new(
+            "DB_TLS",
+            &format!(
+                "The server did not complete the TLS handshake within {limit:?}; the connection was closed. No plaintext fallback was attempted."
+            ),
+        ));
+    }
     let message = if cause.is_some_and(|c| c.to_string() == "server does not support TLS") {
         "The server does not accept TLS connections. No plaintext fallback was attempted."
     } else {
@@ -751,6 +791,14 @@ pub(crate) fn classify(error: &tokio_postgres::Error) -> Option<Diagnostic> {
         }
     };
     Some(Diagnostic::new("DB_TLS", message))
+}
+
+/// The bound a handshake exceeded, when that is why it failed.
+fn handshake_timed_out(cause: &(dyn std::error::Error + 'static)) -> Option<Duration> {
+    let io = cause.downcast_ref::<io::Error>()?;
+    io.get_ref()?
+        .downcast_ref::<HandshakeTimedOut>()
+        .map(|timed_out| timed_out.0)
 }
 
 /// tokio-rustls surfaces rustls failures as `io::Error` wrapping `rustls::Error`.
@@ -1112,5 +1160,72 @@ mod tests {
             .expect("a FIFO is not a usable root file");
         assert_eq!(error.code, "DB_CONNECTION_CONFIG");
         assert!(error.message.contains("readable PEM file"), "{error}");
+    }
+
+    #[test]
+    fn a_stalled_tls_handshake_fails_at_the_default_bound() {
+        use std::io::Write;
+        // The server accepts TLS ('S') and never answers the ClientHello; it
+        // reports what it received once the client closes the connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (report, seen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut client, _) = listener.accept().unwrap();
+            let mut request = [0u8; 8];
+            client.read_exact(&mut request).unwrap();
+            client.write_all(b"S").unwrap();
+            let mut received = Vec::new();
+            let _ = client.read_to_end(&mut received);
+            let _ = report.send((request, received));
+        });
+        // The paused clock advances only when the client has nothing left to
+        // do but wait, so the bound fires while the handshake waits for the
+        // server, whatever the machine's speed; no other timer is armed. A
+        // watchdog thread turns a missing bound into a failure at the hang guard.
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            let transport = Transport {
+                mode: Mode::Require,
+                roots: None,
+            };
+            let error = runtime.block_on(async {
+                let (tls, _) = transport.connector().await.unwrap();
+                let mut config = tokio_postgres::Config::new();
+                config
+                    .host("127.0.0.1")
+                    .port(port)
+                    .user("u")
+                    .dbname("d")
+                    .ssl_mode(tokio_postgres::config::SslMode::Require);
+                config.connect(tls.unwrap()).await.err()
+            });
+            let _ = done.send(error.map(|error| classify(&error)));
+        });
+        let diagnostic = result
+            .recv_timeout(HANG_GUARD)
+            .expect("the stalled TLS handshake hung")
+            .expect("a stalled handshake cannot connect")
+            .expect("a TLS diagnostic");
+        assert_eq!(diagnostic.code, "DB_TLS", "{diagnostic}");
+        assert!(
+            diagnostic
+                .message
+                .contains("did not complete the TLS handshake within 10s"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.message.contains("No plaintext fallback"));
+        // The client sent its ClientHello (a TLS handshake record) and then
+        // closed the connection instead of continuing.
+        let (request, received) = seen
+            .recv_timeout(HANG_GUARD)
+            .expect("the client kept the stalled connection open");
+        assert_eq!(request, [0, 0, 0, 8, 4, 210, 22, 47]);
+        assert_eq!(received.first(), Some(&0x16), "{received:?}");
     }
 }

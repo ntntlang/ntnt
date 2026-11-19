@@ -405,6 +405,106 @@ fn pool_without_sslmode_verifies_a_named_host_against_the_host_ca_store() {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded TLS negotiation.
+// ---------------------------------------------------------------------------
+
+/// What a server that stalls TLS negotiation saw on one connection.
+#[derive(Debug, PartialEq, Eq)]
+enum Stalled {
+    /// It answered the SSLRequest with `S` and received a TLS ClientHello (a
+    /// handshake record, 0x16), never replied, and the client then closed the
+    /// connection.
+    HelloThenClosed,
+    /// After `S` the client sent these bytes, which do not start a TLS record.
+    NotTls(Vec<u8>),
+    /// The first 8 bytes, which were not an SSLRequest.
+    Plaintext([u8; 8]),
+}
+
+/// A PostgreSQL stand-in that accepts TLS (answers the SSLRequest with `S`)
+/// and then never continues the handshake. It holds each connection until the
+/// client closes it and reports, per connection in order, what it received.
+fn stalling_tls_server() -> (u16, mpsc::Receiver<Stalled>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (report, seen) = mpsc::channel();
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let mut client = client.unwrap();
+            let mut first = [0u8; 8];
+            if client.read_exact(&mut first).is_err() {
+                continue;
+            }
+            if first != SSL_REQUEST {
+                let _ = report.send(Stalled::Plaintext(first));
+                continue;
+            }
+            client.write_all(b"S").unwrap();
+            let mut received = Vec::new();
+            let _ = client.read_to_end(&mut received);
+            let _ = report.send(if received.first() == Some(&0x16) {
+                Stalled::HelloThenClosed
+            } else {
+                Stalled::NotTls(received)
+            });
+        }
+    });
+    (port, seen)
+}
+
+/// Run a connection attempt on its own thread, so an attempt that hangs fails
+/// the test at the hang guard instead of hanging it.
+fn bounded<T: Send + 'static>(attempt: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, result) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(attempt());
+    });
+    result
+        .recv_timeout(HANG_GUARD)
+        .expect("the connection attempt hung after the server accepted TLS")
+}
+
+#[test]
+fn pool_fails_when_the_server_stalls_tls_negotiation() {
+    let (port, seen) = stalling_tls_server();
+    // connect_timeout also bounds TLS negotiation; 1 s keeps the test short.
+    let url = format!(
+        "host=127.0.0.1 port={port} user=ntnt dbname=ntnt sslmode=require connect_timeout=1"
+    );
+    let error = bounded(move || pg_connect(&url).map(|_| ())).unwrap_err();
+    // The diagnostic names the bound in force: connect_timeout, not the default.
+    assert!(
+        error.contains("did not complete the TLS handshake within 1s"),
+        "{error}"
+    );
+    // The client discarded the connection ...
+    assert_eq!(next(&seen), Stalled::HelloThenClosed, "{error}");
+    // ... and opened no other one (a plaintext retry would arrive before this).
+    TcpStream::connect(("127.0.0.1", port))
+        .unwrap()
+        .write_all(b"sentinel")
+        .unwrap();
+    assert_eq!(next(&seen), Stalled::Plaintext(*b"sentinel"));
+}
+
+#[test]
+fn auth_store_fails_when_the_server_stalls_tls_negotiation() {
+    let (port, seen) = stalling_tls_server();
+    let url = format!("postgres://ntnt@127.0.0.1:{port}/ntnt?sslmode=require&connect_timeout=1");
+    let error = bounded(move || auth_store(url)).unwrap_err();
+    assert!(
+        error.contains("did not complete the TLS handshake within 1s"),
+        "{error}"
+    );
+    assert_eq!(next(&seen), Stalled::HelloThenClosed, "{error}");
+    TcpStream::connect(("127.0.0.1", port))
+        .unwrap()
+        .write_all(b"sentinel")
+        .unwrap();
+    assert_eq!(next(&seen), Stalled::Plaintext(*b"sentinel"));
+}
+
+// ---------------------------------------------------------------------------
 // Redis/Valkey: an in-process tokio-rustls listener with a minimal RESP responder.
 // ---------------------------------------------------------------------------
 
