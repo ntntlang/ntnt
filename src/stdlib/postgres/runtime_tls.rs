@@ -13,7 +13,8 @@
 //! echo the connection string.
 //!
 //! A server that accepted TLS must finish the handshake within `connect_timeout`
-//! (10 seconds when unset), or the connection is closed with an error.
+//! (10 seconds when unset), or the connection is closed with an error. A target
+//! given only as `hostaddr` is named by its address, so TLS verifies the IP.
 use crate::migrations::postgres_tls::{self, MakeRustls, Mode, Transport};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
@@ -95,6 +96,22 @@ fn is_single_label(name: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Host names for an address-only target (`hostaddr` without `host`): the
+/// addresses themselves. tokio-postgres takes the TLS server name from `host`
+/// alone, so without them TLS has no name to verify (and deadpool would add its
+/// local default hosts). The certificate must then name the IP address, as for
+/// `host=<ip>`. An explicit `host` is kept: it names the certificate, while
+/// `hostaddr` only decides where to connect.
+fn address_hosts(config: &tokio_postgres::Config) -> Option<Vec<String>> {
+    (config.get_hosts().is_empty() && !config.get_hostaddrs().is_empty()).then(|| {
+        config
+            .get_hostaddrs()
+            .iter()
+            .map(IpAddr::to_string)
+            .collect()
+    })
+}
+
 /// How long a runtime connection gives a server that accepted TLS to finish the
 /// handshake: the connection string's `connect_timeout` when set (libpq applies
 /// it to the whole attempt, TLS included, but tokio-postgres only to opening the
@@ -142,12 +159,37 @@ impl Target {
         let _ = hosts;
         Ok(())
     }
-    /// The driver configuration with the TLS mode set explicitly.
+    /// The driver configuration, with address-only hosts named and the TLS mode
+    /// set explicitly.
     pub(crate) fn driver_config(&self) -> Result<tokio_postgres::Config, String> {
         let mut config = self
             .rest
             .parse::<tokio_postgres::Config>()
             .map_err(|error| format!("Invalid PostgreSQL connection string: {error}"))?;
+        for host in address_hosts(&config).unwrap_or_default() {
+            config.host(&host);
+        }
+        self.finish(config)
+    }
+    /// The pool's driver configuration: deadpool's defaults (user from $USER, a
+    /// required dbname, the local Unix sockets or 127.0.0.1 when neither a host
+    /// nor an address is given) applied to the TLS-stripped string, with
+    /// address-only hosts named and the TLS mode set explicitly.
+    pub(crate) fn pool_config(&self) -> Result<tokio_postgres::Config, String> {
+        let mut pool = deadpool_postgres::Config::new();
+        pool.url = Some(self.rest().to_string());
+        // Named before deadpool applies its defaults, which would otherwise
+        // add local hosts that neither match the addresses nor name them.
+        pool.hosts = self
+            .rest
+            .parse::<tokio_postgres::Config>()
+            .ok()
+            .as_ref()
+            .and_then(address_hosts);
+        let config = pool.get_pg_config().map_err(|error| error.to_string())?;
+        self.finish(config)
+    }
+    fn finish(&self, mut config: tokio_postgres::Config) -> Result<tokio_postgres::Config, String> {
         self.check_hosts(config.get_hosts())?;
         config.ssl_mode(self.ssl_mode());
         Ok(config)
@@ -422,9 +464,63 @@ mod tests {
     }
 
     #[test]
+    fn address_only_targets_are_named_by_their_addresses() {
+        let tcp = |name: &str| Host::Tcp(name.to_string());
+        for (secret, hosts) in [
+            ("hostaddr=10.0.0.5 user=u dbname=d", vec![tcp("10.0.0.5")]),
+            (
+                "hostaddr=10.0.0.5,2001:db8::1 user=u dbname=d",
+                vec![tcp("10.0.0.5"), tcp("2001:db8::1")],
+            ),
+            ("postgres://u@/d?hostaddr=10.0.0.5", vec![tcp("10.0.0.5")]),
+            (
+                "hostaddr=127.0.0.1 sslmode=disable user=u dbname=d",
+                vec![tcp("127.0.0.1")],
+            ),
+            // An explicit host names the certificate; hostaddr only routes.
+            (
+                "host=db.example.com hostaddr=10.0.0.5 user=u dbname=d",
+                vec![tcp("db.example.com")],
+            ),
+            (
+                "host=db.example.com user=u dbname=d",
+                vec![tcp("db.example.com")],
+            ),
+        ] {
+            let target = resolve(secret).unwrap();
+            for (path, config) in [
+                ("driver", target.driver_config().unwrap()),
+                ("pool", target.pool_config().unwrap()),
+            ] {
+                assert_eq!(config.get_hosts(), hosts.as_slice(), "{path}: {secret}");
+                let hostaddrs = target
+                    .rest()
+                    .parse::<tokio_postgres::Config>()
+                    .unwrap()
+                    .get_hostaddrs()
+                    .to_vec();
+                assert_eq!(config.get_hostaddrs(), hostaddrs, "{path}: {secret}");
+                assert_eq!(config.get_ssl_mode(), target.ssl_mode(), "{path}: {secret}");
+            }
+        }
+        // Without a host or an address, deadpool still supplies its local defaults.
+        let pool = resolve("user=u dbname=d").unwrap().pool_config().unwrap();
+        assert!(!pool.get_hosts().is_empty());
+        assert!(pool.get_hostaddrs().is_empty());
+    }
+
+    #[test]
     fn the_tls_handshake_bound_is_connect_timeout_or_ten_seconds() {
-        let bound =
-            |secret: &str| handshake_timeout(&resolve(secret).unwrap().driver_config().unwrap());
+        let bound = |secret: &str| {
+            let target = resolve(secret).unwrap();
+            let bound = handshake_timeout(&target.driver_config().unwrap());
+            assert_eq!(
+                handshake_timeout(&target.pool_config().unwrap()),
+                bound,
+                "{secret}"
+            );
+            bound
+        };
         assert_eq!(postgres_tls::TLS_HANDSHAKE_TIMEOUT, Duration::from_secs(10));
         assert_eq!(
             bound("host=db.example.com user=u dbname=d"),

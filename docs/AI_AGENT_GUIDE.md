@@ -1826,6 +1826,8 @@ Every TLS mode requires TLS from the server: a server that refuses TLS is an err
 
 A server that accepts TLS must finish the handshake within the connection string's `connect_timeout` (10 seconds when it is not set). Otherwise the connection is closed and `connect()` (or auth-store startup) returns `Err` (`The server did not complete the TLS handshake within 10s; the connection was closed. No plaintext fallback was attempted.`). The bound applies to every connection a pool opens, including the one `connect()` verifies, and each host or address tried gets its own; `connect_timeout` also still bounds opening the socket.
 
+A target given only as an address (`hostaddr=10.0.0.5`, no `host`) is named by that address: `verify-full` needs a certificate for the IP address (an IP SAN), exactly as `host=10.0.0.5` would. When both are set, `host` names the certificate and `hostaddr` only decides where to connect.
+
 ```ntnt
 // Managed PostgreSQL with a provider CA bundle
 let db = unwrap(connect("postgres://app:secret@db.example.com/app?sslmode=verify-full&sslrootcert=/etc/ssl/certs/provider-ca.pem"))

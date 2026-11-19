@@ -614,3 +614,30 @@ fn auth_store_initializes_over_verified_tls() {
     let error = store(&format!("?sslmode=verify-full&sslrootcert={}", f.other_ca)).unwrap_err();
     assert!(error.contains("not issued by a trusted CA"), "{error}");
 }
+
+#[test]
+#[ignore = "requires the TLS PostgreSQL fixture; mandatory CI db catalog lane"]
+fn runtime_address_only_targets_verify_the_address() {
+    let f = TlsFixture::new();
+    // No host: the address is the TLS identity, and the fixture certificate
+    // names IP 127.0.0.1, so verify-full succeeds on the address alone.
+    let url = format!(
+        "hostaddr=127.0.0.1 port={port} user={role} dbname={role} password={PASSWORD} sslmode=verify-full sslrootcert={ca}",
+        port = f.port,
+        role = f.target,
+        ca = f.ca
+    );
+    assert_eq!(runtime_session_ssl(&url), Ok(true));
+    // The auth store, through the TLS-only terminator: initializing proves TLS.
+    let server_port: u16 = f.port.parse().unwrap();
+    let proxy = start_tls_terminator(server_port, &tls_material(&f.ca));
+    ntnt::stdlib::auth::ensure_auth_session_store(&ntnt::stdlib::auth::AuthConfig {
+        session_store: ntnt::stdlib::auth::SessionStore::Postgres(format!(
+            "postgresql://{role}:{PASSWORD}@/{role}?hostaddr=127.0.0.1&port={proxy}&sslmode=verify-full&sslrootcert={ca}",
+            role = f.target,
+            ca = f.ca
+        )),
+        ..Default::default()
+    })
+    .unwrap();
+}

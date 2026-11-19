@@ -405,8 +405,104 @@ fn pool_without_sslmode_verifies_a_named_host_against_the_host_ca_store() {
 }
 
 // ---------------------------------------------------------------------------
-// Bounded TLS negotiation.
+// Address-only targets (`hostaddr` without `host`) and bounded TLS negotiation.
 // ---------------------------------------------------------------------------
+
+/// A path as a key/value connection-string value: forward slashes, because a
+/// backslash escapes there.
+fn conninfo_path(path: &Path) -> String {
+    path.to_str().unwrap().replace('\\', "/")
+}
+
+/// The same path percent-encoded for a URL query.
+fn url_path(path: &Path) -> String {
+    conninfo_path(path)
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+#[test]
+fn pool_names_an_address_only_target_by_its_address() {
+    // The certificate names IP 127.0.0.1 and nothing else.
+    let pki = pki(&["127.0.0.1"]);
+    let (port, seen) = tls_postgres_server(pki.server.clone());
+    let ca = conninfo_path(&pki.ca);
+    for tls in [
+        format!("sslmode=verify-full sslrootcert='{ca}'"),
+        "sslmode=require".to_string(),
+    ] {
+        let error = pg_connect(&format!(
+            "hostaddr=127.0.0.1 port={port} user=ntnt_tls dbname=ntnt_tls {tls}"
+        ))
+        .unwrap_err();
+        // The server's ErrorResponse can only arrive over the TLS session.
+        assert!(error.contains("db error"), "{tls}: {error}");
+        assert_eq!(next(&seen), PgSeen::TlsStartup("ntnt_tls".into()), "{tls}");
+    }
+    // An explicit host still names the certificate, and this one does not match.
+    let error = pg_connect(&format!(
+        "host=pg.ntnt-tls.test hostaddr=127.0.0.1 port={port} user=ntnt_tls dbname=ntnt_tls sslmode=verify-full sslrootcert='{ca}'"
+    ))
+    .unwrap_err();
+    assert!(
+        error.contains("not valid for the connection host name"),
+        "{error}"
+    );
+    assert_eq!(next(&seen), PgSeen::HandshakeFailed);
+}
+
+#[test]
+fn auth_store_names_an_address_only_target_by_its_address() {
+    let pki = pki(&["127.0.0.1"]);
+    let (port, seen) = tls_postgres_server(pki.server.clone());
+    let ca = url_path(&pki.ca);
+    for tls in [
+        format!("sslmode=verify-full&sslrootcert={ca}"),
+        "sslmode=require".to_string(),
+    ] {
+        // `postgres://user@/db`: no host, only the address.
+        let error = auth_store(format!(
+            "postgres://ntnt_tls@/ntnt_tls?hostaddr=127.0.0.1&port={port}&{tls}"
+        ))
+        .unwrap_err();
+        assert!(error.contains("db error"), "{tls}: {error}");
+        assert_eq!(next(&seen), PgSeen::TlsStartup("ntnt_tls".into()), "{tls}");
+    }
+    let error = auth_store(format!(
+        "postgres://ntnt_tls@pg.ntnt-tls.test:{port}/ntnt_tls?hostaddr=127.0.0.1&sslmode=verify-full&sslrootcert={ca}"
+    ))
+    .unwrap_err();
+    assert!(
+        error.contains("not valid for the connection host name"),
+        "{error}"
+    );
+    assert_eq!(next(&seen), PgSeen::HandshakeFailed);
+}
+
+#[test]
+fn pool_reaches_a_local_address_only_target_in_plaintext() {
+    let (port, openings) = refusing_server();
+    let _ = pg_connect(&format!(
+        "hostaddr=127.0.0.1 port={port} user=ntnt dbname=ntnt"
+    ));
+    // Connections are reported in order: the attempt above comes before this.
+    TcpStream::connect(("127.0.0.1", port))
+        .unwrap()
+        .write_all(b"sentinel")
+        .unwrap();
+    let opening = next(&openings);
+    assert!(
+        matches!(opening, Opening::Plaintext(ref first) if is_startup(first)),
+        "{opening:?}"
+    );
+    assert_eq!(next(&openings), Opening::Plaintext(*b"sentinel"));
+}
 
 /// What a server that stalls TLS negotiation saw on one connection.
 #[derive(Debug, PartialEq, Eq)]

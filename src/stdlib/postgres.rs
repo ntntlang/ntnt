@@ -13,7 +13,7 @@
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use deadpool_postgres::{Config, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -564,18 +564,13 @@ fn create_verified_pool_for(
     connection_string: &str,
 ) -> std::result::Result<Pool, String> {
     // deadpool's own defaults (user from $USER, a required dbname, local Unix
-    // sockets or 127.0.0.1 without a host) apply to the TLS-stripped string.
-    let mut cfg = Config::new();
-    cfg.url = Some(target.rest().to_string());
-    let mut pg_config = cfg
-        .get_pg_config()
-        .map_err(|e| sanitize_connection_error(&e.to_string(), connection_string))?;
-    target
-        .check_hosts(pg_config.get_hosts())
+    // sockets or 127.0.0.1 without a host or address) apply to the TLS-stripped
+    // string; an address-only target is named by its address; and the mode is
+    // always explicit, since without the stripped sslmode tokio-postgres would
+    // use `prefer`, which silently falls back to plaintext.
+    let pg_config = target
+        .pool_config()
         .map_err(|e| sanitize_connection_error(&e, connection_string))?;
-    // Always explicit: without the stripped sslmode tokio-postgres would use
-    // `prefer`, which silently falls back to plaintext.
-    pg_config.ssl_mode(target.ssl_mode());
     let manager_config = ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     };
@@ -1297,7 +1292,9 @@ pub fn init() -> HashMap<String, Value> {
     // back to plaintext, and the pool identity includes the TLS policy.
     // Trust is read when a pool is created; restart after changing it. A
     // server that accepts TLS must finish the handshake within connect_timeout
-    // (10 seconds when unset), or the connection is closed with an Err.
+    // (10 seconds when unset), or the connection is closed with an Err. With
+    // hostaddr and no host, the address is the TLS identity: verify-full then
+    // needs a certificate for that IP address.
     // @param connection_string A PostgreSQL connection URI (e.g. "postgres://user:pass@localhost/mydb")
     // @returns Result::Ok containing a Connection map handle, or Result::Err with a description
     // @see_also close, query, execute, begin
@@ -1553,6 +1550,7 @@ mod temporal_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deadpool_postgres::Config;
 
     #[test]
     fn test_module_init() {
