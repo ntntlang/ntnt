@@ -670,13 +670,7 @@ fn sanitize_session_store_label(store: &SessionStore) -> String {
         SessionStore::Memory => "memory".to_string(),
         SessionStore::Sqlite(_) => "sqlite".to_string(),
         SessionStore::Postgres(_) => "postgres".to_string(),
-        SessionStore::Redis(url) => {
-            if url.starts_with("valkey://") {
-                "valkey".to_string()
-            } else {
-                "redis".to_string()
-            }
-        }
+        SessionStore::Redis(url) => crate::stdlib::redis_tls::backend_name(url).to_string(),
     }
 }
 

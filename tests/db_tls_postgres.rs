@@ -1,4 +1,5 @@
-//! `ntnt db` over TLS against a disposable TLS-enabled PostgreSQL started by
+//! `ntnt db`, and the runtime `std/db/postgres` pools and auth store, over TLS
+//! against a disposable TLS-enabled PostgreSQL started by
 //! `scripts/ci/postgres-tls-fixture.sh`. Ignored by default; mandatory in the
 //! CI db-catalog lane on PostgreSQL 16/17/18.
 //!
@@ -455,4 +456,161 @@ fn url_secrets_carry_tls_parameters() {
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
     assert_eq!(status["outcome"], "pass", "{status}");
     assert_tls(&status["target"]["identity"]["transport"], "verify-full");
+}
+
+// ---------------------------------------------------------------------------
+// Runtime connections: std/db/postgres pools and the auth store.
+// ---------------------------------------------------------------------------
+
+use ntnt::interpreter::Value as Ntnt;
+
+/// Call a `std/db/postgres` function; `Err` carries the error string.
+fn runtime(name: &str, args: &[Ntnt]) -> Result<Ntnt, String> {
+    let Some(Ntnt::NativeFunction { func, .. }) = ntnt::stdlib::postgres::init().remove(name)
+    else {
+        unreachable!("std/db/postgres exports {name}")
+    };
+    match func(args).unwrap() {
+        Ntnt::EnumValue {
+            variant,
+            mut values,
+            ..
+        } if variant == "Ok" => Ok(values.remove(0)),
+        Ntnt::EnumValue {
+            variant, values, ..
+        } if variant == "Err" => Err(match &values[0] {
+            Ntnt::String(message) => message.clone(),
+            other => format!("{other:?}"),
+        }),
+        other => Ok(other),
+    }
+}
+
+/// connect() and one query: whether PostgreSQL sees this pooled session as SSL.
+fn runtime_session_ssl(url: &str) -> Result<bool, String> {
+    let db = runtime("connect", &[Ntnt::String(url.into())])?;
+    let row = runtime(
+        "query_one",
+        &[
+            db.clone(),
+            Ntnt::String("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()".into()),
+            Ntnt::Array(vec![]),
+        ],
+    );
+    let _ = runtime("close", &[db]);
+    match row? {
+        Ntnt::EnumValue {
+            variant, values, ..
+        } if variant == "Some" => match &values[0] {
+            Ntnt::Map(row) => match row.get("ssl") {
+                Some(Ntnt::Bool(ssl)) => Ok(*ssl),
+                other => panic!("pg_stat_ssl.ssl: {other:?}"),
+            },
+            other => panic!("expected a row map, got {other:?}"),
+        },
+        other => panic!("expected one row, got {other:?}"),
+    }
+}
+
+#[test]
+#[ignore = "requires the TLS PostgreSQL fixture; mandatory CI db catalog lane"]
+fn runtime_pools_connect_and_query_over_tls() {
+    let f = TlsFixture::new();
+    let url = |host: &str, tls: &str| f.secret_at(&f.target, host, &f.port, tls);
+    let ca = &f.ca;
+    // verify-full with the fixture CA: chain and host name (the certificate is for 127.0.0.1).
+    assert_eq!(
+        runtime_session_ssl(&url(
+            "127.0.0.1",
+            &format!("sslmode=verify-full sslrootcert={ca}")
+        )),
+        Ok(true)
+    );
+    // require: encrypted without verification.
+    assert_eq!(
+        runtime_session_ssl(&url("127.0.0.1", "sslmode=require")),
+        Ok(true)
+    );
+    // sslrootcert alone selects verify-full.
+    assert_eq!(
+        runtime_session_ssl(&url("127.0.0.1", &format!("sslrootcert={ca}"))),
+        Ok(true)
+    );
+    // verify-ca checks the chain only, so another name is accepted with the right CA.
+    assert_eq!(
+        runtime_session_ssl(&url(
+            "db.ntnt-tls.invalid",
+            &format!("sslmode=verify-ca sslrootcert={ca}")
+        )),
+        Ok(true)
+    );
+    // The URL form carries the same parameters.
+    let url_form = format!(
+        "postgresql://{role}:{PASSWORD}@127.0.0.1:{port}/{role}?application_name=runtime&sslmode=verify-full&sslrootcert={ca}",
+        role = f.target,
+        port = f.port
+    );
+    assert_eq!(runtime_session_ssl(&url_form), Ok(true));
+    // Without sslmode a loopback host stays plaintext; disable is explicit plaintext.
+    assert_eq!(runtime_session_ssl(&url("127.0.0.1", "")), Ok(false));
+    assert_eq!(
+        runtime_session_ssl(&url("127.0.0.1", "sslmode=disable")),
+        Ok(false)
+    );
+}
+
+#[test]
+#[ignore = "requires the TLS PostgreSQL fixture; mandatory CI db catalog lane"]
+fn runtime_pools_refuse_wrong_names_and_untrusted_cas() {
+    let f = TlsFixture::new();
+    let url = |host: &str, tls: &str| f.secret_at(&f.target, host, &f.port, tls);
+    // The certificate is for 127.0.0.1, not this name; verify-full refuses it.
+    let error = runtime_session_ssl(&url(
+        "db.ntnt-tls.invalid",
+        &format!("sslmode=verify-full sslrootcert={}", f.ca),
+    ))
+    .unwrap_err();
+    assert!(
+        error.contains("not valid for the connection host name"),
+        "{error}"
+    );
+    // An unrelated CA does not vouch for the fixture certificate.
+    let error = runtime_session_ssl(&url(
+        "127.0.0.1",
+        &format!("sslmode=verify-full sslrootcert={}", f.other_ca),
+    ))
+    .unwrap_err();
+    assert!(error.contains("not issued by a trusted CA"), "{error}");
+    // Without sslmode a multi-label name gets verify-full against the host CA
+    // store, which does not hold the throwaway fixture CA.
+    let error = runtime_session_ssl(&url("db.ntnt-tls.invalid", "")).unwrap_err();
+    assert!(
+        error.contains("not issued by a trusted CA") || error.contains("host CA"),
+        "{error}"
+    );
+    // sslmode=prefer is refused before connecting.
+    let error = runtime_session_ssl(&url("127.0.0.1", "sslmode=prefer")).unwrap_err();
+    assert!(error.contains("fall back to plaintext"), "{error}");
+}
+
+#[test]
+#[ignore = "requires the TLS PostgreSQL fixture; mandatory CI db catalog lane"]
+fn auth_store_initializes_over_verified_tls() {
+    let f = TlsFixture::new();
+    // The terminator accepts only TLS, so initialization succeeding through it
+    // proves the auth store's connections used TLS.
+    let server_port: u16 = f.port.parse().unwrap();
+    let proxy = start_tls_terminator(server_port, &tls_material(&f.ca));
+    let store = |tls: &str| {
+        ntnt::stdlib::auth::ensure_auth_session_store(&ntnt::stdlib::auth::AuthConfig {
+            session_store: ntnt::stdlib::auth::SessionStore::Postgres(format!(
+                "postgresql://{role}:{PASSWORD}@127.0.0.1:{proxy}/{role}{tls}",
+                role = f.target
+            )),
+            ..Default::default()
+        })
+    };
+    store(&format!("?sslmode=verify-full&sslrootcert={}", f.ca)).unwrap();
+    let error = store(&format!("?sslmode=verify-full&sslrootcert={}", f.other_ca)).unwrap_err();
+    assert!(error.contains("not issued by a trusted CA"), "{error}");
 }

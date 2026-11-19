@@ -9,7 +9,7 @@ mod input_file;
 mod inventory;
 mod model;
 mod postgres;
-mod postgres_tls;
+pub(crate) mod postgres_tls;
 mod report;
 mod scaffold;
 mod sqlite;

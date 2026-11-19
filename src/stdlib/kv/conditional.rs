@@ -185,14 +185,16 @@ pub(super) fn redis_call_raw<T>(
         // blocking this mutex or accumulating threads during a blackhole.
         if let Value::Map(m) = handle {
             if let Some(Value::String(url)) = m.get("_url") {
-                let url = url.replacen("valkey://", "redis://", 1);
+                let url = url.clone();
                 let shared = Arc::clone(&shared);
                 store.reconnecting = true;
                 if std::thread::Builder::new()
                     .name("ntnt-redis-reconnect".into())
                     .spawn(move || {
-                        let result = redis::Client::open(url)
-                            .and_then(|c| c.get_connection_with_timeout(Duration::from_secs(1)));
+                        // The same scheme mapping and TLS verification as open().
+                        let result = crate::stdlib::redis_tls::client(&url).and_then(|c| {
+                            crate::stdlib::redis_tls::connection(&c, Some(Duration::from_secs(1)))
+                        });
                         if let Ok(mut store) = shared.lock() {
                             if let Ok(conn) = result {
                                 store.conn = conn;

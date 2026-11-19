@@ -1485,11 +1485,7 @@ fn redis_connection() -> std::result::Result<redis::Connection, String> {
         .unwrap()
         .clone()
         .ok_or_else(|| "Redis not initialized".to_string())?;
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))
+    auth_redis_connection(&url)
 }
 
 fn local_identity_from_postgres_row(
@@ -1511,7 +1507,7 @@ fn local_identity_from_postgres_row(
 fn store_local_identity_postgres(identity: &LocalIdentity) -> std::result::Result<(), String> {
     let identity = normalize_local_identity_for_storage(identity.clone())?;
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     client.execute(
         "INSERT INTO auth_local_identities
          (id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json)
@@ -1547,7 +1543,7 @@ fn store_local_identity_and_credential_postgres(
     validate_local_identity_credential_pair(&identity, credential)?;
 
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     let mut tx = client
         .transaction()
         .map_err(|e| format!("[auth] failed to begin local bootstrap transaction: {}", e))?;
@@ -1611,7 +1607,7 @@ fn get_local_identity_by_id_postgres(
     id: &str,
 ) -> std::result::Result<Option<LocalIdentity>, String> {
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     let rows = client
         .query(
             "SELECT id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json
@@ -1631,7 +1627,7 @@ fn get_local_identity_by_identifier_postgres(
     let kind = identifier_kind.trim().to_ascii_lowercase();
     let normalized = identifier_normalized.trim().to_string();
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     let rows = client
         .query(
             "SELECT id, identifier_kind, identifier, identifier_normalized, created_at, updated_at, state, metadata_json
@@ -1655,7 +1651,7 @@ where
     let kind = identifier_kind.trim().to_ascii_lowercase();
     let normalized = identifier_normalized.trim().to_string();
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     let mut tx = client.transaction().map_err(|e| {
         format!(
             "[auth] failed to begin local identity update transaction: {}",
@@ -1711,7 +1707,7 @@ fn store_local_credential_secret_postgres(
 ) -> std::result::Result<(), String> {
     validate_local_credential_secret_for_storage(credential)?;
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     client.execute(
         "INSERT INTO auth_local_credentials
          (local_user_id, password_hash, password_hash_algorithm, password_hash_params_json, password_changed_at, must_change_password)
@@ -1738,7 +1734,7 @@ fn get_local_credential_secret_postgres(
     local_user_id: &str,
 ) -> std::result::Result<Option<LocalCredentialSecret>, String> {
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     let rows = client
         .query(
             "SELECT local_user_id, password_hash, password_hash_algorithm, password_hash_params_json, password_changed_at, must_change_password
@@ -1775,7 +1771,7 @@ fn store_local_one_time_token_postgres(
 ) -> std::result::Result<bool, String> {
     validate_local_one_time_token_for_storage(token)?;
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     let mut tx = client.transaction().map_err(|e| {
         format!(
             "[auth] failed to begin one-time token store transaction: {}",
@@ -1845,7 +1841,7 @@ where
     F: FnOnce(&str) -> std::result::Result<LocalCredentialSecret, String>,
 {
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     let mut tx = client.transaction().map_err(|e| {
         format!(
             "[auth] failed to begin password reset consume transaction: {}",
@@ -2177,7 +2173,7 @@ fn consume_local_one_time_token_postgres(
     now: i64,
 ) -> std::result::Result<Option<LocalIdentity>, String> {
     let url = postgres_url()?;
-    let mut client = postgres::Client::connect(&url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(&url)?;
     let mut tx = client.transaction().map_err(|e| {
         format!(
             "[auth] failed to begin one-time token consume transaction: {}",

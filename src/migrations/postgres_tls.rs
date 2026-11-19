@@ -1,4 +1,6 @@
-//! TLS transport for `ntnt db` PostgreSQL sessions.
+//! TLS transport for PostgreSQL sessions: `ntnt db`, and through
+//! `crate::stdlib::postgres::runtime_tls` the `std/db/postgres` pools and the
+//! auth store.
 //!
 //! tokio-postgres accepts only `sslmode=disable|prefer|require` and leaves
 //! certificate policy to its connector. This module reads libpq's `sslmode`
@@ -77,7 +79,7 @@ fn config_error(message: &str) -> Diagnostic {
     Diagnostic::new("DB_CONNECTION_CONFIG", message)
 }
 fn invalid_secret() -> Diagnostic {
-    config_error("Invalid connection secret; details suppressed.")
+    config_error("Invalid connection string; details suppressed.")
 }
 fn verify_ca_needs_file() -> Diagnostic {
     config_error(
@@ -91,16 +93,33 @@ type Split = (Zeroizing<String>, Vec<(String, String)>);
 /// Split `sslmode`/`sslrootcert` out of a libpq key/value string or a
 /// `postgres://` URL. Returns the remaining connection string for tokio-postgres
 /// (still secret: it holds the password) and the requested transport. Errors
-/// never echo connection-string contents.
+/// never echo connection-string contents. `ntnt db` requires an explicit sslmode.
 pub(crate) fn split(secret: &str) -> Result<(Zeroizing<String>, Transport)> {
-    let (rest, tls) = match ["postgresql://", "postgres://"]
+    let (rest, tls) = split_tls_keywords(secret)?;
+    Ok((rest, transport(tls, None)?))
+}
+
+/// `split` for runtime connections, where `sslmode` may be absent. Then
+/// `sslrootcert` (a CA the caller wants checked) selects verify-full, and
+/// otherwise `absent` chooses the mode from the remaining connection string.
+/// An explicit sslmode is interpreted exactly as by `split`.
+pub(crate) fn split_with_default(
+    secret: &str,
+    absent: impl Fn(&str) -> Result<Mode>,
+) -> Result<(Zeroizing<String>, Transport)> {
+    let (rest, tls) = split_tls_keywords(secret)?;
+    let transport = transport(tls, Some(&|| absent(rest.as_str())))?;
+    Ok((rest, transport))
+}
+
+fn split_tls_keywords(secret: &str) -> Result<Split> {
+    match ["postgresql://", "postgres://"]
         .iter()
         .find(|prefix| secret.starts_with(**prefix))
     {
-        Some(prefix) => split_url(secret, prefix.len())?,
-        None => split_keywords(secret)?,
-    };
-    Ok((rest, transport(tls)?))
+        Some(prefix) => split_url(secret, prefix.len()),
+        None => split_keywords(secret),
+    }
 }
 
 /// TLS keywords handled here rather than by tokio-postgres. `sslnegotiation` is
@@ -262,9 +281,12 @@ fn percent_decode(s: &str) -> Result<String> {
     String::from_utf8(out).map_err(|_| invalid_secret())
 }
 
-/// Interpret the TLS keywords. `sslmode` must be explicit; `prefer`/`allow`
-/// are rejected because they can fall back to plaintext.
-fn transport(tls: Vec<(String, String)>) -> Result<Transport> {
+/// Interpret the TLS keywords. Without `absent`, `sslmode` must be explicit;
+/// `prefer`/`allow` are always rejected because they can fall back to plaintext.
+fn transport(
+    tls: Vec<(String, String)>,
+    absent: Option<&dyn Fn() -> Result<Mode>>,
+) -> Result<Transport> {
     let mut mode: Option<String> = None;
     let mut roots: Option<String> = None;
     for (key, value) in tls {
@@ -273,13 +295,13 @@ fn transport(tls: Vec<(String, String)>) -> Result<Transport> {
             "sslrootcert" => &mut roots,
             _ => {
                 return Err(config_error(
-                    "Unsupported TLS keyword in the connection secret. ntnt db supports sslmode and sslrootcert; client certificates, CRLs and protocol-version keywords are not supported.",
+                    "Unsupported TLS keyword in the connection string. Only sslmode and sslrootcert are supported; client certificates, CRLs and protocol-version keywords are not.",
                 ))
             }
         };
         if slot.replace(value).is_some() {
             return Err(config_error(
-                "sslmode or sslrootcert appears more than once in the connection secret.",
+                "sslmode or sslrootcert appears more than once in the connection string.",
             ));
         }
     }
@@ -298,11 +320,17 @@ fn transport(tls: Vec<(String, String)>) -> Result<Transport> {
                 "Unknown sslmode. Use verify-full, verify-ca, require, or disable.",
             ))
         }
-        None => {
-            return Err(config_error(
-                "Set sslmode explicitly: verify-full (recommended), verify-ca, require, or disable on a trusted local transport.",
-            ))
-        }
+        None => match absent {
+            // Like libpq's `sslrootcert=system`, a named CA means verified TLS:
+            // it must never be ignored in favor of plaintext.
+            Some(_) if roots.is_some() => Mode::VerifyFull,
+            Some(default) => default()?,
+            None => {
+                return Err(config_error(
+                    "Set sslmode explicitly: verify-full (recommended), verify-ca, require, or disable on a trusted local transport.",
+                ))
+            }
+        },
     };
     let roots = match (mode, roots) {
         (Mode::VerifyFull, None) => Some(RootSource::System),
@@ -330,30 +358,52 @@ fn transport(tls: Vec<(String, String)>) -> Result<Transport> {
     Ok(Transport { mode, roots })
 }
 
+/// Trust anchors and, for an sslrootcert file, the SHA-256 of its bytes.
+type LoadedRoots = Option<(Arc<RootCertStore>, Option<String>)>;
+
+fn load_roots(source: Option<RootSource>) -> Result<LoadedRoots> {
+    match source {
+        None => Ok(None),
+        Some(RootSource::System) => crate::stdlib::tls_trust::host_trust()
+            .map(|trust| Some((trust.roots.clone(), None)))
+            .map_err(|message| Diagnostic::new("DB_TLS", &message)),
+        Some(RootSource::File(path)) => {
+            file_roots(&path).map(|(store, sha256)| Some((Arc::new(store), Some(sha256))))
+        }
+    }
+}
+
 impl Transport {
     pub(crate) fn mode(&self) -> Mode {
         self.mode
+    }
+    /// The mode and trust source, e.g. `verify-full roots=system`: what makes two
+    /// connections to the same server equivalent. Contains no secret.
+    pub(crate) fn policy(&self) -> String {
+        match &self.roots {
+            None => self.mode.as_str().to_string(),
+            Some(RootSource::System) => format!("{} roots=system", self.mode.as_str()),
+            Some(RootSource::File(path)) => {
+                format!("{} roots=file:{}", self.mode.as_str(), path.display())
+            }
+        }
+    }
+    /// Whether this transport is TLS (every mode except disable).
+    pub(crate) fn is_tls(&self) -> bool {
+        self.mode != Mode::Disable
     }
     /// Load trust anchors and build the connector, or `None` for plaintext.
     /// Also returns the transport description that identity reports bind.
     /// Filesystem and host-store reads run off the runtime thread with a deadline.
     pub(crate) async fn connector(&self) -> Result<(Option<MakeRustls>, Value)> {
-        let mut description = json!({"sslmode": self.mode.as_str(), "roots": null});
+        let description = json!({"sslmode": self.mode.as_str(), "roots": null});
         if self.mode == Mode::Disable {
             return Ok((None, description));
         }
         let source = self.roots.clone();
         let loaded = tokio::time::timeout(
             ROOTS_TIMEOUT,
-            tokio::task::spawn_blocking(move || match source {
-                None => Ok(None),
-                Some(RootSource::System) => crate::stdlib::tls_trust::host_trust()
-                    .map(|trust| Some((trust.roots.clone(), None)))
-                    .map_err(|message| Diagnostic::new("DB_TLS", &message)),
-                Some(RootSource::File(path)) => {
-                    file_roots(&path).map(|(store, sha256)| Some((Arc::new(store), Some(sha256))))
-                }
-            }),
+            tokio::task::spawn_blocking(move || load_roots(source)),
         )
         .await;
         let roots = match loaded {
@@ -365,6 +415,23 @@ impl Transport {
                 ))
             }
         };
+        self.build(roots, description)
+    }
+    /// The same connector, loading trust on the calling thread, for synchronous
+    /// clients that run outside any Tokio runtime. `None` for plaintext.
+    pub(crate) fn connector_blocking(&self) -> Result<Option<MakeRustls>> {
+        if self.mode == Mode::Disable {
+            return Ok(None);
+        }
+        let description = json!({"sslmode": self.mode.as_str(), "roots": null});
+        let roots = load_roots(self.roots.clone())?;
+        Ok(self.build(roots, description)?.0)
+    }
+    fn build(
+        &self,
+        roots: LoadedRoots,
+        mut description: Value,
+    ) -> Result<(Option<MakeRustls>, Value)> {
         let roots = roots.map(|(store, sha256)| {
             match sha256 {
                 Some(sha256) => {
@@ -809,6 +876,90 @@ mod tests {
         ] {
             assert_eq!(code(rejected), "DB_CONNECTION_CONFIG", "{rejected}");
         }
+    }
+
+    #[test]
+    fn runtime_split_defaults_only_a_missing_sslmode() {
+        let local = |_: &str| Ok(Mode::Disable);
+        let remote = |_: &str| Ok(Mode::VerifyFull);
+        // The default sees the remainder without TLS keywords.
+        let seen = std::cell::RefCell::new(String::new());
+        let (rest, tls) = split_with_default("host=db user=u dbname=d", |rest| {
+            seen.replace(rest.to_string());
+            Ok(Mode::Disable)
+        })
+        .unwrap();
+        assert_eq!(seen.into_inner(), "host=db user=u dbname=d");
+        assert_eq!(
+            (rest.as_str(), tls.mode),
+            ("host=db user=u dbname=d", Mode::Disable)
+        );
+        let (_, tls) = split_with_default("host=db.example.com", remote).unwrap();
+        assert_eq!(
+            (tls.mode, tls.roots),
+            (Mode::VerifyFull, Some(RootSource::System))
+        );
+        // An explicit sslmode is never replaced by the default.
+        for (secret, mode) in [
+            ("host=h sslmode=disable", Mode::Disable),
+            ("host=h sslmode=require", Mode::Require),
+            ("postgres://u@h/d?sslmode=verify-full", Mode::VerifyFull),
+        ] {
+            let (_, tls) = split_with_default(secret, |_| panic!("default consulted")).unwrap();
+            assert_eq!(tls.mode, mode, "{secret}");
+        }
+        // A CA file or `system` selects verify-full even where the default is plaintext.
+        let (_, tls) =
+            split_with_default(&format!("host=h sslrootcert={}", absolute("ca.pem")), local)
+                .unwrap();
+        assert_eq!(
+            (tls.mode, tls.roots),
+            (
+                Mode::VerifyFull,
+                Some(RootSource::File(absolute("ca.pem").into()))
+            )
+        );
+        let (_, tls) = split_with_default("host=h sslrootcert=system", local).unwrap();
+        assert_eq!(
+            (tls.mode, tls.roots),
+            (Mode::VerifyFull, Some(RootSource::System))
+        );
+        // Downgradable and unknown modes stay rejected, as for ntnt db.
+        for rejected in [
+            "host=h sslmode=prefer",
+            "host=h sslmode=allow",
+            "host=h sslmode=verify",
+            "host=h sslmode=verify-ca",
+        ] {
+            assert_eq!(
+                split_with_default(rejected, local).unwrap_err().code,
+                "DB_CONNECTION_CONFIG",
+                "{rejected}"
+            );
+        }
+        // ntnt db's own rule is unchanged: no default.
+        assert!(split("host=h")
+            .unwrap_err()
+            .message
+            .contains("Set sslmode explicitly"));
+    }
+
+    #[test]
+    fn policy_names_mode_and_trust_source() {
+        let policy = |secret: &str| split(secret).unwrap().1.policy();
+        assert_eq!(policy("host=h sslmode=disable"), "disable");
+        assert_eq!(policy("host=h sslmode=require"), "require");
+        assert_eq!(
+            policy("host=h sslmode=verify-full"),
+            "verify-full roots=system"
+        );
+        assert_eq!(
+            policy(&format!(
+                "host=h sslmode=verify-ca sslrootcert={}",
+                absolute("ca.pem")
+            )),
+            format!("verify-ca roots=file:{}", absolute("ca.pem"))
+        );
     }
 
     #[test]

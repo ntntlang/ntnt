@@ -19,6 +19,13 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   DNS resolution, even when private or localhost addresses are allowed.
 - `to_html_safe()` drops links and images whose scheme is not http, https or mailto,
   and ignores heading attributes.
+- `std/db/postgres` and the std/auth store use TLS for PostgreSQL: `sslmode`
+  `verify-full`, `verify-ca`, `require` and `disable` are honoured, `prefer` and
+  `allow` are rejected, and a connection string without `sslmode` uses verified TLS
+  unless every host is local (loopback, a Unix socket, or a single-label name such
+  as a Docker service).
+- `std/kv`, `std/jobs` stores and the std/auth session store accept `rediss://` and
+  `valkeys://` with verified TLS.
 - The `${...}` interpolation warning scans each string literal in one bounded pass.
 - `install.ps1` verifies the release checksum before extracting and keeps the
   existing `ntnt.exe` until the new one runs; it no longer builds from source when

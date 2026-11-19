@@ -4256,10 +4256,14 @@ pub fn init() -> HashMap<String, Value> {
     // Expired unstarted claims recover automatically; authorized executions
     // become outcome_unknown with no TTL or automatic replay. Upgrade workers
     // together; old active jobs without leases are shown as outcome_unknown.
+    // A Redis/Valkey store uses the std/kv open() URL rules: redis:// and
+    // valkey:// are plaintext; rediss:// and valkeys:// use TLS verified against
+    // the host CA store (chain and host name), with no plaintext fallback.
     // @param opts Map with optional store, retention, lease_seconds and testing-mode options
     // @returns Result indicating success or error
     // @example configure_queue(map { "store": "sqlite:./jobs.db" }) ~ "Use SQLite for job storage"
     // @example configure_queue(map { "store": "redis://localhost:6379" }) ~ "Use Redis for job storage"
+    // @example configure_queue(map { "store": "rediss://cache.example.com:6380" }) ~ "Use Redis over verified TLS"
     module.insert(
         "configure_queue".to_string(),
         Value::NativeFunction {
@@ -4309,15 +4313,13 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 // Validate URL format — redis/valkey need explicit scheme,
-                // everything else is treated as a SQLite path (consistent with std/kv)
-                if store_url.contains("://")
-                    && !store_url.starts_with("redis://")
-                    && !store_url.starts_with("valkey://")
+                // everything else is treated as a SQLite path (consistent with std/kv).
+                // The URL is not echoed: it may hold a password.
+                if store_url.contains("://") && !crate::stdlib::redis_tls::is_redis_url(&store_url)
                 {
-                    return Err(IntentError::runtime_error(format!(
-                        "Invalid store URL '{}'. Use a file path for SQLite, or redis:// / valkey:// for Redis",
-                        store_url
-                    )));
+                    return Err(IntentError::runtime_error(
+                        "Invalid store URL. Use a file path for SQLite, or redis://, rediss:// (TLS), valkey:// or valkeys:// (TLS) for Redis/Valkey",
+                    ));
                 }
 
                 // Worker bootstrap re-evaluates configuration. Reuse the same
