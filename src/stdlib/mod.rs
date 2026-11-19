@@ -50,7 +50,8 @@ use std::collections::HashMap;
 pub type StdlibModule = HashMap<String, Value>;
 
 /// Capture host-owned runtime security policy (`std/process` execution and the
-/// `fetch()` SSRF policy) from the real process environment.
+/// `fetch()` SSRF policy) from the real process environment, together with the
+/// names of the variables the host set, which `load_env` never replaces.
 ///
 /// The first call in a process wins and later calls are no-ops, so environment
 /// changes made by application code (for example `load_env`) cannot grant
@@ -61,6 +62,7 @@ pub type StdlibModule = HashMap<String, Value>;
 pub fn capture_host_policy() {
     process::capture_host_policy();
     http::capture_host_policy();
+    env::capture_host_policy();
 }
 
 /// Stop process-local runtimes before the host exits.

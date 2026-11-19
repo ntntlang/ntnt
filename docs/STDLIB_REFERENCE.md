@@ -6492,7 +6492,9 @@ Loads environment variables from a .env file.
 
 Reads the file line by line, parsing KEY=VALUE pairs. Lines starting with # are treated as comments and skipped. Variables are set in the current process environment. Loading `.env` files remains supported in production and is not replaced or restricted by optional `std/secrets`.
 
-Host runtime-policy keys are reserved and skipped with one stderr warning per key, while the rest of the file still loads: NTNT_PROCESS_ENABLE, NTNT_PROCESS_ALLOW, NTNT_SSRF_PROTECTION, NTNT_ALLOW_LOCALHOST, NTNT_ALLOW_PRIVATE_IPS, NTNT_BLOCKED_HOSTS, NTNT_NET_ALLOW_PRIVATE, NTNT_NETMON_ENABLE, and every NTNT_SECRETS_* key (matched case-insensitively). Set them in the environment that starts ntnt. NTNT_ENV is not reserved.
+Variables set in the environment that started ntnt win: the file never replaces them, so a host started with NTNT_ENV=production stays in production when the file says NTNT_ENV=development. Each kept key gets one stderr warning per process that names the key, never a value, and the rest of the file still loads. Keys the host did not set load normally, and a later load_env call replaces values set by an earlier one, so loading `.env` then `.env.local` lets the local file win. Host names match case-insensitively on Windows and exactly elsewhere.
+
+Host runtime-policy keys are reserved and always skipped with one stderr warning per key, while the rest of the file still loads: NTNT_PROCESS_ENABLE, NTNT_PROCESS_ALLOW, NTNT_SSRF_PROTECTION, NTNT_ALLOW_LOCALHOST, NTNT_ALLOW_PRIVATE_IPS, NTNT_BLOCKED_HOSTS, NTNT_NET_ALLOW_PRIVATE, NTNT_NETMON_ENABLE, and every NTNT_SECRETS_* key (matched case-insensitively). Set them in the environment that starts ntnt. NTNT_ENV is not reserved: a file may set it when the host did not.
 
 **Parameters:**
 
@@ -6509,6 +6511,7 @@ load_env(".env.local")  // Load environment-specific file
 
 **Gotchas:**
 
+- A .env file never replaces a variable set in the environment that starts ntnt (shell, service unit, container); change host settings there
 - Reserved runtime-policy keys in the file are ignored with a warning; process execution and fetch() SSRF policy come from the environment that starts ntnt
 
 **See also:** `get_env`

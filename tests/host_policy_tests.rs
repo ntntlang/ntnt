@@ -1,6 +1,7 @@
 //! Host runtime policy (process execution, fetch SSRF policy) belongs to the
 //! environment that launches ntnt. Application code must not be able to grant
-//! itself capabilities by writing a dotenv file and loading it.
+//! itself capabilities by writing a dotenv file and loading it, and a dotenv
+//! file must not replace any variable the host set (such as `NTNT_ENV`).
 //!
 //! Every case runs the real CLI with an explicit environment; this test process
 //! never mutates its own environment.
@@ -317,13 +318,19 @@ fn load_env_cannot_leave_production_fetch_policy() {
         output.stdout,
         output.stderr
     );
-    // NTNT_ENV is application configuration and still loads.
+    // The host set NTNT_ENV, so the dotenv value does not replace it.
     assert!(
-        output.stdout.contains("mode=development"),
-        "stdout={}",
-        output.stdout
+        output.stdout.contains("mode=production"),
+        "stdout={}\nstderr={}",
+        output.stdout,
+        output.stderr
     );
-    assert!(skip_warnings(&output.stderr, "NTNT_ENV").is_empty());
+    assert_eq!(
+        skip_warnings(&output.stderr, "NTNT_ENV").len(),
+        1,
+        "expected one load_env warning for NTNT_ENV: stderr={}",
+        output.stderr
+    );
     assert!(
         output
             .stdout
@@ -373,4 +380,226 @@ fn load_env_production_mode_still_tightens_fetch_policy() {
         output.stderr
     );
     assert_eq!(contacts, 0, "the loopback fixture was contacted");
+}
+
+/// Every line in which load_env reports something.
+fn load_env_warnings(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|line| line.contains("load_env"))
+        .collect()
+}
+
+/// NTNT source that loads `.env` then `.env.local` from its working directory
+/// and prints each of `keys` as `KEY=value`.
+fn load_dotenv_files_source(keys: &[&str]) -> String {
+    let mut source = String::from(
+        r#"
+import { load_env, get_env } from "std/env"
+
+match load_env(".env") {
+    Ok(_) => print("load .env=ok"),
+    Err(error) => print("load .env=err:" + error)
+}
+match load_env(".env.local") {
+    Ok(_) => print("load .env.local=ok"),
+    Err(error) => print("load .env.local=err:" + error)
+}
+"#,
+    );
+    for key in keys {
+        source.push_str(&format!(
+            "print({label} + (get_env({key}) ?? \"unset\"))\n",
+            label = literal(&format!("{key}=")),
+            key = literal(key),
+        ));
+    }
+    source
+}
+
+#[test]
+fn load_env_keeps_variables_the_host_set() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join(".env"),
+        "NTNT_ENV=development\nAPP_SETTING=dotenv-app-value\nNEW_SETTING=dotenv-new-value\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join(".env.local"),
+        "NEW_SETTING=local-new-value\nAPP_SETTING=local-app-value\n",
+    )
+    .unwrap();
+    let script = directory.path().join("host_wins.tnt");
+    std::fs::write(
+        &script,
+        load_dotenv_files_source(&["NTNT_ENV", "APP_SETTING", "NEW_SETTING"]),
+    )
+    .unwrap();
+    let mut command = ntnt_run(&script);
+    command
+        .current_dir(directory.path())
+        .env("NTNT_ENV", "production")
+        .env("APP_SETTING", "host-app-value")
+        .env_remove("NEW_SETTING");
+
+    let output = run_cli(command, directory.path());
+
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        output.stdout,
+        output.stderr
+    );
+    assert_eq!(
+        output.stdout.lines().collect::<Vec<_>>(),
+        [
+            "load .env=ok",
+            "load .env.local=ok",
+            "NTNT_ENV=production",
+            "APP_SETTING=host-app-value",
+            // The host did not set it, so the later file replaces the earlier one.
+            "NEW_SETTING=local-new-value",
+        ],
+        "a dotenv file replaced a host variable: stderr={}",
+        output.stderr
+    );
+    // One warning per kept key, although APP_SETTING is in both files.
+    for key in ["NTNT_ENV", "APP_SETTING"] {
+        assert_eq!(
+            skip_warnings(&output.stderr, key).len(),
+            1,
+            "expected one load_env warning for {key}: stderr={}",
+            output.stderr
+        );
+    }
+    assert!(
+        skip_warnings(&output.stderr, "NEW_SETTING").is_empty(),
+        "stderr={}",
+        output.stderr
+    );
+    let warnings = load_env_warnings(&output.stderr);
+    for value in [
+        "production",
+        "development",
+        "host-app-value",
+        "dotenv-app-value",
+        "dotenv-new-value",
+        "local-app-value",
+        "local-new-value",
+    ] {
+        assert!(
+            warnings.iter().all(|line| !line.contains(value)),
+            "a load_env warning printed the value {value:?}: {warnings:#?}"
+        );
+    }
+}
+
+/// Windows environment names are case-insensitive, so `MIXED_CASE_SETTING`
+/// in a dotenv file names the host's `Mixed_Case_Setting` there; on other
+/// platforms they are two variables and the dotenv one loads.
+#[test]
+fn load_env_matches_host_names_by_platform_case_rules() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join(".env"),
+        "MIXED_CASE_SETTING=dotenv-mixed-value\n",
+    )
+    .unwrap();
+    std::fs::write(directory.path().join(".env.local"), "").unwrap();
+    let script = directory.path().join("case_rules.tnt");
+    std::fs::write(
+        &script,
+        load_dotenv_files_source(&["MIXED_CASE_SETTING", "Mixed_Case_Setting"]),
+    )
+    .unwrap();
+    let mut command = ntnt_run(&script);
+    command
+        .current_dir(directory.path())
+        .env_remove("MIXED_CASE_SETTING")
+        .env("Mixed_Case_Setting", "host-mixed-value");
+
+    let output = run_cli(command, directory.path());
+
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        output.stdout,
+        output.stderr
+    );
+    let (loaded, warnings) = if cfg!(windows) {
+        ("host-mixed-value", 1)
+    } else {
+        ("dotenv-mixed-value", 0)
+    };
+    assert_eq!(
+        output.stdout.lines().collect::<Vec<_>>(),
+        [
+            "load .env=ok".to_string(),
+            "load .env.local=ok".to_string(),
+            format!("MIXED_CASE_SETTING={loaded}"),
+            "Mixed_Case_Setting=host-mixed-value".to_string(),
+        ],
+        "stderr={}",
+        output.stderr
+    );
+    assert_eq!(
+        skip_warnings(&output.stderr, "MIXED_CASE_SETTING").len(),
+        warnings,
+        "stderr={}",
+        output.stderr
+    );
+}
+
+/// A development dotenv file deployed with the app must not turn off a
+/// production-only protection: `enable_auth` without a `session_secret`
+/// still refuses to start when the host runs in production.
+#[test]
+fn development_dotenv_keeps_production_session_secret_check() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join(".env"), "NTNT_ENV=development\n").unwrap();
+    let script = directory.path().join("auth_without_secret.tnt");
+    std::fs::write(
+        &script,
+        r#"
+import { load_env, get_env } from "std/env"
+import { enable_auth } from "std/auth"
+
+match load_env(".env") {
+    Ok(_) => print("load .env=ok"),
+    Err(error) => print("load .env=err:" + error)
+}
+print("NTNT_ENV=" + (get_env("NTNT_ENV") ?? "unset"))
+enable_auth([], map { "session_store": "memory" })
+print("auth=enabled")
+"#,
+    )
+    .unwrap();
+    let mut command = ntnt_run(&script);
+    command
+        .current_dir(directory.path())
+        .env("NTNT_ENV", "production");
+
+    let output = run_cli(command, directory.path());
+
+    assert_eq!(
+        output.stdout.lines().collect::<Vec<_>>(),
+        ["load .env=ok", "NTNT_ENV=production"],
+        "auth started without a session secret: stderr={}",
+        output.stderr
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout={}\nstderr={}",
+        output.stdout,
+        output.stderr
+    );
+    assert!(
+        output
+            .stderr
+            .contains("FATAL: Cannot use default session_secret in production!"),
+        "stderr={}",
+        output.stderr
+    );
 }

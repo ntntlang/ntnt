@@ -3,7 +3,94 @@
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+use std::ffi::{OsStr, OsString};
+use std::sync::{LazyLock, Mutex, OnceLock};
+
+/// Environment variable names are case-insensitive on Windows and exact
+/// elsewhere.
+const ENV_NAMES_IGNORE_CASE: bool = cfg!(windows);
+
+/// Names, never values, of the variables set in the environment that started
+/// ntnt. `load_env` does not replace them: host settings win over dotenv
+/// files, so a development `.env` cannot switch a production host's `NTNT_ENV`.
+struct HostEnvNames {
+    names: HashSet<OsString>,
+    ignore_case: bool,
+}
+
+impl HostEnvNames {
+    fn new(names: impl IntoIterator<Item = OsString>, ignore_case: bool) -> Self {
+        Self {
+            names: names
+                .into_iter()
+                .map(|name| env_name_key(&name, ignore_case))
+                .collect(),
+            ignore_case,
+        }
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.names
+            .contains(&env_name_key(OsStr::new(name), self.ignore_case))
+    }
+}
+
+/// The form under which the platform identifies the variable `name`: the name
+/// itself, or its per-character uppercase where names ignore case.
+fn env_name_key(name: &OsStr, ignore_case: bool) -> OsString {
+    match name.to_str() {
+        Some(text) if ignore_case => text
+            .chars()
+            .map(simple_uppercase)
+            .collect::<String>()
+            .into(),
+        // A name that is not Unicode matches only itself.
+        _ => name.to_os_string(),
+    }
+}
+
+/// `c`'s single-character uppercase, or `c` itself when it has none: names
+/// compare one character at a time, so `ß` does not match `SS`.
+fn simple_uppercase(c: char) -> char {
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(single), None) => single,
+        _ => c,
+    }
+}
+
+static HOST_ENV_NAMES: OnceLock<HostEnvNames> = OnceLock::new();
+
+/// Captures the names of the variables in the process environment on the first
+/// call in this process. `crate::stdlib::capture_host_policy` makes that call
+/// before any application code is evaluated.
+pub(crate) fn capture_host_policy() {
+    host_env_names();
+}
+
+fn host_env_names() -> &'static HostEnvNames {
+    HOST_ENV_NAMES.get_or_init(|| {
+        HostEnvNames::new(
+            std::env::vars_os().map(|(name, _)| name),
+            ENV_NAMES_IGNORE_CASE,
+        )
+    })
+}
+
+/// Warns once per process for each host variable that `load_env` kept. The
+/// warning names the key and never a value.
+fn warn_kept_host_key(key: &str) {
+    static WARNED: LazyLock<Mutex<HashSet<OsString>>> = LazyLock::new(Default::default);
+    let first = WARNED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(env_name_key(OsStr::new(key), ENV_NAMES_IGNORE_CASE));
+    if first {
+        eprintln!(
+            "[WARN] load_env: kept {key} from the environment that started ntnt; .env files do not replace host settings"
+        );
+    }
+}
 
 /// Host runtime-policy keys that application code may not set. The runtime
 /// reads them from the environment that starts ntnt (process execution and
@@ -146,19 +233,29 @@ pub fn init() -> HashMap<String, Value> {
     // the current process environment. Loading `.env` files remains supported
     // in production and is not replaced or restricted by optional `std/secrets`.
     //
-    // Host runtime-policy keys are reserved and skipped with one stderr warning
-    // per key, while the rest of the file still loads: NTNT_PROCESS_ENABLE,
+    // Variables set in the environment that started ntnt win: the file never
+    // replaces them, so a host started with NTNT_ENV=production stays in
+    // production when the file says NTNT_ENV=development. Each kept key gets
+    // one stderr warning per process that names the key, never a value, and
+    // the rest of the file still loads. Keys the host did not set load
+    // normally, and a later load_env call replaces values set by an earlier
+    // one, so loading `.env` then `.env.local` lets the local file win. Host
+    // names match case-insensitively on Windows and exactly elsewhere.
+    //
+    // Host runtime-policy keys are reserved and always skipped with one stderr
+    // warning per key, while the rest of the file still loads: NTNT_PROCESS_ENABLE,
     // NTNT_PROCESS_ALLOW, NTNT_SSRF_PROTECTION, NTNT_ALLOW_LOCALHOST,
     // NTNT_ALLOW_PRIVATE_IPS, NTNT_BLOCKED_HOSTS, NTNT_NET_ALLOW_PRIVATE,
     // NTNT_NETMON_ENABLE, and every NTNT_SECRETS_* key (matched
     // case-insensitively). Set them in the environment that starts ntnt.
-    // NTNT_ENV is not reserved.
+    // NTNT_ENV is not reserved: a file may set it when the host did not.
     // @param path Path to the .env file
     // @returns Result indicating success or file read error
     // @see_also get_env
     // @since v0.2.0
     // @example load_env(".env") ~ "Load default .env file"
     // @example load_env(".env.local") ~ "Load environment-specific file"
+    // @gotcha A .env file never replaces a variable set in the environment that starts ntnt (shell, service unit, container); change host settings there
     // @gotcha Reserved runtime-policy keys in the file are ignored with a warning; process execution and fetch() SSRF policy come from the environment that starts ntnt
     module.insert(
         "load_env".to_string(),
@@ -183,6 +280,10 @@ pub fn init() -> HashMap<String, Value> {
                                         let key = key.trim();
                                         if is_reserved_policy_key(key) {
                                             warn_skipped_policy_key(key);
+                                            continue;
+                                        }
+                                        if host_env_names().contains(key) {
+                                            warn_kept_host_key(key);
                                             continue;
                                         }
                                         std::env::set_var(key, value.trim());
@@ -265,5 +366,40 @@ mod tests {
             std::env::var("STD_ENV_LOAD_ENV_ORDINARY_KEY").as_deref(),
             Ok("loaded")
         );
+    }
+
+    fn host_names(names: &[&str], ignore_case: bool) -> HostEnvNames {
+        HostEnvNames::new(names.iter().map(OsString::from), ignore_case)
+    }
+
+    #[test]
+    fn host_names_match_exactly_where_names_are_case_sensitive() {
+        let host = host_names(&["NTNT_ENV", "Path"], false);
+
+        assert!(host.contains("NTNT_ENV"));
+        assert!(host.contains("Path"));
+        assert!(!host.contains("ntnt_env"));
+        assert!(!host.contains("PATH"));
+        assert!(!host.contains("path"));
+        assert!(!host.contains("NEW_SETTING"));
+    }
+
+    #[test]
+    fn host_names_ignore_case_where_the_platform_does() {
+        let host = host_names(&["NTNT_ENV", "Path", "Äpfel"], true);
+
+        for name in ["NTNT_ENV", "ntnt_env", "Ntnt_Env", "PATH", "path", "äPFEL"] {
+            assert!(host.contains(name), "{name} names a host variable");
+        }
+        assert!(!host.contains("NEW_SETTING"));
+        assert!(!host.contains("PATHS"));
+    }
+
+    #[test]
+    fn host_names_follow_this_platforms_case_rule() {
+        let host = host_names(&["Mixed_Case_Setting"], ENV_NAMES_IGNORE_CASE);
+
+        assert!(host.contains("Mixed_Case_Setting"));
+        assert_eq!(host.contains("MIXED_CASE_SETTING"), cfg!(windows));
     }
 }
