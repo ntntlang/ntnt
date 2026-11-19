@@ -1841,6 +1841,8 @@ let db = unwrap(connect("postgres://app:secret@db/app?sslmode=disable"))
 
 Redis/Valkey URLs (`std/kv` `open()`, `std/jobs` `configure_queue` stores and auth `session_store`) choose the transport by scheme: `redis://` and `valkey://` are plaintext; `rediss://` and `valkeys://` use TLS, verifying the chain against the host CA store (`SSL_CERT_FILE`/`SSL_CERT_DIR` select a private CA) and the certificate against the URL's host name. There is no unverified mode: a `#insecure` fragment is rejected. A TLS URL never falls back to plaintext.
 
+Every Redis/Valkey connection has a deadline. `open()`, job stores and the auth store wait at most 10 seconds for each answer from the server during the TCP connect, the TLS handshake and the setup commands (AUTH, SELECT, CLIENT SETINFO); job workers' own connections use shorter budgets. A server that accepts the connection and then stops answering fails it with an error naming the timeout (`connection timed out: no answer within 10s ...`) instead of hanging it, and a later operation connects afresh. One auth-store operation's slow connect does not hold up the others.
+
 ```ntnt
 let cache = unwrap(open("rediss://:secret@cache.example.com:6380/0"))   // verified TLS
 let local = unwrap(open("redis://localhost:6379"))                       // plaintext

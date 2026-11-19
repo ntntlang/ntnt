@@ -3350,7 +3350,10 @@ pub fn init() -> HashMap<String, Value> {
     // PostgreSQL stores follow the std/db/postgres connect() TLS policy (sslmode
     // honored; without it, verify-full unless every host is local). rediss:// and
     // valkeys:// use TLS verified against the host CA store; redis:// and
-    // valkey:// are plaintext. TLS never falls back to plaintext.
+    // valkey:// are plaintext. TLS never falls back to plaintext. Each Redis or
+    // Valkey store connection waits at most 10 seconds for each answer from the
+    // server (TCP connect, TLS handshake, setup), so a store that stops
+    // answering fails the operation with a timeout instead of hanging it.
     // Built-in presets: "consumer", "admin", "internal", "strict".
     // Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions,
     // refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure,

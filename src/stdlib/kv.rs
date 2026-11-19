@@ -1318,6 +1318,9 @@ pub fn create_kv_module() -> HashMap<String, Value> {
     // (SSL_CERT_FILE / SSL_CERT_DIR select a private CA) and be valid for the
     // URL's host name. There is no unverified mode (#insecure is rejected) and
     // no plaintext fallback. Trust is read once per process.
+    // Connecting waits at most 10 seconds for each answer from the server (the
+    // TCP connect, the TLS handshake and the setup commands), so a server that
+    // stops answering makes open() fail with a timeout instead of hanging.
     // @param url Connection string: file path for SQLite, redis://, rediss://, valkey:// or valkeys:// URL for Redis/Valkey
     // @returns Result containing the KV store handle or an error message
     // @example open("cache.db") ~ "Open SQLite KV store"
