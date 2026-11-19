@@ -1989,7 +1989,8 @@ fn log_throttled(throttle: &Mutex<LogThrottle>, message: std::fmt::Arguments<'_>
 }
 
 // Use a generous startup budget, then probe cheaply and occasionally allow a
-// longer fallback attempt for higher-latency deployments.
+// longer fallback attempt for higher-latency deployments. Each budget bounds
+// the whole connection setup: TCP connect, TLS handshake and setup commands.
 const WORKER_CONNECTION_ATTEMPTS: usize = 2;
 const WORKER_PRIVATE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const WORKER_PRIVATE_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);

@@ -1705,15 +1705,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2694,13 +2685,12 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "0.27.6"
+version = "0.28.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09d8f99a4090c89cc489a94833c901ead69bfbf3877b4867d5482e321ee875bc"
+checksum = "e37ec3fd44bea2ec947ba6cc7634d7999a6590aca7c35827c250bc0de502bda6"
 dependencies = [
  "arc-swap",
  "combine",
- "itertools",
  "itoa",
  "num-bigint",
  "percent-encoding",

@@ -1479,15 +1479,6 @@ fn postgres_url() -> std::result::Result<String, String> {
         .ok_or_else(|| "PostgreSQL not initialized".to_string())
 }
 
-fn redis_connection() -> std::result::Result<redis::Connection, String> {
-    let url = REDIS_URL
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| "Redis not initialized".to_string())?;
-    auth_redis_connection(&url)
-}
-
 fn local_identity_from_postgres_row(
     row: &postgres::Row,
 ) -> std::result::Result<LocalIdentity, String> {
@@ -2289,7 +2280,7 @@ fn consume_local_one_time_token_postgres(
 
 fn store_local_identity_redis(identity: &LocalIdentity) -> std::result::Result<(), String> {
     let identity = normalize_local_identity_for_storage(identity.clone())?;
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     store_local_identity_redis_with_connection(&mut conn, &identity)
 }
 
@@ -2345,7 +2336,7 @@ fn store_local_identity_and_credential_redis(
     let identity = normalize_local_identity_for_storage(identity.clone())?;
     validate_local_credential_secret_for_storage(credential)?;
     validate_local_identity_credential_pair(&identity, credential)?;
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     let identity_key = redis_local_identity_key(&identity.id);
     let lookup_key =
         redis_local_identity_lookup_key(&identity.identifier_kind, &identity.identifier_normalized);
@@ -2411,7 +2402,7 @@ fn store_local_identity_and_credential_redis(
 }
 
 fn get_local_identity_by_id_redis(id: &str) -> std::result::Result<Option<LocalIdentity>, String> {
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     let json: Option<String> = redis::cmd("GET")
         .arg(redis_local_identity_key(id))
         .query(&mut conn)
@@ -2423,7 +2414,7 @@ fn get_local_identity_by_identifier_redis(
     identifier_kind: &str,
     identifier_normalized: &str,
 ) -> std::result::Result<Option<LocalIdentity>, String> {
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     let lookup_key = redis_local_identity_lookup_key(identifier_kind, identifier_normalized);
     let id: Option<String> = redis::cmd("GET")
         .arg(lookup_key)
@@ -2443,7 +2434,7 @@ fn update_local_identity_by_identifier_redis<F>(
 where
     F: FnOnce(&mut LocalIdentity) -> std::result::Result<(), String>,
 {
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     let lookup_key = redis_local_identity_lookup_key(identifier_kind, identifier_normalized);
     let id: Option<String> = redis::cmd("GET")
         .arg(lookup_key)
@@ -2475,7 +2466,7 @@ fn store_local_credential_secret_redis(
             "[auth] local credential must reference an existing local identity".to_string(),
         );
     }
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     redis::cmd("SET")
         .arg(redis_local_credential_key(&credential.local_user_id))
         .arg(local_credential_to_json(credential))
@@ -2486,7 +2477,7 @@ fn store_local_credential_secret_redis(
 fn get_local_credential_secret_redis(
     local_user_id: &str,
 ) -> std::result::Result<Option<LocalCredentialSecret>, String> {
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     let json: Option<String> = redis::cmd("GET")
         .arg(redis_local_credential_key(local_user_id))
         .query(&mut conn)
@@ -2499,7 +2490,7 @@ fn store_local_one_time_token_redis(
     token: &LocalOneTimeToken,
 ) -> std::result::Result<bool, String> {
     validate_local_one_time_token_for_storage(token)?;
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     let now = chrono::Utc::now().timestamp();
     let ttl = token.expires_at.saturating_sub(now);
     if ttl <= 0 {
@@ -2658,7 +2649,7 @@ fn consume_local_password_reset_token_and_store_credential_redis<F>(
 where
     F: FnOnce(&str) -> std::result::Result<LocalCredentialSecret, String>,
 {
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     let token_key =
         redis_local_one_time_token_key(LocalOneTimeTokenPurpose::PasswordReset, selector);
     let token_json: Option<String> = redis::cmd("GET")
@@ -2726,7 +2717,7 @@ fn consume_local_one_time_token_redis(
     token_hash: &str,
     now: i64,
 ) -> std::result::Result<Option<LocalIdentity>, String> {
-    let mut conn = redis_connection()?;
+    let mut conn = redis_store_connection()?;
     let token_key = redis_local_one_time_token_key(purpose, selector);
     let token_json: Option<String> = redis::cmd("GET")
         .arg(&token_key)
@@ -2927,7 +2918,7 @@ mod tests {
             .or_else(|_| std::env::var("REDIS_URL"))
             .unwrap_or_else(|_| "redis://localhost:6379".to_string());
         *REDIS_URL.lock().unwrap() = Some(url);
-        match redis_connection() {
+        match redis_store_connection() {
             Ok(mut conn) => {
                 let ping = redis::cmd("PING").query::<String>(&mut conn);
                 if let Err(err) = ping {

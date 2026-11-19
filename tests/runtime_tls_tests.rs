@@ -817,6 +817,71 @@ fn kv_redis_stays_plaintext_and_rediss_never_falls_back() {
     assert_eq!(next(&seen), RedisSeen::TlsRecordOnPlaintext);
 }
 
+/// What a TLS Redis stand-in that never answers a command saw on one connection.
+#[derive(Debug, PartialEq, Eq)]
+enum SetupStall {
+    /// TLS completed and this command (first word) arrived; it got no answer.
+    Unanswered(String),
+    /// The client then closed the connection: it gave up on the attempt.
+    ClosedByClient,
+    /// The TLS handshake did not complete.
+    HandshakeFailed,
+}
+
+/// A TLS Redis/Valkey stand-in that completes the handshake, reads the first
+/// command (a connection setup command, sent before any of the script's own)
+/// and never answers it.
+fn setup_stalling_redis_server(
+    config: Arc<rustls::ServerConfig>,
+) -> (u16, mpsc::Receiver<SetupStall>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (report, seen) = mpsc::channel();
+    std::thread::spawn(move || {
+        for client in listener.incoming() {
+            let Ok(client) = client else { continue };
+            let (config, report) = (config.clone(), report.clone());
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                let connection = rustls::ServerConnection::new(config).unwrap();
+                let mut tls = std::io::BufReader::new(rustls::StreamOwned::new(connection, client));
+                // `*<count>`, then `$<length>` and the command's first word.
+                let mut lines = [String::new(), String::new(), String::new()];
+                for line in &mut lines {
+                    if !matches!(tls.read_line(line), Ok(n) if n > 0) {
+                        let _ = report.send(SetupStall::HandshakeFailed);
+                        return;
+                    }
+                }
+                let _ = report.send(SetupStall::Unanswered(lines[2].trim_end().to_string()));
+                let mut sink = [0u8; 4096];
+                while matches!(tls.read(&mut sink), Ok(n) if n > 0) {}
+                let _ = report.send(SetupStall::ClosedByClient);
+            });
+        }
+    });
+    (port, seen)
+}
+
+/// `open()` sets no deadline of its own, so it gets the 10-second default: a
+/// server that completes TLS and then never answers fails the open instead of
+/// hanging it.
+#[test]
+fn kv_open_gives_up_when_setup_stalls_after_the_tls_handshake() {
+    let trusted = pki(&["127.0.0.1"]);
+    let (port, seen) = setup_stalling_redis_server(trusted.server.clone());
+    let url = format!("rediss://127.0.0.1:{port}/0");
+    let output = run_script(KV_SCRIPT, &trusted.ca, &[("NTNT_TLS_TEST_KV", url)]);
+    assert!(output.contains("Failed to connect to Redis"), "{output}");
+    assert!(
+        output.contains("timed out: no answer within 10s"),
+        "{output}"
+    );
+    assert!(!output.contains("read:"), "{output}");
+    assert_eq!(next(&seen), SetupStall::Unanswered("CLIENT".into()));
+    assert_eq!(next(&seen), SetupStall::ClosedByClient);
+}
+
 #[test]
 fn auth_session_store_accepts_rediss_and_valkeys() {
     for url in [

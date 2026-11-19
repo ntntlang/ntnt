@@ -689,17 +689,17 @@ impl SQLiteKV {
 // ============================================================================
 
 impl RedisKV {
-    /// Create a new Redis/Valkey connection.
+    /// Create a new Redis/Valkey connection within the default connect deadline.
     pub fn new(url: &str) -> Result<Self> {
-        Self::connect(url, None)
+        Self::connect(url, crate::stdlib::redis_tls::default_connect_timeout())
     }
 
-    /// Create a connection with a bounded TCP connect attempt.
+    /// Create a connection that must be ready (TCP, TLS and setup) within `timeout`.
     pub(crate) fn new_with_timeout(url: &str, timeout: std::time::Duration) -> Result<Self> {
-        Self::connect(url, Some(timeout))
+        Self::connect(url, timeout)
     }
 
-    fn connect(url: &str, timeout: Option<std::time::Duration>) -> Result<Self> {
+    fn connect(url: &str, timeout: std::time::Duration) -> Result<Self> {
         // valkey:// and valkeys:// map to the redis crate's redis:// and rediss://;
         // TLS URLs verify the server against the host CA store.
         let client = crate::stdlib::redis_tls::client(url).map_err(|e| {
@@ -2713,6 +2713,63 @@ mod tests {
             } if variant == "Err" => values.into_iter().next().unwrap_or(Value::Unit),
             other => panic!("Expected Err result, got {:?}", other),
         }
+    }
+
+    /// Run `open` on another thread and return its error; a missing deadline
+    /// fails the test at the hang guard instead of hanging it.
+    fn open_error(open: impl FnOnce() -> Result<()> + Send + 'static) -> String {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(match open() {
+                Ok(()) => "opened a store on a stand-in that never answers".to_string(),
+                Err(error) => error.to_string(),
+            });
+        });
+        result
+            .recv_timeout(crate::stdlib::redis_test_server::HANG_GUARD)
+            .unwrap_or_else(|_| panic!("still connecting at the hang guard"))
+    }
+
+    #[test]
+    fn open_gives_up_on_a_stalled_tls_handshake_at_the_default_deadline() {
+        use crate::stdlib::redis_test_server::{self as stand_in, Event, Plan};
+        let server = stand_in::start(vec![Plan::StallHandshake], None);
+        let url = format!("rediss://127.0.0.1:{}/0", server.port);
+        // The default is 10 seconds; the stand-in never answers, so 1 is hit too.
+        let error = open_error(move || {
+            crate::stdlib::redis_tls::with_default_connect_timeout(Duration::from_secs(1), || {
+                open_kv(&url).map(|_| ())
+            })
+        });
+        let event = server.next();
+        assert!(
+            matches!(event, Event::Stalled { first: 0x16, .. }),
+            "{event:?}"
+        );
+        assert!(error.contains("Failed to connect to Redis"), "{error}");
+        assert!(error.contains("timed out: no answer within 1s"), "{error}");
+        let event = server.next();
+        assert!(matches!(event, Event::ClosedByClient { .. }), "{event:?}");
+    }
+
+    #[test]
+    fn owned_connections_bound_setup_by_the_callers_deadline() {
+        use crate::stdlib::redis_test_server::{self as stand_in, Event, Plan};
+        let server = stand_in::start(vec![Plan::StallSetup], None);
+        let url = format!("redis://127.0.0.1:{}/0", server.port);
+        let error =
+            open_error(move || open_owned_kv(&url, Duration::from_millis(1500)).map(|_| ()));
+        let event = server.next();
+        assert!(
+            matches!(event, Event::Stalled { first: b'*', .. }),
+            "{event:?}"
+        );
+        assert!(
+            error.contains("timed out: no answer within 1.5s"),
+            "{error}"
+        );
+        let event = server.next();
+        assert!(matches!(event, Event::ClosedByClient { .. }), "{event:?}");
     }
 
     #[test]
