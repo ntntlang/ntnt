@@ -11,12 +11,12 @@ description = "Runtime configuration, environment variables, and CLI commands fo
 # =============================================================================
 
 [env_vars]
-description = "Environment variables that control NTNT runtime behavior. Host security policy (`NTNT_PROCESS_ENABLE`, `NTNT_PROCESS_ALLOW`, the `fetch()` SSRF settings `NTNT_SSRF_PROTECTION`, `NTNT_ALLOW_LOCALHOST`, `NTNT_ALLOW_PRIVATE_IPS` and `NTNT_BLOCKED_HOSTS`, `NTNT_NET_ALLOW_PRIVATE`, `NTNT_NETMON_ENABLE` and every `NTNT_SECRETS_*` key) must be set in the environment that starts ntnt: process execution and `fetch()` SSRF policy are read before application code runs, and `load_env` skips these keys with a warning."
+description = "Environment variables that control NTNT runtime behavior. Host security policy (`NTNT_PROCESS_ENABLE`, `NTNT_PROCESS_ALLOW`, the `fetch()` SSRF settings `NTNT_SSRF_PROTECTION`, `NTNT_ALLOW_LOCALHOST`, `NTNT_ALLOW_PRIVATE_IPS` and `NTNT_BLOCKED_HOSTS`, `NTNT_NET_ALLOW_PRIVATE`, `NTNT_NETMON_ENABLE` and every `NTNT_SECRETS_*` key) must be set in the environment that starts ntnt: process execution and `fetch()` SSRF policy are read before application code runs, and `load_env` skips these keys with a warning. `load_env` never replaces any variable that was set when ntnt started (host values win, with one warning per kept key that never shows a value), so a `.env` file cannot switch a production host to development."
 
 [env_vars.NTNT_ENV]
 values = ["development", "production", "prod"]
 default = "development (when unset)"
-description = "Controls runtime mode. Production mode disables hot-reload for better performance."
+description = "Controls runtime mode. Production mode disables hot-reload for better performance. A value set in the environment that starts ntnt wins: `load_env` does not replace it, so a `.env` file containing `NTNT_ENV=development` leaves a production host in production. A `.env` file can still select the mode when the host did not set it."
 example = "NTNT_ENV=production ntnt run server.tnt"
 affects = ["hot-reload"]
 

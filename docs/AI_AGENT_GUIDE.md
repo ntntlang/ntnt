@@ -963,7 +963,7 @@ server 8080 {
 | `NTNT_PROCESS_ALLOW` | platform-delimited paths | Optionally restricts `std/process` to exact canonical executable paths |
 | `NTNT_WORKERS` | `1` (dev) / CPU cores (prod) | Number of interpreter worker threads. Auto-scales in production. |
 
-Host security policy comes from the environment that starts `ntnt`, read before application code runs: `NTNT_PROCESS_ENABLE`, `NTNT_PROCESS_ALLOW`, the `fetch()` SSRF settings (`NTNT_SSRF_PROTECTION`, `NTNT_ALLOW_LOCALHOST`, `NTNT_ALLOW_PRIVATE_IPS`, `NTNT_BLOCKED_HOSTS`), `NTNT_NET_ALLOW_PRIVATE`, `NTNT_NETMON_ENABLE` and every `NTNT_SECRETS_*` key. `load_env` skips these keys with a warning, so put them in the shell, service unit or container environment, not in `.env`.
+Host security policy comes from the environment that starts `ntnt`, read before application code runs: `NTNT_PROCESS_ENABLE`, `NTNT_PROCESS_ALLOW`, the `fetch()` SSRF settings (`NTNT_SSRF_PROTECTION`, `NTNT_ALLOW_LOCALHOST`, `NTNT_ALLOW_PRIVATE_IPS`, `NTNT_BLOCKED_HOSTS`), `NTNT_NET_ALLOW_PRIVATE`, `NTNT_NETMON_ENABLE` and every `NTNT_SECRETS_*` key. `load_env` skips these keys with a warning, so put them in the shell, service unit or container environment, not in `.env`. `load_env` also never replaces a variable that was set when `ntnt` started: a host started with `NTNT_ENV=production` stays in production even if the app loads a `.env` containing `NTNT_ENV=development`.
 
 ```bash
 # Development (default) - hot-reload enabled, single worker
@@ -3578,7 +3578,15 @@ let database_url = get_env("DATABASE_URL") ?? "sqlite:./app.db"
 
 `std/env` is unchanged in v0.5.1. `get_env`, `load_env`, and `.env` files continue to work when `NTNT_ENV=production`. The optional `std/secrets` subsystem does not intercept, migrate, disable, or reinterpret those values.
 
-`load_env` does not change host security policy. It skips `NTNT_PROCESS_ENABLE`, `NTNT_PROCESS_ALLOW`, `NTNT_SSRF_PROTECTION`, `NTNT_ALLOW_LOCALHOST`, `NTNT_ALLOW_PRIVATE_IPS`, `NTNT_BLOCKED_HOSTS`, `NTNT_NET_ALLOW_PRIVATE`, `NTNT_NETMON_ENABLE` and every `NTNT_SECRETS_*` key (one stderr warning per key) and loads the rest of the file. `NTNT_ENV` still loads; selecting production that way can tighten `fetch()` loopback blocking but never relaxes the policy the host started with.
+Host settings win over `.env` files. `load_env` never replaces a variable that was set in the environment that started `ntnt` (shell, service unit, container): with `NTNT_ENV=production` or `DATABASE_URL` set by the host, a `.env` containing `NTNT_ENV=development` or a development database URL leaves them unchanged. Each kept key gets one stderr warning that names the key and never a value:
+
+```text
+[WARN] load_env: kept NTNT_ENV from the environment that started ntnt; .env files do not replace host settings
+```
+
+The rest of the file still loads. Keys the host did not set are loaded, and a later `load_env` call replaces values that an earlier call set, so `load_env(".env")` followed by `load_env(".env.local")` lets the local file win. On Windows, where variable names are case-insensitive, `app_setting` in a `.env` file names the host's `APP_SETTING`; on other platforms names match exactly.
+
+`load_env` does not change host security policy. It skips `NTNT_PROCESS_ENABLE`, `NTNT_PROCESS_ALLOW`, `NTNT_SSRF_PROTECTION`, `NTNT_ALLOW_LOCALHOST`, `NTNT_ALLOW_PRIVATE_IPS`, `NTNT_BLOCKED_HOSTS`, `NTNT_NET_ALLOW_PRIVATE`, `NTNT_NETMON_ENABLE` and every `NTNT_SECRETS_*` key (one stderr warning per key) even when the host did not set them, and loads the rest of the file. `NTNT_ENV` loads only when the host did not set it; selecting production that way can tighten `fetch()` loopback blocking but never relaxes the policy the host started with.
 
 Use `std/secrets` only when the application deliberately wants opaque values with restricted sinks:
 
