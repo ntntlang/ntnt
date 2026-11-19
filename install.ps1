@@ -48,9 +48,9 @@ function Get-LatestVersion {
 }
 
 # Return the SHA-256 that a release .sha256 sidecar records for $archiveName.
-# The release workflow writes "<hex>  <name>" with CRLF. Accept LF or no line
-# end, a byte order mark, either hex case and a "*" binary-mode marker, but only
-# a single entry that names this exact archive.
+# The release workflow writes "<hex>  <name>" with LF; releases up to v0.6.2 used
+# CRLF. Accept either or no line end, a byte order mark, either hex case and a
+# "*" binary-mode marker, but only a single entry that names this exact archive.
 function Read-ReleaseChecksum($checksumFile, $archiveName) {
     # ReadAllText drops a byte order mark.
     $text = [System.IO.File]::ReadAllText($checksumFile).Replace("`r", "").Trim()
