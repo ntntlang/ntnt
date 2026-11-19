@@ -73,6 +73,23 @@ newlines. Relative links, fragments and `to_html()` are unchanged.
   Before, `std/kv` treated a `rediss://` URL as a SQLite file path, and jobs and auth
   rejected it.
 
+## SMTP fixes in `std/email`
+
+`std/email` now uses `lettre` 0.11.24, which fixes six advisories in its SMTP
+client:
+
+- [RUSTSEC-2026-0560](https://rustsec.org/advisories/RUSTSEC-2026-0560): STARTTLS response injection let a
+  man-in-the-middle forge SMTP replies. Only STARTTLS connections are affected.
+- [RUSTSEC-2026-0561](https://rustsec.org/advisories/RUSTSEC-2026-0561): message content with a bare LF or CR
+  was not dot-stuffed, allowing SMTP command injection.
+- [RUSTSEC-2026-0563](https://rustsec.org/advisories/RUSTSEC-2026-0563): mail for an address with a quoted local
+  part could be sent to a different address.
+- [RUSTSEC-2026-0565](https://rustsec.org/advisories/RUSTSEC-2026-0565): a malicious server could exhaust memory
+  with an unbounded reply.
+- [RUSTSEC-2026-0562](https://rustsec.org/advisories/RUSTSEC-2026-0562) and
+  [RUSTSEC-2026-0564](https://rustsec.org/advisories/RUSTSEC-2026-0564): panics on an `EHLO` reply line of only
+  white space and on a display name containing CR or LF.
+
 ## Other fixes
 
 - The warning for JavaScript-style `${...}` interpolation in string literals scans

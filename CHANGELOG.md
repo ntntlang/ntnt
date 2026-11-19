@@ -19,6 +19,10 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   DNS resolution, even when private or localhost addresses are allowed.
 - `to_html_safe()` drops links and images whose scheme is not http, https or mailto,
   and ignores heading attributes.
+- `std/email`: `lettre` 0.11.24 fixes six SMTP advisories (RUSTSEC-2026-0560 to
+  RUSTSEC-2026-0565): STARTTLS response injection, SMTP command injection through
+  missing dot-stuffing, delivery to a different address for quoted local parts,
+  unbounded reply buffering, and two panics.
 - `std/db/postgres` and the std/auth store use TLS for PostgreSQL: `sslmode`
   `verify-full`, `verify-ca`, `require` and `disable` are honoured, `prefer` and
   `allow` are rejected, and a connection string without `sslmode` uses verified TLS
