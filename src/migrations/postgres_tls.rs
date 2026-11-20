@@ -21,6 +21,7 @@ use std::future::Future;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -86,6 +87,9 @@ fn config_error(message: &str) -> Diagnostic {
 }
 fn invalid_secret() -> Diagnostic {
     config_error("Invalid connection string; details suppressed.")
+}
+fn roots_timed_out() -> Diagnostic {
+    config_error("Reading sslrootcert or the host CA store did not finish in time.")
 }
 fn verify_ca_needs_file() -> Diagnostic {
     config_error(
@@ -415,22 +419,27 @@ impl Transport {
         let roots = match loaded {
             Ok(Ok(result)) => result?,
             Ok(Err(_)) => return Err(Diagnostic::new("DB_TLS", "TLS configuration failed.")),
-            Err(_) => {
-                return Err(config_error(
-                    "Reading sslrootcert or the host CA store did not finish in time.",
-                ))
-            }
+            Err(_) => return Err(roots_timed_out()),
         };
         self.build(roots, description)
     }
-    /// The same connector, loading trust on the calling thread, for synchronous
-    /// clients that run outside any Tokio runtime. `None` for plaintext.
+    /// The same connector for synchronous clients that run outside any Tokio
+    /// runtime. Trust loads on a helper thread under the same deadline; a read
+    /// that stalls is abandoned, never joined. `None` for plaintext.
     pub(crate) fn connector_blocking(&self) -> Result<Option<MakeRustls>> {
         if self.mode == Mode::Disable {
             return Ok(None);
         }
         let description = json!({"sslmode": self.mode.as_str(), "roots": null});
-        let roots = load_roots(self.roots.clone())?;
+        let source = self.roots.clone();
+        let roots = match with_deadline(ROOTS_TIMEOUT, move || load_roots(source)) {
+            Ok(result) => result?,
+            Err(RecvTimeoutError::Timeout) => return Err(roots_timed_out()),
+            // The loader died without a result (or its thread could not start).
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(Diagnostic::new("DB_TLS", "TLS configuration failed."))
+            }
+        };
         Ok(self.build(roots, description)?.0)
     }
     fn build(
@@ -479,6 +488,23 @@ impl Transport {
             description,
         ))
     }
+}
+
+/// Run `work` on its own thread and wait at most `deadline` for its result. On
+/// timeout the worker is abandoned, never joined, so a stalled filesystem read
+/// cannot hold up the caller. `Disconnected` means it ended without a result.
+fn with_deadline<T: Send + 'static>(
+    deadline: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> std::result::Result<T, RecvTimeoutError> {
+    let (done, result) = std::sync::mpsc::channel();
+    // A thread that cannot start drops `done`, which reads as Disconnected.
+    let _ = std::thread::Builder::new()
+        .name("ntnt-tls-roots".into())
+        .spawn(move || {
+            let _ = done.send(work());
+        });
+    result.recv_timeout(deadline)
 }
 
 /// Read an `sslrootcert` PEM file: bounded, regular file, at least one usable CA.
@@ -1159,6 +1185,48 @@ mod tests {
             .expect("loading a FIFO as sslrootcert blocked")
             .expect("a FIFO is not a usable root file");
         assert_eq!(error.code, "DB_CONNECTION_CONFIG");
+        assert!(error.message.contains("readable PEM file"), "{error}");
+    }
+
+    #[test]
+    fn with_deadline_returns_the_result_or_abandons_a_stalled_worker() {
+        assert_eq!(with_deadline(HANG_GUARD, || 7), Ok(7));
+        // The work blocks until the test releases it, which happens only after
+        // with_deadline has returned, so only the deadline can end the wait.
+        // Run without one, the work would give up at its own hang guard and
+        // return a sentinel, failing the assertion instead of hanging the test.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let outcome = with_deadline(Duration::from_millis(10), move || {
+            match released.recv_timeout(HANG_GUARD) {
+                Ok(()) => "released",
+                Err(_) => "hang guard",
+            }
+        });
+        assert_eq!(outcome, Err(RecvTimeoutError::Timeout));
+        let _ = release.send(());
+        // A worker that ends without a result is reported, not waited for.
+        let died = with_deadline(HANG_GUARD, || -> u8 { panic!("loader failed") });
+        assert_eq!(died, Err(RecvTimeoutError::Disconnected));
+    }
+
+    #[test]
+    fn connector_blocking_passes_the_trust_read_result_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let key = rcgen::KeyPair::generate().unwrap();
+        std::fs::write(&ca, params.self_signed(&key).unwrap().pem()).unwrap();
+        let transport = |path: PathBuf| Transport {
+            mode: Mode::VerifyFull,
+            roots: Some(RootSource::File(path)),
+        };
+        assert!(transport(ca).connector_blocking().unwrap().is_some());
+        let error = transport(dir.path().join("missing.pem"))
+            .connector_blocking()
+            .err()
+            .expect("a missing root file is rejected");
+        assert_eq!(error.code, "DB_CONNECTION_CONFIG", "{error}");
         assert!(error.message.contains("readable PEM file"), "{error}");
     }
 

@@ -207,7 +207,8 @@ impl Target {
             .map(|(connector, _)| connector.map(|tls| tls.with_handshake_timeout(handshake)))
             .map_err(|diagnostic| diagnostic.message)
     }
-    /// The same connector, loading trust on the calling thread.
+    /// The same connector for a caller outside any Tokio runtime (the auth
+    /// store); trust loads under the same deadline.
     pub(crate) fn connector_blocking(
         &self,
         handshake: Duration,
