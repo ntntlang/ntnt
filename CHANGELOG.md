@@ -28,8 +28,15 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   `allow` are rejected, and a connection string without `sslmode` uses verified TLS
   unless every host is local (loopback, a Unix socket, or a single-label name such
   as a Docker service) and it names no CA with `sslrootcert`.
+- PostgreSQL TLS handshakes are bounded by `connect_timeout` (10 seconds when
+  unset), and a target given only as `hostaddr=` is verified against its IP
+  address.
 - `std/kv`, `std/jobs` stores and the std/auth session store accept `rediss://` and
   `valkeys://` with verified TLS.
+- Every Redis/Valkey connection has a deadline covering the TCP connect, TLS
+  handshake and setup commands (10 seconds for `std/kv` `open()`, job stores and
+  the auth session store); one auth-store operation's connect no longer holds up
+  the others.
 - The `${...}` interpolation warning scans each string literal in one bounded pass.
 - `install.ps1` verifies the release checksum before extracting and keeps the
   existing `ntnt.exe` until the new one runs; it no longer builds from source when

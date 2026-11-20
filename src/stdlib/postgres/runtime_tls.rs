@@ -8,9 +8,9 @@
 //! plaintext. Unlike `ntnt db`, a missing `sslmode` is allowed: the connection is
 //! plaintext when every host is local (a loopback address, `localhost`, a Unix
 //! socket or a single-label name such as a Docker service) and verified TLS
-//! (`verify-full` against the host CA store) otherwise; an `sslrootcert` alone also
-//! selects `verify-full`. A TLS mode never falls back to plaintext, and errors never
-//! echo the connection string.
+//! (`verify-full` against the host CA store) otherwise; an `sslrootcert` without
+//! `sslmode` selects `verify-full`, local hosts included. A TLS mode never falls
+//! back to plaintext, and errors never echo the connection string.
 //!
 //! A server that accepted TLS must finish the handshake within `connect_timeout`
 //! (10 seconds when unset), or the connection is closed with an error. A target

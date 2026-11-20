@@ -1288,8 +1288,9 @@ pub fn init() -> HashMap<String, Value> {
     // can fall back to plaintext. Without sslmode, a connection is plaintext
     // only when every host is local (127.0.0.1, ::1, localhost, a Unix socket,
     // or a single-label name such as a Docker service "db"); otherwise it uses
-    // verify-full. sslrootcert alone also means verify-full. TLS never falls
-    // back to plaintext, and the pool identity includes the TLS policy.
+    // verify-full. sslrootcert without sslmode means verify-full, local hosts
+    // included. TLS never falls back to plaintext, and the pool identity
+    // includes the TLS policy.
     // Trust is read when a pool is created; restart after changing it. A
     // server that accepts TLS must finish the handshake within connect_timeout
     // (10 seconds when unset), or the connection is closed with an Err. With

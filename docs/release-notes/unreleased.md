@@ -68,12 +68,22 @@ newlines. Relative links, fragments and `to_html()` are unchanged.
   Unix socket, which PostgreSQL serves in plaintext only, it is an error. A TLS
   connection never falls back to plaintext, and errors never include the
   connection string. Each TLS policy has its own connection pool, and trust roots
-  are read once per pool: restart after rotating a CA.
+  are read once per pool: restart after rotating a CA. A server that accepts TLS
+  must finish the handshake within the connection string's `connect_timeout`, or
+  10 seconds when it sets none; otherwise the connection is closed with an error.
+  A target given only as `hostaddr=` is named by that address, so `verify-full`
+  needs a certificate for the IP address (libpq instead refuses `verify-full`
+  without a host name), and such targets now also work in plaintext through the
+  connection pool, where they used to fail on Unix.
 - **Redis and Valkey** (`std/kv`, `std/jobs` stores and the std/auth session store):
   `rediss://` and `valkeys://` connect over TLS and verify the certificate chain and
   host name against the host CA store. `redis://` and `valkey://` stay plaintext.
   Before, `std/kv` treated a `rediss://` URL as a SQLite file path, and jobs and auth
-  rejected it.
+  rejected it. Every connection now has a deadline: `std/kv` `open()`, job stores
+  and the auth session store wait at most 10 seconds for each answer during the TCP
+  connect, the TLS handshake and the setup commands, so a server that stops
+  answering is an error instead of a hang. One auth-store operation's slow connect
+  no longer holds up the others.
 
 ## SMTP fixes in `std/email`
 
