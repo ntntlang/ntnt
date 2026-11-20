@@ -1,4 +1,6 @@
-//! TLS transport for `ntnt db` PostgreSQL sessions.
+//! TLS transport for PostgreSQL sessions: `ntnt db`, and through
+//! `crate::stdlib::postgres::runtime_tls` the `std/db/postgres` pools and the
+//! auth store.
 //!
 //! tokio-postgres accepts only `sslmode=disable|prefer|require` and leaves
 //! certificate policy to its connector. This module reads libpq's `sslmode`
@@ -19,6 +21,7 @@ use std::future::Future;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -32,6 +35,12 @@ const MAX_ROOTS_BYTES: u64 = 1_048_576;
 /// Reading trust anchors runs off the runtime thread under this deadline, so a
 /// slow filesystem cannot stall a command beyond its other bounds.
 const ROOTS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Default bound on each TLS handshake after the server accepted TLS (answered
+/// the SSLRequest with `S`), so a server that stops the exchange is an error,
+/// not a hang. Runtime connections use the connection string's
+/// `connect_timeout` instead when it is set. `ntnt db` bounds its whole connect
+/// at 5 seconds, which always ends first, so this never decides its outcome.
+pub(crate) const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The transport requested by the connection secret's `sslmode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +86,10 @@ fn config_error(message: &str) -> Diagnostic {
     Diagnostic::new("DB_CONNECTION_CONFIG", message)
 }
 fn invalid_secret() -> Diagnostic {
-    config_error("Invalid connection secret; details suppressed.")
+    config_error("Invalid connection string; details suppressed.")
+}
+fn roots_timed_out() -> Diagnostic {
+    config_error("Reading sslrootcert or the host CA store did not finish in time.")
 }
 fn verify_ca_needs_file() -> Diagnostic {
     config_error(
@@ -91,16 +103,33 @@ type Split = (Zeroizing<String>, Vec<(String, String)>);
 /// Split `sslmode`/`sslrootcert` out of a libpq key/value string or a
 /// `postgres://` URL. Returns the remaining connection string for tokio-postgres
 /// (still secret: it holds the password) and the requested transport. Errors
-/// never echo connection-string contents.
+/// never echo connection-string contents. `ntnt db` requires an explicit sslmode.
 pub(crate) fn split(secret: &str) -> Result<(Zeroizing<String>, Transport)> {
-    let (rest, tls) = match ["postgresql://", "postgres://"]
+    let (rest, tls) = split_tls_keywords(secret)?;
+    Ok((rest, transport(tls, None)?))
+}
+
+/// `split` for runtime connections, where `sslmode` may be absent. Then
+/// `sslrootcert` (a CA the caller wants checked) selects verify-full, and
+/// otherwise `absent` chooses the mode from the remaining connection string.
+/// An explicit sslmode is interpreted exactly as by `split`.
+pub(crate) fn split_with_default(
+    secret: &str,
+    absent: impl Fn(&str) -> Result<Mode>,
+) -> Result<(Zeroizing<String>, Transport)> {
+    let (rest, tls) = split_tls_keywords(secret)?;
+    let transport = transport(tls, Some(&|| absent(rest.as_str())))?;
+    Ok((rest, transport))
+}
+
+fn split_tls_keywords(secret: &str) -> Result<Split> {
+    match ["postgresql://", "postgres://"]
         .iter()
         .find(|prefix| secret.starts_with(**prefix))
     {
-        Some(prefix) => split_url(secret, prefix.len())?,
-        None => split_keywords(secret)?,
-    };
-    Ok((rest, transport(tls)?))
+        Some(prefix) => split_url(secret, prefix.len()),
+        None => split_keywords(secret),
+    }
 }
 
 /// TLS keywords handled here rather than by tokio-postgres. `sslnegotiation` is
@@ -262,9 +291,12 @@ fn percent_decode(s: &str) -> Result<String> {
     String::from_utf8(out).map_err(|_| invalid_secret())
 }
 
-/// Interpret the TLS keywords. `sslmode` must be explicit; `prefer`/`allow`
-/// are rejected because they can fall back to plaintext.
-fn transport(tls: Vec<(String, String)>) -> Result<Transport> {
+/// Interpret the TLS keywords. Without `absent`, `sslmode` must be explicit;
+/// `prefer`/`allow` are always rejected because they can fall back to plaintext.
+fn transport(
+    tls: Vec<(String, String)>,
+    absent: Option<&dyn Fn() -> Result<Mode>>,
+) -> Result<Transport> {
     let mut mode: Option<String> = None;
     let mut roots: Option<String> = None;
     for (key, value) in tls {
@@ -273,13 +305,13 @@ fn transport(tls: Vec<(String, String)>) -> Result<Transport> {
             "sslrootcert" => &mut roots,
             _ => {
                 return Err(config_error(
-                    "Unsupported TLS keyword in the connection secret. ntnt db supports sslmode and sslrootcert; client certificates, CRLs and protocol-version keywords are not supported.",
+                    "Unsupported TLS keyword in the connection string. Only sslmode and sslrootcert are supported; client certificates, CRLs and protocol-version keywords are not.",
                 ))
             }
         };
         if slot.replace(value).is_some() {
             return Err(config_error(
-                "sslmode or sslrootcert appears more than once in the connection secret.",
+                "sslmode or sslrootcert appears more than once in the connection string.",
             ));
         }
     }
@@ -298,11 +330,17 @@ fn transport(tls: Vec<(String, String)>) -> Result<Transport> {
                 "Unknown sslmode. Use verify-full, verify-ca, require, or disable.",
             ))
         }
-        None => {
-            return Err(config_error(
-                "Set sslmode explicitly: verify-full (recommended), verify-ca, require, or disable on a trusted local transport.",
-            ))
-        }
+        None => match absent {
+            // Like libpq's `sslrootcert=system`, a named CA means verified TLS:
+            // it must never be ignored in favor of plaintext.
+            Some(_) if roots.is_some() => Mode::VerifyFull,
+            Some(default) => default()?,
+            None => {
+                return Err(config_error(
+                    "Set sslmode explicitly: verify-full (recommended), verify-ca, require, or disable on a trusted local transport.",
+                ))
+            }
+        },
     };
     let roots = match (mode, roots) {
         (Mode::VerifyFull, None) => Some(RootSource::System),
@@ -330,41 +368,85 @@ fn transport(tls: Vec<(String, String)>) -> Result<Transport> {
     Ok(Transport { mode, roots })
 }
 
+/// Trust anchors and, for an sslrootcert file, the SHA-256 of its bytes.
+type LoadedRoots = Option<(Arc<RootCertStore>, Option<String>)>;
+
+fn load_roots(source: Option<RootSource>) -> Result<LoadedRoots> {
+    match source {
+        None => Ok(None),
+        Some(RootSource::System) => crate::stdlib::tls_trust::host_trust()
+            .map(|trust| Some((trust.roots.clone(), None)))
+            .map_err(|message| Diagnostic::new("DB_TLS", &message)),
+        Some(RootSource::File(path)) => {
+            file_roots(&path).map(|(store, sha256)| Some((Arc::new(store), Some(sha256))))
+        }
+    }
+}
+
 impl Transport {
     pub(crate) fn mode(&self) -> Mode {
         self.mode
+    }
+    /// The mode and trust source, e.g. `verify-full roots=system`: what makes two
+    /// connections to the same server equivalent. Contains no secret.
+    pub(crate) fn policy(&self) -> String {
+        match &self.roots {
+            None => self.mode.as_str().to_string(),
+            Some(RootSource::System) => format!("{} roots=system", self.mode.as_str()),
+            Some(RootSource::File(path)) => {
+                format!("{} roots=file:{}", self.mode.as_str(), path.display())
+            }
+        }
+    }
+    /// Whether this transport is TLS (every mode except disable).
+    pub(crate) fn is_tls(&self) -> bool {
+        self.mode != Mode::Disable
     }
     /// Load trust anchors and build the connector, or `None` for plaintext.
     /// Also returns the transport description that identity reports bind.
     /// Filesystem and host-store reads run off the runtime thread with a deadline.
     pub(crate) async fn connector(&self) -> Result<(Option<MakeRustls>, Value)> {
-        let mut description = json!({"sslmode": self.mode.as_str(), "roots": null});
+        let description = json!({"sslmode": self.mode.as_str(), "roots": null});
         if self.mode == Mode::Disable {
             return Ok((None, description));
         }
         let source = self.roots.clone();
         let loaded = tokio::time::timeout(
             ROOTS_TIMEOUT,
-            tokio::task::spawn_blocking(move || match source {
-                None => Ok(None),
-                Some(RootSource::System) => crate::stdlib::tls_trust::host_trust()
-                    .map(|trust| Some((trust.roots.clone(), None)))
-                    .map_err(|message| Diagnostic::new("DB_TLS", &message)),
-                Some(RootSource::File(path)) => {
-                    file_roots(&path).map(|(store, sha256)| Some((Arc::new(store), Some(sha256))))
-                }
-            }),
+            tokio::task::spawn_blocking(move || load_roots(source)),
         )
         .await;
         let roots = match loaded {
             Ok(Ok(result)) => result?,
             Ok(Err(_)) => return Err(Diagnostic::new("DB_TLS", "TLS configuration failed.")),
-            Err(_) => {
-                return Err(config_error(
-                    "Reading sslrootcert or the host CA store did not finish in time.",
-                ))
+            Err(_) => return Err(roots_timed_out()),
+        };
+        self.build(roots, description)
+    }
+    /// The same connector for synchronous clients that run outside any Tokio
+    /// runtime. Trust loads on a helper thread under the same deadline; a read
+    /// that stalls is abandoned, never joined. `None` for plaintext.
+    pub(crate) fn connector_blocking(&self) -> Result<Option<MakeRustls>> {
+        if self.mode == Mode::Disable {
+            return Ok(None);
+        }
+        let description = json!({"sslmode": self.mode.as_str(), "roots": null});
+        let source = self.roots.clone();
+        let roots = match with_deadline(ROOTS_TIMEOUT, move || load_roots(source)) {
+            Ok(result) => result?,
+            Err(RecvTimeoutError::Timeout) => return Err(roots_timed_out()),
+            // The loader died without a result (or its thread could not start).
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(Diagnostic::new("DB_TLS", "TLS configuration failed."))
             }
         };
+        Ok(self.build(roots, description)?.0)
+    }
+    fn build(
+        &self,
+        roots: LoadedRoots,
+        mut description: Value,
+    ) -> Result<(Option<MakeRustls>, Value)> {
         let roots = roots.map(|(store, sha256)| {
             match sha256 {
                 Some(sha256) => {
@@ -401,10 +483,28 @@ impl Transport {
             Some(MakeRustls {
                 config: Arc::new(config),
                 negotiated: Arc::default(),
+                handshake_timeout: TLS_HANDSHAKE_TIMEOUT,
             }),
             description,
         ))
     }
+}
+
+/// Run `work` on its own thread and wait at most `deadline` for its result. On
+/// timeout the worker is abandoned, never joined, so a stalled filesystem read
+/// cannot hold up the caller. `Disconnected` means it ended without a result.
+fn with_deadline<T: Send + 'static>(
+    deadline: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> std::result::Result<T, RecvTimeoutError> {
+    let (done, result) = std::sync::mpsc::channel();
+    // A thread that cannot start drops `done`, which reads as Disconnected.
+    let _ = std::thread::Builder::new()
+        .name("ntnt-tls-roots".into())
+        .spawn(move || {
+            let _ = done.send(work());
+        });
+    result.recv_timeout(deadline)
 }
 
 /// Read an `sslrootcert` PEM file: bounded, regular file, at least one usable CA.
@@ -565,6 +665,8 @@ pub(crate) struct MakeRustls {
     config: Arc<rustls::ClientConfig>,
     /// Protocol version of the last completed handshake, as this client saw it.
     negotiated: Arc<Mutex<Option<&'static str>>>,
+    /// Bound on each handshake (each host or address tried gets its own).
+    handshake_timeout: Duration,
 }
 impl MakeRustls {
     /// The TLS version this client negotiated, e.g. "TLSv1.3". A TLS-terminating
@@ -574,6 +676,11 @@ impl MakeRustls {
             .negotiated
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    /// The same connector with another bound on each TLS handshake.
+    pub(crate) fn with_handshake_timeout(mut self, limit: Duration) -> Self {
+        self.handshake_timeout = limit;
+        self
     }
 }
 impl MakeTlsConnect<Socket> for MakeRustls {
@@ -587,6 +694,7 @@ impl MakeTlsConnect<Socket> for MakeRustls {
             config: self.config.clone(),
             name,
             negotiated: self.negotiated.clone(),
+            handshake_timeout: self.handshake_timeout,
         })
     }
 }
@@ -594,6 +702,7 @@ pub(crate) struct RustlsConnect {
     config: Arc<rustls::ClientConfig>,
     name: ServerName<'static>,
     negotiated: Arc<Mutex<Option<&'static str>>>,
+    handshake_timeout: Duration,
 }
 impl TlsConnect<Socket> for RustlsConnect {
     type Stream = RustlsStream;
@@ -601,9 +710,15 @@ impl TlsConnect<Socket> for RustlsConnect {
     type Future = Pin<Box<dyn Future<Output = io::Result<RustlsStream>> + Send>>;
     fn connect(self, stream: Socket) -> Self::Future {
         Box::pin(async move {
-            let stream = tokio_rustls::TlsConnector::from(self.config)
-                .connect(self.name, stream)
-                .await?;
+            let limit = self.handshake_timeout;
+            let handshake =
+                tokio_rustls::TlsConnector::from(self.config).connect(self.name, stream);
+            // On timeout the handshake, and with it the socket, is dropped: the
+            // connection is discarded. Every TLS mode is the driver's `Require`,
+            // so the error ends the attempt; nothing continues in plaintext.
+            let stream = tokio::time::timeout(limit, handshake)
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, HandshakeTimedOut(limit)))??;
             let version = match stream.get_ref().1.protocol_version() {
                 Some(rustls::ProtocolVersion::TLSv1_3) => Some("TLSv1.3"),
                 Some(rustls::ProtocolVersion::TLSv1_2) => Some("TLSv1.2"),
@@ -650,6 +765,16 @@ impl TlsStream for RustlsStream {
     }
 }
 
+/// The server accepted TLS but did not complete the handshake within this bound.
+#[derive(Debug)]
+struct HandshakeTimedOut(Duration);
+impl std::fmt::Display for HandshakeTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the TLS handshake did not complete within {:?}", self.0)
+    }
+}
+impl std::error::Error for HandshakeTimedOut {}
+
 /// A specific, secret-free diagnostic for a failed TLS negotiation, or `None`
 /// when the connect error is not about TLS (refused, authentication, timeout).
 pub(crate) fn classify(error: &tokio_postgres::Error) -> Option<Diagnostic> {
@@ -662,6 +787,14 @@ pub(crate) fn classify(error: &tokio_postgres::Error) -> Option<Diagnostic> {
         return None;
     }
     let cause = std::error::Error::source(error);
+    if let Some(limit) = cause.and_then(handshake_timed_out) {
+        return Some(Diagnostic::new(
+            "DB_TLS",
+            &format!(
+                "The server did not complete the TLS handshake within {limit:?}; the connection was closed. No plaintext fallback was attempted."
+            ),
+        ));
+    }
     let message = if cause.is_some_and(|c| c.to_string() == "server does not support TLS") {
         "The server does not accept TLS connections. No plaintext fallback was attempted."
     } else {
@@ -684,6 +817,14 @@ pub(crate) fn classify(error: &tokio_postgres::Error) -> Option<Diagnostic> {
         }
     };
     Some(Diagnostic::new("DB_TLS", message))
+}
+
+/// The bound a handshake exceeded, when that is why it failed.
+fn handshake_timed_out(cause: &(dyn std::error::Error + 'static)) -> Option<Duration> {
+    let io = cause.downcast_ref::<io::Error>()?;
+    io.get_ref()?
+        .downcast_ref::<HandshakeTimedOut>()
+        .map(|timed_out| timed_out.0)
 }
 
 /// tokio-rustls surfaces rustls failures as `io::Error` wrapping `rustls::Error`.
@@ -809,6 +950,90 @@ mod tests {
         ] {
             assert_eq!(code(rejected), "DB_CONNECTION_CONFIG", "{rejected}");
         }
+    }
+
+    #[test]
+    fn runtime_split_defaults_only_a_missing_sslmode() {
+        let local = |_: &str| Ok(Mode::Disable);
+        let remote = |_: &str| Ok(Mode::VerifyFull);
+        // The default sees the remainder without TLS keywords.
+        let seen = std::cell::RefCell::new(String::new());
+        let (rest, tls) = split_with_default("host=db user=u dbname=d", |rest| {
+            seen.replace(rest.to_string());
+            Ok(Mode::Disable)
+        })
+        .unwrap();
+        assert_eq!(seen.into_inner(), "host=db user=u dbname=d");
+        assert_eq!(
+            (rest.as_str(), tls.mode),
+            ("host=db user=u dbname=d", Mode::Disable)
+        );
+        let (_, tls) = split_with_default("host=db.example.com", remote).unwrap();
+        assert_eq!(
+            (tls.mode, tls.roots),
+            (Mode::VerifyFull, Some(RootSource::System))
+        );
+        // An explicit sslmode is never replaced by the default.
+        for (secret, mode) in [
+            ("host=h sslmode=disable", Mode::Disable),
+            ("host=h sslmode=require", Mode::Require),
+            ("postgres://u@h/d?sslmode=verify-full", Mode::VerifyFull),
+        ] {
+            let (_, tls) = split_with_default(secret, |_| panic!("default consulted")).unwrap();
+            assert_eq!(tls.mode, mode, "{secret}");
+        }
+        // A CA file or `system` selects verify-full even where the default is plaintext.
+        let (_, tls) =
+            split_with_default(&format!("host=h sslrootcert={}", absolute("ca.pem")), local)
+                .unwrap();
+        assert_eq!(
+            (tls.mode, tls.roots),
+            (
+                Mode::VerifyFull,
+                Some(RootSource::File(absolute("ca.pem").into()))
+            )
+        );
+        let (_, tls) = split_with_default("host=h sslrootcert=system", local).unwrap();
+        assert_eq!(
+            (tls.mode, tls.roots),
+            (Mode::VerifyFull, Some(RootSource::System))
+        );
+        // Downgradable and unknown modes stay rejected, as for ntnt db.
+        for rejected in [
+            "host=h sslmode=prefer",
+            "host=h sslmode=allow",
+            "host=h sslmode=verify",
+            "host=h sslmode=verify-ca",
+        ] {
+            assert_eq!(
+                split_with_default(rejected, local).unwrap_err().code,
+                "DB_CONNECTION_CONFIG",
+                "{rejected}"
+            );
+        }
+        // ntnt db's own rule is unchanged: no default.
+        assert!(split("host=h")
+            .unwrap_err()
+            .message
+            .contains("Set sslmode explicitly"));
+    }
+
+    #[test]
+    fn policy_names_mode_and_trust_source() {
+        let policy = |secret: &str| split(secret).unwrap().1.policy();
+        assert_eq!(policy("host=h sslmode=disable"), "disable");
+        assert_eq!(policy("host=h sslmode=require"), "require");
+        assert_eq!(
+            policy("host=h sslmode=verify-full"),
+            "verify-full roots=system"
+        );
+        assert_eq!(
+            policy(&format!(
+                "host=h sslmode=verify-ca sslrootcert={}",
+                absolute("ca.pem")
+            )),
+            format!("verify-ca roots=file:{}", absolute("ca.pem"))
+        );
     }
 
     #[test]
@@ -961,5 +1186,114 @@ mod tests {
             .expect("a FIFO is not a usable root file");
         assert_eq!(error.code, "DB_CONNECTION_CONFIG");
         assert!(error.message.contains("readable PEM file"), "{error}");
+    }
+
+    #[test]
+    fn with_deadline_returns_the_result_or_abandons_a_stalled_worker() {
+        assert_eq!(with_deadline(HANG_GUARD, || 7), Ok(7));
+        // The work blocks until the test releases it, which happens only after
+        // with_deadline has returned, so only the deadline can end the wait.
+        // Run without one, the work would give up at its own hang guard and
+        // return a sentinel, failing the assertion instead of hanging the test.
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let outcome = with_deadline(Duration::from_millis(10), move || {
+            match released.recv_timeout(HANG_GUARD) {
+                Ok(()) => "released",
+                Err(_) => "hang guard",
+            }
+        });
+        assert_eq!(outcome, Err(RecvTimeoutError::Timeout));
+        let _ = release.send(());
+        // A worker that ends without a result is reported, not waited for.
+        let died = with_deadline(HANG_GUARD, || -> u8 { panic!("loader failed") });
+        assert_eq!(died, Err(RecvTimeoutError::Disconnected));
+    }
+
+    #[test]
+    fn connector_blocking_passes_the_trust_read_result_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let key = rcgen::KeyPair::generate().unwrap();
+        std::fs::write(&ca, params.self_signed(&key).unwrap().pem()).unwrap();
+        let transport = |path: PathBuf| Transport {
+            mode: Mode::VerifyFull,
+            roots: Some(RootSource::File(path)),
+        };
+        assert!(transport(ca).connector_blocking().unwrap().is_some());
+        let error = transport(dir.path().join("missing.pem"))
+            .connector_blocking()
+            .err()
+            .expect("a missing root file is rejected");
+        assert_eq!(error.code, "DB_CONNECTION_CONFIG", "{error}");
+        assert!(error.message.contains("readable PEM file"), "{error}");
+    }
+
+    #[test]
+    fn a_stalled_tls_handshake_fails_at_the_default_bound() {
+        use std::io::Write;
+        // The server accepts TLS ('S') and never answers the ClientHello; it
+        // reports what it received once the client closes the connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (report, seen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut client, _) = listener.accept().unwrap();
+            let mut request = [0u8; 8];
+            client.read_exact(&mut request).unwrap();
+            client.write_all(b"S").unwrap();
+            let mut received = Vec::new();
+            let _ = client.read_to_end(&mut received);
+            let _ = report.send((request, received));
+        });
+        // The paused clock advances only when the client has nothing left to
+        // do but wait, so the bound fires while the handshake waits for the
+        // server, whatever the machine's speed; no other timer is armed. A
+        // watchdog thread turns a missing bound into a failure at the hang guard.
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            let transport = Transport {
+                mode: Mode::Require,
+                roots: None,
+            };
+            let error = runtime.block_on(async {
+                let (tls, _) = transport.connector().await.unwrap();
+                let mut config = tokio_postgres::Config::new();
+                config
+                    .host("127.0.0.1")
+                    .port(port)
+                    .user("u")
+                    .dbname("d")
+                    .ssl_mode(tokio_postgres::config::SslMode::Require);
+                config.connect(tls.unwrap()).await.err()
+            });
+            let _ = done.send(error.map(|error| classify(&error)));
+        });
+        let diagnostic = result
+            .recv_timeout(HANG_GUARD)
+            .expect("the stalled TLS handshake hung")
+            .expect("a stalled handshake cannot connect")
+            .expect("a TLS diagnostic");
+        assert_eq!(diagnostic.code, "DB_TLS", "{diagnostic}");
+        assert!(
+            diagnostic
+                .message
+                .contains("did not complete the TLS handshake within 10s"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.message.contains("No plaintext fallback"));
+        // The client sent its ClientHello (a TLS handshake record) and then
+        // closed the connection instead of continuing.
+        let (request, received) = seen
+            .recv_timeout(HANG_GUARD)
+            .expect("the client kept the stalled connection open");
+        assert_eq!(request, [0, 0, 0, 8, 4, 210, 22, 47]);
+        assert_eq!(received.first(), Some(&0x16), "{received:?}");
     }
 }

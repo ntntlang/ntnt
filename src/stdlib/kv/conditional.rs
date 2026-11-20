@@ -180,19 +180,22 @@ pub(super) fn redis_call_raw<T>(
         let _ = store.conn.set_write_timeout(None);
     }
     if broken {
-        // The pinned Redis client's timeout covers TCP, not protocol setup.
-        // One pending connector keeps retries/cancellation responsive without
-        // blocking this mutex or accumulating threads during a blackhole.
+        // The connector's deadline covers TCP, TLS and setup, so it always
+        // finishes and a later call can try again. One pending connector keeps
+        // retries/cancellation responsive without blocking this mutex or
+        // accumulating threads during a blackhole.
         if let Value::Map(m) = handle {
             if let Some(Value::String(url)) = m.get("_url") {
-                let url = url.replacen("valkey://", "redis://", 1);
+                let url = url.clone();
                 let shared = Arc::clone(&shared);
                 store.reconnecting = true;
                 if std::thread::Builder::new()
                     .name("ntnt-redis-reconnect".into())
                     .spawn(move || {
-                        let result = redis::Client::open(url)
-                            .and_then(|c| c.get_connection_with_timeout(Duration::from_secs(1)));
+                        // The same scheme mapping and TLS verification as open().
+                        let result = crate::stdlib::redis_tls::client(&url).and_then(|c| {
+                            crate::stdlib::redis_tls::connection(&c, Duration::from_secs(1))
+                        });
                         if let Ok(mut store) = shared.lock() {
                             if let Ok(conn) = result {
                                 store.conn = conn;
@@ -544,5 +547,68 @@ pub(crate) fn release(handle: &Value, key: &str, owner: &str) -> Result<bool> {
         KVBackend::Redis => redis_call(handle, |conn| {
             redis::Script::new("if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1],KEYS[1]..':__type') else return 0 end").key(key).arg(owner).invoke::<i64>(conn).map(|n|n>0)
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stdlib::redis_test_server::{self as stand_in, Event, Plan, HANG_GUARD};
+
+    fn ping(handle: &Value) -> std::result::Result<String, StorageFailure> {
+        redis_call_raw(handle, |conn| redis::cmd("PING").query::<String>(conn))
+    }
+
+    #[test]
+    fn a_reconnect_to_a_stalled_server_gives_up_and_a_later_call_retries() {
+        // Connection 0 is the store's own; every reconnect after it stalls in setup.
+        let server = stand_in::start(vec![Plan::Serve, Plan::StallSetup], None);
+        let handle = open_kv(&format!("redis://127.0.0.1:{}/0", server.port)).unwrap();
+        let store = get_redis_kv(&handle).unwrap();
+        redis::cmd("QUIT")
+            .query::<String>(&mut store.lock().unwrap().conn)
+            .unwrap();
+        let event = server.next();
+        assert!(
+            matches!(event, Event::Served { connection: 0, .. }),
+            "{event:?}"
+        );
+
+        // The broken connection starts one background reconnect, which stalls.
+        assert_eq!(ping(&handle), Err(StorageFailure::Connection));
+        let event = server.next();
+        assert!(
+            matches!(
+                event,
+                Event::Stalled {
+                    connection: 1,
+                    first: b'*',
+                    ..
+                }
+            ),
+            "{event:?}"
+        );
+        // Its deadline ends the attempt: the socket is closed and the store no
+        // longer reports a reconnect in progress.
+        let event = server.next();
+        assert!(
+            matches!(event, Event::ClosedByClient { connection: 1 }),
+            "{event:?}"
+        );
+        let guard = std::time::Instant::now() + HANG_GUARD;
+        while store.lock().unwrap().reconnecting {
+            assert!(
+                std::time::Instant::now() < guard,
+                "the reconnect was still pending at the hang guard"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // So the next call is free to try again.
+        assert_eq!(ping(&handle), Err(StorageFailure::Connection));
+        let event = server.next();
+        assert!(
+            matches!(event, Event::Stalled { connection: 2, .. }),
+            "{event:?}"
+        );
     }
 }

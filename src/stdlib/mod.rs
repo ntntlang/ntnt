@@ -32,6 +32,9 @@ pub mod postgres;
 pub mod process;
 pub mod rate_limit;
 pub mod realtime;
+#[cfg(test)]
+pub(crate) mod redis_test_server;
+pub(crate) mod redis_tls;
 pub mod secrets;
 pub(crate) mod send_deadline;
 pub mod sqlite;
