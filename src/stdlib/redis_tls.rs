@@ -8,6 +8,7 @@
 //! Every connection has a deadline covering TCP, TLS and the setup commands
 //! (see [`connection`]). Errors never echo the URL, which may hold a password.
 use sha2::{Digest, Sha256};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -116,19 +117,108 @@ fn pem(certificates: &[rustls::pki_types::CertificateDer<'_>]) -> Vec<u8> {
 /// answering at any step fails the attempt instead of hanging it, and the
 /// attempt's socket is closed. Each wait is bounded, not their sum: a server
 /// that stalls after the handshake times out each pipelined setup reply in turn
-/// (two by default). A TLS failure is reported as a specific, secret-free
-/// sentence.
+/// (two by default).
+///
+/// redis tries a host name's addresses in turn but measures the deadline across
+/// all of them, so an address that never answers leaves the next one no time.
+/// A plaintext host name is therefore resolved here, and each address gets the
+/// whole deadline in turn, as each PostgreSQL host does. A TLS host name must be
+/// verified as written, so redis resolves it itself: every address of a
+/// `rediss://` or `valkeys://` host name must answer. A TLS failure is reported
+/// as a specific, secret-free sentence.
 pub(crate) fn connection(
     client: &redis::Client,
     timeout: Duration,
 ) -> Result<redis::Connection, String> {
-    client.get_connection_with_timeout(timeout).map_err(|error| {
+    connection_with(client, timeout, |host, port| {
+        (host, port).to_socket_addrs().map(Iterator::collect)
+    })
+}
+
+/// [`connection`], resolving plaintext host names with `resolve`.
+fn connection_with(
+    client: &redis::Client,
+    timeout: Duration,
+    resolve: impl FnOnce(&str, u16) -> std::io::Result<Vec<SocketAddr>>,
+) -> Result<redis::Connection, String> {
+    let info = client.get_connection_info();
+    let result = match plaintext_addresses(info, resolve) {
+        Some(addresses) => connect_each(info, &addresses, timeout),
+        None => client.get_connection_with_timeout(timeout),
+    };
+    result.map_err(|error| {
         if error.is_timeout() {
             format!("connection timed out: no answer within {timeout:?} during the TCP connect, TLS handshake or setup commands")
         } else {
             describe(&error)
         }
     })
+}
+
+/// The addresses of a plaintext URL's host name, for [`connect_each`]. `None`
+/// leaves the connection to redis: TLS, Unix sockets, IP literals, a failed
+/// lookup (redis then reports it), and IPv6 link-local addresses, whose scope an
+/// address string cannot carry.
+fn plaintext_addresses(
+    info: &redis::ConnectionInfo,
+    resolve: impl FnOnce(&str, u16) -> std::io::Result<Vec<SocketAddr>>,
+) -> Option<Vec<SocketAddr>> {
+    let redis::ConnectionAddr::Tcp(host, port) = &info.addr else {
+        return None;
+    };
+    if host.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    let addresses = resolve(host, *port).ok()?;
+    let pinnable = |address: &SocketAddr| match address {
+        SocketAddr::V4(_) => true,
+        SocketAddr::V6(v6) => v6.scope_id() == 0,
+    };
+    (!addresses.is_empty() && addresses.iter().all(pinnable)).then_some(addresses)
+}
+
+/// Connect to each address in turn, each with the whole `timeout`, keeping the
+/// URL's database, credentials and protocol. Plain Redis does not use the host
+/// name, so connecting by address changes nothing else.
+fn connect_each(
+    info: &redis::ConnectionInfo,
+    addresses: &[SocketAddr],
+    timeout: Duration,
+) -> redis::RedisResult<redis::Connection> {
+    connect_each_with(info, addresses, timeout, |pinned, timeout| {
+        redis::Client::open(pinned)?.get_connection_with_timeout(timeout)
+    })
+}
+
+/// [`connect_each`] with the connect step supplied by `connect`. Only a failure
+/// to reach an address (an I/O error, including a timeout) moves on to the next
+/// one. An answer such as a rejected password is returned at once, as libpq
+/// stops at an authentication failure, so a later address cannot hide it.
+fn connect_each_with<C>(
+    info: &redis::ConnectionInfo,
+    addresses: &[SocketAddr],
+    timeout: Duration,
+    mut connect: impl FnMut(redis::ConnectionInfo, Duration) -> redis::RedisResult<C>,
+) -> redis::RedisResult<C> {
+    let mut last_error = None;
+    for address in addresses {
+        let pinned = redis::ConnectionInfo {
+            addr: redis::ConnectionAddr::Tcp(address.ip().to_string(), address.port()),
+            redis: info.redis.clone(),
+        };
+        match connect(pinned, timeout) {
+            Ok(connection) => return Ok(connection),
+            Err(error) if error.is_io_error() => last_error = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the host name has no addresses",
+        )
+        .into()
+    }))
 }
 
 /// The connect deadline (see [`connection`]) for callers that set none of
@@ -417,6 +507,163 @@ mod tests {
             short
         );
         assert_eq!(default_connect_timeout(), Duration::from_secs(10));
+    }
+
+    /// An address that never answers: a listener with a backlog of 0 whose one
+    /// accept slot is taken. Linux drops the next connection's handshake (or, if
+    /// that handshake completes first, nothing ever reads its commands).
+    #[cfg(target_os = "linux")]
+    fn unanswered_address() -> (socket2::Socket, std::net::TcpStream, SocketAddr) {
+        use socket2::{Domain, Socket, Type};
+        let listener = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        let any = SocketAddr::from(([127, 0, 0, 1], 0));
+        listener.bind(&any.into()).unwrap();
+        listener.listen(0).unwrap();
+        let address = listener.local_addr().unwrap().as_socket().unwrap();
+        let queued = std::net::TcpStream::connect(address).unwrap();
+        (listener, queued, address)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn each_address_of_a_plaintext_host_name_gets_the_whole_deadline() {
+        let (_listener, _queued, dead) = unanswered_address();
+        let server = stand_in::start(vec![Plan::Serve], None);
+        let live = SocketAddr::from(([127, 0, 0, 1], server.port));
+        let client = client_with_roots("redis://redis.test:6379/0", || unreachable!()).unwrap();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let reply = connection_with(&client, DEADLINE, |host, port| {
+                assert_eq!((host, port), ("redis.test", 6379));
+                Ok(vec![dead, live])
+            })
+            .and_then(|mut connection| {
+                redis::cmd("PING")
+                    .query::<String>(&mut connection)
+                    .map_err(|error| error.to_string())
+            });
+            let _ = done.send(reply);
+        });
+        let reply = result
+            .recv_timeout(HANG_GUARD)
+            .expect("still connecting at the hang guard");
+        // The unanswered first address used up its own deadline, not the next one's.
+        assert_eq!(reply, Ok("PONG".to_string()));
+        match server.next() {
+            Event::Served { commands, .. } => {
+                assert!(commands.iter().any(|c| c == "PING"), "{commands:?}")
+            }
+            event => panic!("{event:?}"),
+        }
+    }
+
+    #[test]
+    fn every_address_is_tried_with_the_whole_deadline_and_the_url_settings() {
+        let info = client_with_roots("redis://:pw@redis.test:6379/3", || unreachable!())
+            .unwrap()
+            .get_connection_info()
+            .clone();
+        let first = SocketAddr::from(([10, 0, 0, 1], 6379));
+        let second: SocketAddr = "[2001:db8::2]:6380".parse().unwrap();
+        let unreachable = || -> redis::RedisError {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "no answer").into()
+        };
+        let mut attempts = Vec::new();
+        let connected = connect_each_with(&info, &[first, second], DEADLINE, |pinned, budget| {
+            attempts.push((pinned.addr, budget, pinned.redis.db, pinned.redis.password));
+            if attempts.len() == 1 {
+                Err(unreachable())
+            } else {
+                Ok("connected")
+            }
+        });
+        assert_eq!(connected.unwrap(), "connected");
+        let password = Some("pw".to_string());
+        assert_eq!(
+            attempts,
+            [
+                (
+                    redis::ConnectionAddr::Tcp("10.0.0.1".into(), 6379),
+                    DEADLINE,
+                    3,
+                    password.clone()
+                ),
+                (
+                    redis::ConnectionAddr::Tcp("2001:db8::2".into(), 6380),
+                    DEADLINE,
+                    3,
+                    password
+                ),
+            ]
+        );
+
+        // An answer from the server, such as a rejected password, is final.
+        let mut tried = 0;
+        let rejected = connect_each_with(
+            &info,
+            &[first, second],
+            DEADLINE,
+            |_, _| -> redis::RedisResult<()> {
+                tried += 1;
+                Err((redis::ErrorKind::AuthenticationFailed, "WRONGPASS").into())
+            },
+        );
+        assert_eq!(
+            rejected.unwrap_err().kind(),
+            redis::ErrorKind::AuthenticationFailed
+        );
+        assert_eq!(tried, 1);
+
+        // When no address can be reached, the last failure is reported.
+        let none = connect_each_with(
+            &info,
+            &[first, second],
+            DEADLINE,
+            |_, _| -> redis::RedisResult<()> { Err(unreachable()) },
+        );
+        assert!(none.unwrap_err().is_timeout());
+    }
+
+    #[test]
+    fn only_plaintext_host_names_are_resolved_before_connecting() {
+        let info = |url: &str| {
+            client_with_roots(url, || Ok(pem(&[])))
+                .unwrap()
+                .get_connection_info()
+                .clone()
+        };
+        for url in [
+            "rediss://redis.test:6380/0",
+            "redis://127.0.0.1:6379/0",
+            "redis://[::1]:6379/0",
+        ] {
+            let resolved = plaintext_addresses(&info(url), |_, _| {
+                panic!("{url} was resolved before connecting")
+            });
+            assert_eq!(resolved, None, "{url}");
+        }
+        let named = info("redis://redis.test:6379/0");
+        let v4 = SocketAddr::from(([10, 0, 0, 5], 6379));
+        let v6: SocketAddr = "[2001:db8::5]:6379".parse().unwrap();
+        assert_eq!(
+            plaintext_addresses(&named, |_, _| Ok(vec![v4, v6])),
+            Some(vec![v4, v6])
+        );
+        let link_local = SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::1".parse().unwrap(),
+            6379,
+            0,
+            2,
+        ));
+        assert_eq!(
+            plaintext_addresses(&named, |_, _| Ok(vec![v4, link_local])),
+            None
+        );
+        assert_eq!(
+            plaintext_addresses(&named, |_, _| Err(std::io::ErrorKind::NotFound.into())),
+            None
+        );
+        assert_eq!(plaintext_addresses(&named, |_, _| Ok(vec![])), None);
     }
 
     #[test]
