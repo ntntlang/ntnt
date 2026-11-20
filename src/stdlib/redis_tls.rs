@@ -143,7 +143,8 @@ fn connection_with(
 ) -> Result<redis::Connection, String> {
     let info = client.get_connection_info();
     let result = match plaintext_addresses(info, resolve) {
-        Some(addresses) => connect_each(info, &addresses, timeout),
+        Some(Ok(addresses)) => connect_each(info, &addresses, timeout),
+        Some(Err(lookup)) => Err(lookup.into()),
         None => client.get_connection_with_timeout(timeout),
     };
     result.map_err(|error| {
@@ -155,26 +156,30 @@ fn connection_with(
     })
 }
 
-/// The addresses of a plaintext URL's host name, for [`connect_each`]. `None`
-/// leaves the connection to redis: TLS, Unix sockets, IP literals, a failed
-/// lookup (redis then reports it), and IPv6 link-local addresses, whose scope an
-/// address string cannot carry.
+/// Where a plaintext URL's host name leads, for [`connect_each`]: its addresses,
+/// or the error from looking it up, which redis would only repeat (outside the
+/// deadline). `None` leaves the connection to redis: TLS, Unix sockets, IP
+/// literals, and IPv6 link-local addresses, whose scope an address string
+/// cannot carry.
 fn plaintext_addresses(
     info: &redis::ConnectionInfo,
     resolve: impl FnOnce(&str, u16) -> std::io::Result<Vec<SocketAddr>>,
-) -> Option<Vec<SocketAddr>> {
+) -> Option<std::io::Result<Vec<SocketAddr>>> {
     let redis::ConnectionAddr::Tcp(host, port) = &info.addr else {
         return None;
     };
     if host.parse::<IpAddr>().is_ok() {
         return None;
     }
-    let addresses = resolve(host, *port).ok()?;
+    let addresses = match resolve(host, *port) {
+        Ok(addresses) => addresses,
+        Err(error) => return Some(Err(error)),
+    };
     let pinnable = |address: &SocketAddr| match address {
         SocketAddr::V4(_) => true,
         SocketAddr::V6(v6) => v6.scope_id() == 0,
     };
-    (!addresses.is_empty() && addresses.iter().all(pinnable)).then_some(addresses)
+    addresses.iter().all(pinnable).then_some(Ok(addresses))
 }
 
 /// Connect to each address in turn, each with the whole `timeout`, keeping the
@@ -640,30 +645,44 @@ mod tests {
             let resolved = plaintext_addresses(&info(url), |_, _| {
                 panic!("{url} was resolved before connecting")
             });
-            assert_eq!(resolved, None, "{url}");
+            assert!(resolved.is_none(), "{url}");
         }
         let named = info("redis://redis.test:6379/0");
         let v4 = SocketAddr::from(([10, 0, 0, 5], 6379));
         let v6: SocketAddr = "[2001:db8::5]:6379".parse().unwrap();
-        assert_eq!(
+        assert!(matches!(
             plaintext_addresses(&named, |_, _| Ok(vec![v4, v6])),
-            Some(vec![v4, v6])
-        );
+            Some(Ok(addresses)) if addresses == [v4, v6]
+        ));
         let link_local = SocketAddr::V6(std::net::SocketAddrV6::new(
             "fe80::1".parse().unwrap(),
             6379,
             0,
             2,
         ));
-        assert_eq!(
-            plaintext_addresses(&named, |_, _| Ok(vec![v4, link_local])),
-            None
-        );
-        assert_eq!(
+        assert!(plaintext_addresses(&named, |_, _| Ok(vec![v4, link_local])).is_none());
+        // A failed lookup is the answer: redis would only look the name up again.
+        assert!(matches!(
             plaintext_addresses(&named, |_, _| Err(std::io::ErrorKind::NotFound.into())),
-            None
-        );
-        assert_eq!(plaintext_addresses(&named, |_, _| Ok(vec![])), None);
+            Some(Err(_))
+        ));
+    }
+
+    #[test]
+    fn a_failed_lookup_is_reported_without_a_second_one() {
+        let client = client_with_roots("redis://redis.test:6379/0", || unreachable!()).unwrap();
+        let mut lookups = 0;
+        let error = connection_with(&client, DEADLINE, |host, _| {
+            lookups += 1;
+            assert_eq!(host, "redis.test");
+            Err(std::io::Error::other("lookup failed (test marker 7c1)"))
+        })
+        .map(|_| ())
+        .unwrap_err();
+        // Only this lookup's error: redis looking the name up again would report
+        // its own resolver's answer instead.
+        assert!(error.contains("test marker 7c1"), "{error}");
+        assert_eq!(lookups, 1);
     }
 
     #[test]
