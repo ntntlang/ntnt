@@ -33,10 +33,10 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   address.
 - `std/kv`, `std/jobs` stores and the std/auth session store accept `rediss://` and
   `valkeys://` with verified TLS.
-- Every Redis/Valkey connection has a deadline covering the TCP connect, TLS
-  handshake and setup commands (10 seconds for `std/kv` `open()`, job stores and
-  the auth session store); one auth-store operation's connect no longer holds up
-  the others.
+- Every Redis/Valkey connection bounds each wait for the server during the TCP
+  connect, TLS handshake and setup commands (10 seconds for `std/kv` `open()`, job
+  stores and the auth session store); one auth-store operation's connect no longer
+  holds up the others.
 - The `${...}` interpolation warning scans each string literal in one bounded pass.
 - `install.ps1` verifies the release checksum before extracting and keeps the
   existing `ntnt.exe` until the new one runs; it no longer builds from source when

@@ -653,7 +653,9 @@ fn auth_postgres_client(url: &str) -> std::result::Result<postgres::Client, Stri
 
 /// Every auth-store Redis/Valkey connection: rediss:// and valkeys:// use TLS
 /// verified against the host CA store; redis:// and valkey:// are plaintext.
-/// Connecting (TCP, TLS and setup) must finish within the default deadline.
+/// Each wait for the server while connecting (TCP, TLS and setup) is bounded
+/// by the default deadline; the host name lookup and the attempt as a whole are
+/// not (#410).
 fn auth_redis_connection(url: &str) -> std::result::Result<redis::Connection, String> {
     let client =
         crate::stdlib::redis_tls::client(url).map_err(|e| format!("Redis client error: {}", e))?;
