@@ -6,7 +6,6 @@
 #[path = "support/bounded_output.rs"]
 mod bounded_output;
 
-use bounded_output::BoundedOutput;
 use ntnt::interpreter::Value;
 use ntnt::stdlib::auth::SessionStore;
 use ntnt::stdlib::auth::{ensure_auth_session_store, parse_auth_session_store, AuthConfig};
@@ -279,6 +278,16 @@ fn pki(names: &[&str]) -> Pki {
 /// Run `body` with `ntnt run`, trusting exactly the CA file `trust` as the host
 /// CA store. Returns stdout and stderr together.
 fn run_script(body: &str, trust: &Path, variables: &[(&str, String)]) -> String {
+    run_script_within(body, trust, variables, bounded_output::DEADLINE)
+}
+
+/// [`run_script`] for a child that waits out a deadline: `limit` is its hang guard.
+fn run_script_within(
+    body: &str,
+    trust: &Path,
+    variables: &[(&str, String)],
+    limit: Duration,
+) -> String {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("tls.tnt");
     std::fs::write(&script, body).unwrap();
@@ -294,7 +303,8 @@ fn run_script(body: &str, trust: &Path, variables: &[(&str, String)]) -> String 
     for (key, value) in variables {
         command.env(key, value);
     }
-    let output = command.bounded_output();
+    let output = bounded_output::output_within(&mut command, limit)
+        .unwrap_or_else(|stalled| panic!("{stalled}"));
     format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -863,6 +873,10 @@ fn setup_stalling_redis_server(
     (port, seen)
 }
 
+/// The child below waits out the 10-second default for each of the two setup
+/// replies redis reads; this hang guard is ten times that wait.
+const DEFAULT_DEADLINE_HANG_GUARD: Duration = Duration::from_secs(200);
+
 /// `open()` sets no deadline of its own, so it gets the 10-second default: a
 /// server that completes TLS and then never answers fails the open instead of
 /// hanging it.
@@ -871,7 +885,12 @@ fn kv_open_gives_up_when_setup_stalls_after_the_tls_handshake() {
     let trusted = pki(&["127.0.0.1"]);
     let (port, seen) = setup_stalling_redis_server(trusted.server.clone());
     let url = format!("rediss://127.0.0.1:{port}/0");
-    let output = run_script(KV_SCRIPT, &trusted.ca, &[("NTNT_TLS_TEST_KV", url)]);
+    let output = run_script_within(
+        KV_SCRIPT,
+        &trusted.ca,
+        &[("NTNT_TLS_TEST_KV", url)],
+        DEFAULT_DEADLINE_HANG_GUARD,
+    );
     assert!(output.contains("Failed to connect to Redis"), "{output}");
     assert!(
         output.contains("timed out: no answer within 10s"),

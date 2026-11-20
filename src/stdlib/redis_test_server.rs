@@ -145,6 +145,8 @@ fn run(
     let mut reader = BufReader::new(transport);
     if let Plan::Serve = plan {
         let commands = serve(&mut reader);
+        // Closed before it is reported, so the report means the connection is gone.
+        drop(reader);
         let _ = report.send(Event::Served {
             connection,
             commands,
@@ -165,6 +167,7 @@ fn run(
     // Never answer: read until the client gives up or the test releases it.
     let mut sink = [0u8; 4096];
     while matches!(reader.read(&mut sink), Ok(n) if n > 0) {}
+    drop(reader);
     let _ = report.send(if released.load(Ordering::SeqCst) {
         Event::Released { connection }
     } else {
