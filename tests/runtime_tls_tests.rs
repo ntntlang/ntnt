@@ -34,13 +34,15 @@ fn pg_connect(url: &str) -> Result<Value, String> {
     };
     match func(&[Value::String(url.into())]).unwrap() {
         Value::EnumValue {
+            enum_name,
             variant,
             mut values,
-            ..
-        } if variant == "Ok" => Ok(values.remove(0)),
+        } if enum_name == "Result" && variant == "Ok" => Ok(values.remove(0)),
         Value::EnumValue {
-            variant, values, ..
-        } if variant == "Err" => match &values[0] {
+            enum_name,
+            variant,
+            values,
+        } if enum_name == "Result" && variant == "Err" => match &values[0] {
             Value::String(message) => Err(message.clone()),
             other => panic!("expected an error string, got {other:?}"),
         },

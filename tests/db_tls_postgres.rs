@@ -472,13 +472,15 @@ fn runtime(name: &str, args: &[Ntnt]) -> Result<Ntnt, String> {
     };
     match func(args).unwrap() {
         Ntnt::EnumValue {
+            enum_name,
             variant,
             mut values,
-            ..
-        } if variant == "Ok" => Ok(values.remove(0)),
+        } if enum_name == "Result" && variant == "Ok" => Ok(values.remove(0)),
         Ntnt::EnumValue {
-            variant, values, ..
-        } if variant == "Err" => Err(match &values[0] {
+            enum_name,
+            variant,
+            values,
+        } if enum_name == "Result" && variant == "Err" => Err(match &values[0] {
             Ntnt::String(message) => message.clone(),
             other => format!("{other:?}"),
         }),
@@ -500,8 +502,10 @@ fn runtime_session_ssl(url: &str) -> Result<bool, String> {
     let _ = runtime("close", &[db]);
     match row? {
         Ntnt::EnumValue {
-            variant, values, ..
-        } if variant == "Some" => match &values[0] {
+            enum_name,
+            variant,
+            values,
+        } if enum_name == "Option" && variant == "Some" => match &values[0] {
             Ntnt::Map(row) => match row.get("ssl") {
                 Some(Ntnt::Bool(ssl)) => Ok(*ssl),
                 other => panic!("pg_stat_ssl.ssl: {other:?}"),
