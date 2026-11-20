@@ -429,7 +429,7 @@ fn increment_auth_rate_limit_postgres(
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
     let expires_at = now.saturating_add(window_seconds);
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     let row = client
         .query_one(
             "INSERT INTO auth_rate_limits (scope, key_hash, count, expires_at)
@@ -463,13 +463,7 @@ fn increment_auth_rate_limit_redis(
     window_seconds: i64,
     now: i64,
 ) -> std::result::Result<AuthRateBucket, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let expires_at = now.saturating_add(window_seconds);
     let key = auth_rate_limit_redis_key(scope, key_hash);
@@ -527,7 +521,7 @@ fn cleanup_expired_rate_limits_sqlite(now: i64) -> std::result::Result<u64, Stri
 fn cleanup_expired_rate_limits_postgres(now: i64) -> std::result::Result<u64, String> {
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     client
         .execute(
             "DELETE FROM auth_rate_limits WHERE expires_at < $1",
@@ -623,7 +617,7 @@ fn store_oauth_state_postgres(state: &OAuthState) -> std::result::Result<(), Str
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     client
         .execute(
@@ -650,14 +644,7 @@ fn store_oauth_state_postgres(state: &OAuthState) -> std::result::Result<(), Str
 }
 
 fn store_oauth_state_redis(state: &OAuthState) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let state_json = serde_json::json!({
         "state": state.state,
@@ -736,7 +723,7 @@ fn consume_oauth_state_postgres(state: &str) -> std::result::Result<Option<OAuth
     let now = chrono::Utc::now().timestamp();
     let min_created = now - OAUTH_STATE_TTL;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     let rows = client
         .query(
@@ -766,14 +753,7 @@ fn consume_oauth_state_postgres(state: &str) -> std::result::Result<Option<OAuth
 }
 
 fn consume_oauth_state_redis(state: &str) -> std::result::Result<Option<OAuthState>, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = format!("ntnt:oauth_state:{}", state);
 
@@ -882,7 +862,7 @@ fn store_exchange_token_postgres(token: &str, session_id: &str) -> std::result::
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     let now = chrono::Utc::now().timestamp();
 
     client
@@ -897,14 +877,7 @@ fn store_exchange_token_postgres(token: &str, session_id: &str) -> std::result::
 }
 
 fn store_exchange_token_redis(token: &str, session_id: &str) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = format!("ntnt:auth_exchange:{}", token);
     redis::cmd("SETEX")
@@ -960,7 +933,7 @@ fn consume_exchange_token_postgres(token: &str) -> std::result::Result<Option<St
     let now = chrono::Utc::now().timestamp();
     let min_created = now - EXCHANGE_TOKEN_TTL;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     // Atomic delete-and-return: DELETE the token and return session_id in one statement.
     // This prevents race conditions where two concurrent requests could both consume the same token.
@@ -981,14 +954,7 @@ fn consume_exchange_token_postgres(token: &str) -> std::result::Result<Option<St
 }
 
 fn consume_exchange_token_redis(token: &str) -> std::result::Result<Option<String>, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = format!("ntnt:auth_exchange:{}", token);
 
@@ -1308,7 +1274,7 @@ fn store_auth_challenge_postgres(challenge: &AuthChallenge) -> std::result::Resu
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     client
         .execute(
             "INSERT INTO auth_challenges
@@ -1380,14 +1346,7 @@ pub(super) fn auth_challenge_from_json_str(
 }
 
 fn store_auth_challenge_redis(challenge: &AuthChallenge) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let challenge_json = serde_json::json!({
         "id": challenge.id,
@@ -1481,7 +1440,7 @@ fn get_auth_challenge_postgres(id: &str) -> std::result::Result<Option<AuthChall
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
     let now = chrono::Utc::now().timestamp();
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     let rows = client
         .query(
             "SELECT id, subject_id, provider, kind, csrf_token, data_json, created_at, expires_at
@@ -1507,14 +1466,7 @@ fn get_auth_challenge_postgres(id: &str) -> std::result::Result<Option<AuthChall
 }
 
 fn get_auth_challenge_redis(id: &str) -> std::result::Result<Option<AuthChallenge>, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = auth_challenge_redis_key(id);
     let result: Option<String> = redis::cmd("GET")
@@ -1555,7 +1507,7 @@ fn delete_auth_challenge_postgres(id: &str) -> std::result::Result<(), String> {
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     client
         .execute("DELETE FROM auth_challenges WHERE id = $1", &[&id])
         .map_err(|e| e.to_string())?;
@@ -1563,14 +1515,7 @@ fn delete_auth_challenge_postgres(id: &str) -> std::result::Result<(), String> {
 }
 
 fn delete_auth_challenge_redis(id: &str) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = auth_challenge_redis_key(id);
     redis::cmd("DEL")
@@ -1632,7 +1577,7 @@ fn consume_auth_challenge_postgres(id: &str) -> std::result::Result<Option<AuthC
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
     let now = chrono::Utc::now().timestamp();
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     let rows = client
         .query(
             "DELETE FROM auth_challenges
@@ -1659,14 +1604,7 @@ fn consume_auth_challenge_postgres(id: &str) -> std::result::Result<Option<AuthC
 }
 
 fn consume_auth_challenge_redis(id: &str) -> std::result::Result<Option<AuthChallenge>, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = auth_challenge_redis_key(id);
     let now = chrono::Utc::now().timestamp();
@@ -1721,7 +1659,7 @@ fn cleanup_expired_auth_challenges_postgres(now: i64) -> std::result::Result<u64
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     let count = client
         .execute("DELETE FROM auth_challenges WHERE expires_at < $1", &[&now])
         .map_err(|e| e.to_string())?;
@@ -1730,14 +1668,7 @@ fn cleanup_expired_auth_challenges_postgres(now: i64) -> std::result::Result<u64
 }
 
 fn cleanup_expired_auth_challenges_redis(now: i64) -> std::result::Result<u64, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let mut count = 0u64;
     let mut cursor = 0u64;
@@ -1807,7 +1738,7 @@ fn cleanup_expired_oauth_states_postgres(cutoff: i64) -> std::result::Result<u64
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     let count = client
         .execute(
@@ -1849,7 +1780,7 @@ fn cleanup_expired_exchange_tokens_postgres(cutoff: i64) -> std::result::Result<
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     let count = client
         .execute(
@@ -2099,7 +2030,7 @@ fn store_session_postgres(session: &Session) -> std::result::Result<(), String> 
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     client
         .execute(
@@ -2149,14 +2080,7 @@ fn store_session_postgres(session: &Session) -> std::result::Result<(), String> 
 }
 
 fn store_session_redis(session: &Session) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let session_json = session_to_redis_json(session);
     let key = format!("ntnt:session:{}", session.id);
@@ -2281,7 +2205,7 @@ fn extend_session_expiry_postgres(
 ) -> std::result::Result<(), String> {
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     client
         .execute(
             "UPDATE auth_sessions SET expires_at = $1 WHERE id = $2",
@@ -2292,13 +2216,7 @@ fn extend_session_expiry_postgres(
 }
 
 fn extend_session_expiry_redis(id: &str, new_expires_at: i64) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
     let key = format!("ntnt:session:{}", id);
     let now = chrono::Utc::now().timestamp();
     let new_ttl = new_expires_at - now;
@@ -2417,7 +2335,7 @@ fn get_expired_session_postgres(
     let now = chrono::Utc::now().timestamp();
     let refresh_cutoff = now - refresh_ttl;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     let rows = client.query(
         "SELECT id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
                 access_token, refresh_token, token_expires_at, device_name, user_agent_hash, last_ip_hash, created_at, expires_at
@@ -2454,16 +2372,10 @@ fn get_expired_session_redis(
     id: &str,
     refresh_ttl: i64,
 ) -> std::result::Result<Option<Session>, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
     let now = chrono::Utc::now().timestamp();
     let refresh_cutoff = now - refresh_ttl;
 
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = format!("ntnt:session:{}", id);
     let result: Option<String> = redis::cmd("GET")
@@ -2491,7 +2403,7 @@ fn get_session_postgres(id: &str) -> std::result::Result<Option<Session>, String
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
     let now = chrono::Utc::now().timestamp();
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     let rows = client
         .query(
@@ -2528,14 +2440,7 @@ fn get_session_postgres(id: &str) -> std::result::Result<Option<Session>, String
 }
 
 fn get_session_redis(id: &str) -> std::result::Result<Option<Session>, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = format!("ntnt:session:{}", id);
     let result: Option<String> = redis::cmd("GET")
@@ -2583,7 +2488,7 @@ fn update_session_tokens_postgres(
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
     let expires_at = tokens.expires_in.map(|e| now + e);
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     client.execute(
         "UPDATE auth_sessions SET access_token = $1, refresh_token = COALESCE($2, refresh_token),
@@ -2598,14 +2503,7 @@ fn update_session_tokens_redis(
     tokens: &TokenResponse,
     now: i64,
 ) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = format!("ntnt:session:{}", id);
     let expires_at = tokens.expires_in.map(|e| now + e);
@@ -2683,7 +2581,7 @@ fn update_session_data_postgres(id: &str, data_json: &str) -> std::result::Resul
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     let rows = client
         .execute(
@@ -2700,14 +2598,7 @@ fn update_session_data_postgres(id: &str, data_json: &str) -> std::result::Resul
 }
 
 fn update_session_data_redis(id: &str, data_json: &str) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = format!("ntnt:session:{}", id);
 
@@ -2766,7 +2657,7 @@ fn delete_session_postgres(id: &str) -> std::result::Result<(), String> {
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     client
         .execute("DELETE FROM auth_sessions WHERE id = $1", &[&id])
         .map_err(|e| e.to_string())?;
@@ -2774,14 +2665,7 @@ fn delete_session_postgres(id: &str) -> std::result::Result<(), String> {
 }
 
 fn delete_session_redis(id: &str) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let key = format!("ntnt:session:{}", id);
     redis::cmd("DEL")
@@ -2838,7 +2722,7 @@ fn migrate_session_postgres(
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
     let updated = client
         .execute(
             "UPDATE auth_sessions
@@ -2877,14 +2761,7 @@ fn migrate_session_postgres(
 }
 
 fn migrate_session_redis(old_id: &str, new_session: &Session) -> std::result::Result<(), String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let old_key = format!("ntnt:session:{}", old_id);
     let new_key = format!("ntnt:session:{}", new_session.id);
@@ -2936,7 +2813,7 @@ fn cleanup_expired_sessions_postgres(now: i64) -> std::result::Result<u64, Strin
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     let count = client
         .execute("DELETE FROM auth_sessions WHERE expires_at < $1", &[&now])
@@ -2946,14 +2823,7 @@ fn cleanup_expired_sessions_postgres(now: i64) -> std::result::Result<u64, Strin
 }
 
 fn cleanup_expired_sessions_redis(now: i64) -> std::result::Result<u64, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let refresh_cutoff = now - redis_refresh_retention_ttl();
     let mut count = 0u64;
@@ -3049,7 +2919,7 @@ fn get_sessions_for_user_postgres(
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     let rows = client
         .query(
@@ -3082,14 +2952,7 @@ fn get_sessions_for_user_redis(
     current_session_id: Option<&str>,
     now: i64,
 ) -> std::result::Result<Vec<SessionInfo>, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let mut sessions = Vec::new();
     let mut cursor = 0u64;
@@ -3175,7 +3038,7 @@ fn delete_all_sessions_for_user_postgres(
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
 
-    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let mut client = auth_postgres_client(url)?;
 
     let count = if let Some(keep_id) = keep_session_id {
         client
@@ -3197,14 +3060,7 @@ fn delete_all_sessions_for_user_redis(
     user_id: &str,
     keep_session_id: Option<&str>,
 ) -> std::result::Result<u64, String> {
-    let url_guard = REDIS_URL.lock().unwrap();
-    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-
-    let client =
-        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client
-        .get_connection()
-        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let mut conn = redis_store_connection()?;
 
     let mut count = 0u64;
     let mut cursor = 0u64;

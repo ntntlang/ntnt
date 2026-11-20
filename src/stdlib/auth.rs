@@ -643,6 +643,41 @@ static POSTGRES_URL: std::sync::LazyLock<Arc<Mutex<Option<String>>>> =
 static REDIS_URL: std::sync::LazyLock<Arc<Mutex<Option<String>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
 
+/// Every auth-store PostgreSQL connection, under the runtime TLS policy shared
+/// with `std/db/postgres`: an explicit sslmode is honored (prefer/allow are
+/// rejected), and without one only local hosts are reached in plaintext; any
+/// other host gets verify-full. Session rows carry retained OAuth tokens.
+fn auth_postgres_client(url: &str) -> std::result::Result<postgres::Client, String> {
+    crate::stdlib::postgres::runtime_tls::connect_sync(url)
+}
+
+/// Every auth-store Redis/Valkey connection: rediss:// and valkeys:// use TLS
+/// verified against the host CA store; redis:// and valkey:// are plaintext.
+/// Each wait for the server while connecting (TCP, TLS and setup) is bounded
+/// by the default deadline; the host name lookup and the attempt as a whole are
+/// not (#410).
+fn auth_redis_connection(url: &str) -> std::result::Result<redis::Connection, String> {
+    let client =
+        crate::stdlib::redis_tls::client(url).map_err(|e| format!("Redis client error: {}", e))?;
+    crate::stdlib::redis_tls::connection(
+        &client,
+        crate::stdlib::redis_tls::default_connect_timeout(),
+    )
+    .map_err(|e| format!("Redis connection error: {}", e))
+}
+
+/// A connection to the initialized Redis auth store. The URL is copied and its
+/// lock released before connecting, so one operation's slow connect never
+/// holds up the others.
+fn redis_store_connection() -> std::result::Result<redis::Connection, String> {
+    let url = REDIS_URL
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "Redis not initialized".to_string())?;
+    auth_redis_connection(&url)
+}
+
 // Global auth config
 static AUTH_CONFIG: std::sync::LazyLock<Arc<Mutex<Option<AuthConfig>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
@@ -3312,7 +3347,15 @@ pub fn init() -> HashMap<String, Value> {
     // you can use auth_start, auth_callback, and auth_logout
     // with routes to enable OAuth login.
     //
-    // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
+    // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url",
+    // "redis://url", "rediss://url", "valkey://url" or "valkeys://url".
+    // PostgreSQL stores follow the std/db/postgres connect() TLS policy (sslmode
+    // honored; without it, verify-full unless every host is local). rediss:// and
+    // valkeys:// use TLS verified against the host CA store; redis:// and
+    // valkey:// are plaintext. TLS never falls back to plaintext. Each Redis or
+    // Valkey store connection waits at most 10 seconds for each answer from the
+    // server (TCP connect, TLS handshake, setup), so a store that stops
+    // answering fails the operation with a timeout instead of hanging it.
     // Built-in presets: "consumer", "admin", "internal", "strict".
     // Supported option keys: session_secret, session_ttl, refresh_ttl, sliding_sessions,
     // refresh_throttle, max_session_ttl, success_url/after_login, failure_url/after_failure,
@@ -3333,6 +3376,7 @@ pub fn init() -> HashMap<String, Value> {
     // @example enable_auth([github], "admin") ~ "Admin preset"
     // @example enable_auth([github], "consumer", map { "session_store": "sqlite:./sessions.db" }) ~ "Preset plus overrides"
     // @example enable_auth([github], map { "session_store": "redis://localhost:6379" }) ~ "Redis sessions"
+    // @example enable_auth([github], map { "session_store": "rediss://:secret@cache.example.com:6380/0" }) ~ "Redis sessions over verified TLS"
     module.insert(
         "enable_auth".to_string(),
         Value::NativeFunction {
@@ -6448,8 +6492,7 @@ mod tests {
                     .unwrap()
                     .clone()
                     .expect("Redis rate-limit contract requires a configured URL");
-                let client = redis::Client::open(url.as_str()).unwrap();
-                let mut conn = client.get_connection().unwrap();
+                let mut conn = auth_redis_connection(&url).unwrap();
                 let redis_key = format!("ntnt:auth_rate_limit:{scope}:{key_hash}");
                 let ttl: i64 = redis::cmd("TTL").arg(redis_key).query(&mut conn).unwrap();
                 assert!(
@@ -9474,7 +9517,7 @@ mod tests {
         reset_auth_test_state();
         init_test_auth(SessionStore::Postgres(url.clone()));
         {
-            let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+            let mut client = auth_postgres_client(&url).unwrap();
             client
                 .execute(
                     "INSERT INTO auth_local_identities
@@ -9505,7 +9548,7 @@ mod tests {
                 .unwrap();
         }
 
-        let mut migration_lock_client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        let mut migration_lock_client = auth_postgres_client(&url).unwrap();
         let mut migration_lock = migration_lock_client.transaction().unwrap();
         migration_lock
             .execute(
@@ -9548,7 +9591,7 @@ mod tests {
         }
 
         {
-            let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+            let mut client = auth_postgres_client(&url).unwrap();
             let migrated = client
                 .query_one(
                     "SELECT purpose, local_user_id, token_hash
@@ -9594,8 +9637,7 @@ mod tests {
         let token_key = format!("ntnt:local_password_reset:{unique}");
         let user_set_key = format!("ntnt:local_password_resets_for_user:{unique}");
         {
-            let client = redis::Client::open(url.as_str()).unwrap();
-            let mut conn = client.get_connection().unwrap();
+            let mut conn = auth_redis_connection(&url).unwrap();
             redis::cmd("SET")
                 .arg(&token_key)
                 .arg("legacy-token-record")
@@ -9611,8 +9653,7 @@ mod tests {
         reset_auth_test_state();
         init_test_auth(SessionStore::Redis(url.clone()));
         {
-            let client = redis::Client::open(url.as_str()).unwrap();
-            let mut conn = client.get_connection().unwrap();
+            let mut conn = auth_redis_connection(&url).unwrap();
             let remaining: usize = redis::cmd("EXISTS")
                 .arg(&token_key)
                 .arg(&user_set_key)
@@ -9620,6 +9661,153 @@ mod tests {
                 .unwrap();
             assert_eq!(remaining, 0);
         }
+        reset_auth_test_state();
+    }
+
+    /// Run `operation` on another thread and wait for it under the hang guard.
+    fn in_background<T: Send + 'static>(
+        operation: impl FnOnce() -> T + Send + 'static,
+    ) -> std::sync::mpsc::Receiver<T> {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(operation());
+        });
+        result
+    }
+
+    #[test]
+    fn test_redis_store_init_gives_up_on_a_stalled_tls_handshake() {
+        use crate::stdlib::redis_test_server::{self as stand_in, Event, Plan, HANG_GUARD};
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        let server = stand_in::start(vec![Plan::StallHandshake], None);
+        let config = AuthConfig {
+            session_store: SessionStore::Redis(format!("rediss://127.0.0.1:{}/0", server.port)),
+            ..AuthConfig::default()
+        };
+        // The default is 10 seconds; the stand-in never answers, so 1 is hit too.
+        let init = in_background(move || {
+            crate::stdlib::redis_tls::with_default_connect_timeout(
+                std::time::Duration::from_secs(1),
+                || ensure_auth_session_store(&config),
+            )
+        });
+        let event = server.next();
+        assert!(
+            matches!(event, Event::Stalled { first: 0x16, .. }),
+            "{event:?}"
+        );
+        let error = init
+            .recv_timeout(HANG_GUARD)
+            .expect("the auth store was still connecting at the hang guard")
+            .unwrap_err();
+        assert!(error.contains("Failed to connect to Redis"), "{error}");
+        assert!(error.contains("timed out: no answer within 1s"), "{error}");
+        let event = server.next();
+        assert!(matches!(event, Event::ClosedByClient { .. }), "{event:?}");
+        assert!(REDIS_URL.lock().unwrap().is_none());
+        reset_auth_test_state();
+    }
+
+    #[test]
+    fn test_redis_store_operation_gives_up_on_stalled_setup() {
+        use crate::stdlib::redis_test_server::{self as stand_in, Event, Plan, HANG_GUARD};
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        // Connection 0 initializes the store; the operation's own connection stalls.
+        let server = stand_in::start(vec![Plan::Serve, Plan::StallSetup], None);
+        init_test_auth(SessionStore::Redis(format!(
+            "redis://127.0.0.1:{}/0",
+            server.port
+        )));
+        let event = server.next();
+        assert!(
+            matches!(event, Event::Served { connection: 0, .. }),
+            "{event:?}"
+        );
+        let lookup = in_background(|| {
+            crate::stdlib::redis_tls::with_default_connect_timeout(
+                std::time::Duration::from_secs(1),
+                || get_auth_challenge_record("stalled"),
+            )
+        });
+        let event = server.next();
+        assert!(
+            matches!(
+                event,
+                Event::Stalled {
+                    connection: 1,
+                    first: b'*',
+                    ..
+                }
+            ),
+            "{event:?}"
+        );
+        let error = lookup
+            .recv_timeout(HANG_GUARD)
+            .expect("the auth store was still connecting at the hang guard")
+            .unwrap_err();
+        assert!(error.contains("timed out: no answer within 1s"), "{error}");
+        let event = server.next();
+        assert!(
+            matches!(event, Event::ClosedByClient { connection: 1 }),
+            "{event:?}"
+        );
+        reset_auth_test_state();
+    }
+
+    #[test]
+    fn test_redis_store_operations_do_not_wait_for_another_operations_stalled_connect() {
+        use crate::stdlib::redis_test_server::{self as stand_in, Event, Plan, HANG_GUARD};
+        let _guard = AUTH_TEST_MUTEX.lock().unwrap();
+        reset_auth_test_state();
+        // Connection 0 initializes the store, 1 stalls in setup, 2 is served.
+        let server = stand_in::start(vec![Plan::Serve, Plan::StallSetup, Plan::Serve], None);
+        init_test_auth(SessionStore::Redis(format!(
+            "redis://127.0.0.1:{}/0",
+            server.port
+        )));
+        let event = server.next();
+        assert!(
+            matches!(event, Event::Served { connection: 0, .. }),
+            "{event:?}"
+        );
+        // Only the release below ends this connect: its deadline is ten hang guards.
+        let stalled = in_background(|| {
+            crate::stdlib::redis_tls::with_default_connect_timeout(10 * HANG_GUARD, || {
+                get_auth_challenge_record("stalled")
+            })
+        });
+        let Event::Stalled {
+            connection: 1,
+            release,
+            ..
+        } = server.next()
+        else {
+            panic!("the first operation's connect did not reach the stand-in");
+        };
+        // Another operation completes while that connect is still stalled.
+        let other = in_background(|| get_auth_challenge_record("other"));
+        let found = other
+            .recv_timeout(HANG_GUARD)
+            .expect("an auth-store operation waited for another operation's stalled connect");
+        assert!(matches!(found, Ok(None)), "{found:?}");
+        let event = server.next();
+        assert!(
+            matches!(event, Event::Served { connection: 2, ref commands } if commands.last().map(String::as_str) == Some("GET")),
+            "{event:?}"
+        );
+        // The stalled connect was still open, waiting, until this release.
+        release.close();
+        let event = server.next();
+        assert!(
+            matches!(event, Event::Released { connection: 1 }),
+            "{event:?}"
+        );
+        let result = stalled
+            .recv_timeout(HANG_GUARD)
+            .expect("the released connect did not return");
+        assert!(result.is_err(), "{result:?}");
         reset_auth_test_state();
     }
 
@@ -10881,7 +11069,7 @@ mod tests {
         let active_tokens = match label {
             "postgres" => {
                 let url = std::env::var("NTNT_AUTH_TEST_POSTGRES_URL").unwrap();
-                let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+                let mut client = auth_postgres_client(&url).unwrap();
                 client
                     .query_one(
                         "SELECT COUNT(*) FROM auth_local_one_time_tokens WHERE local_user_id = $1 AND purpose = $2",
@@ -10892,8 +11080,7 @@ mod tests {
             }
             "redis" => {
                 let url = std::env::var("NTNT_AUTH_TEST_REDIS_URL").unwrap();
-                let client = redis::Client::open(url).unwrap();
-                let mut conn = client.get_connection().unwrap();
+                let mut conn = auth_redis_connection(&url).unwrap();
                 redis::cmd("SCARD")
                     .arg(format!(
                         "ntnt:local_one_time_tokens_for_user:magic_link:{}",

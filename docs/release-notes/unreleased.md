@@ -53,6 +53,55 @@ longer renders heading attributes such as `# Title {#id .class}`. Scheme detecti
 follows browsers: it ignores case, leading control characters and embedded tabs or
 newlines. Relative links, fragments and `to_html()` are unchanged.
 
+## Verified TLS for PostgreSQL and Redis
+
+- **PostgreSQL** (`std/db/postgres` and the std/auth store) honours `sslmode`:
+  `verify-full` checks the certificate chain and host name, `verify-ca` the chain
+  only (it needs `sslrootcert`), `require` encrypts without verifying, and `disable`
+  stays plaintext. `prefer` and `allow` are rejected because they can fall back to
+  plaintext. Without `sslmode`, a connection uses verified TLS (`verify-full`
+  against the host CA store) unless every host is local: a loopback address,
+  `localhost`, a Unix socket, or a single-label name such as a Docker service
+  (`db`), which stay plaintext as before. `sslrootcert=/path/ca.pem` adds a private
+  CA and always means verified TLS: without `sslmode` it selects `verify-full` for
+  local hosts too, it cannot be combined with `require` or `disable`, and over a
+  Unix socket, which PostgreSQL serves in plaintext only, it is an error. A TLS
+  connection never falls back to plaintext, and errors never include the
+  connection string. Each TLS policy has its own connection pool, and trust roots
+  are read once per pool: restart after rotating a CA. A server that accepts TLS
+  must finish the handshake within the connection string's `connect_timeout`, or
+  10 seconds when it sets none; otherwise the connection is closed with an error.
+  A target given only as `hostaddr=` is named by that address, so `verify-full`
+  needs a certificate for the IP address (libpq instead refuses `verify-full`
+  without a host name), and such targets now also work in plaintext through the
+  connection pool, where they used to fail on Unix.
+- **Redis and Valkey** (`std/kv`, `std/jobs` stores and the std/auth session store):
+  `rediss://` and `valkeys://` connect over TLS and verify the certificate chain and
+  host name against the host CA store. `redis://` and `valkey://` stay plaintext.
+  Before, `std/kv` treated a `rediss://` URL as a SQLite file path, and jobs and auth
+  rejected it. Every connection now has a deadline: `std/kv` `open()`, job stores
+  and the auth session store wait at most 10 seconds for each answer during the TCP
+  connect, the TLS handshake and the setup commands, so a server that stops
+  answering is an error instead of a hang. One auth-store operation's slow connect
+  no longer holds up the others.
+
+## SMTP fixes in `std/email`
+
+`std/email` now uses `lettre` 0.11.24, which fixes six advisories in its SMTP
+client:
+
+- [RUSTSEC-2026-0560](https://rustsec.org/advisories/RUSTSEC-2026-0560): STARTTLS response injection let a
+  man-in-the-middle forge SMTP replies. Only STARTTLS connections are affected.
+- [RUSTSEC-2026-0561](https://rustsec.org/advisories/RUSTSEC-2026-0561): message content with a bare LF or CR
+  was not dot-stuffed, allowing SMTP command injection.
+- [RUSTSEC-2026-0563](https://rustsec.org/advisories/RUSTSEC-2026-0563): mail for an address with a quoted local
+  part could be sent to a different address.
+- [RUSTSEC-2026-0565](https://rustsec.org/advisories/RUSTSEC-2026-0565): a malicious server could exhaust memory
+  with an unbounded reply.
+- [RUSTSEC-2026-0562](https://rustsec.org/advisories/RUSTSEC-2026-0562) and
+  [RUSTSEC-2026-0564](https://rustsec.org/advisories/RUSTSEC-2026-0564): panics on an `EHLO` reply line of only
+  white space and on a display name containing CR or LF.
+
 ## Other fixes
 
 - The warning for JavaScript-style `${...}` interpolation in string literals scans
@@ -83,5 +132,14 @@ newlines. Relative links, fragments and `to_html()` are unchanged.
 4. During development hot reload, a `require_auth(path)` rule or `protected_paths`
    entry you delete stays enforced until the server restarts; added rules still
    apply at the reload.
+
+5. A PostgreSQL connection string whose host is not local (a name containing a dot,
+   or a non-loopback address) and that has no `sslmode` now requires verified TLS.
+   Enable TLS on the server, add `sslrootcert=` for a private or managed CA, or add
+   `sslmode=disable` to keep plaintext on a trusted network. `sslrootcert` always
+   means verified TLS, local hosts included: remove it to use `disable` or
+   `require`.
+6. `sslmode=prefer` and `sslmode=allow` are rejected; choose `verify-full`,
+   `verify-ca`, `require` or `disable`. TLS modes over a Unix socket are rejected.
 
 See [NTNT v0.6.2](v0.6.2.md) for the previous release.

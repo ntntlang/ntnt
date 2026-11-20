@@ -27,11 +27,11 @@ pub fn parse_auth_session_store(value: &str) -> std::result::Result<SessionStore
     if value.starts_with("postgres://") || value.starts_with("postgresql://") {
         return Ok(SessionStore::Postgres(value.to_string()));
     }
-    if value.starts_with("redis://") || value.starts_with("valkey://") {
+    if crate::stdlib::redis_tls::is_redis_url(value) {
         return Ok(SessionStore::Redis(value.to_string()));
     }
 
-    Err("session_store must be one of: memory, sqlite:PATH, postgres://..., postgresql://..., redis://..., valkey://...".to_string())
+    Err("session_store must be one of: memory, sqlite:PATH, postgres://..., postgresql://..., redis://..., rediss://..., valkey://..., valkeys://...".to_string())
 }
 
 pub fn ensure_auth_session_store(config: &AuthConfig) -> std::result::Result<(), String> {
@@ -158,7 +158,7 @@ pub fn init_auth(config: AuthConfig) {
             // Don't log connection URL (may contain password)
         }
         SessionStore::Redis(url) => {
-            let backend = if url.starts_with("valkey://") {
+            let backend = if crate::stdlib::redis_tls::backend_name(url) == "valkey" {
                 "Valkey"
             } else {
                 "Redis"
@@ -502,8 +502,8 @@ const AUTH_INIT_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 fn init_postgres_sessions(url: &str) -> std::result::Result<(), String> {
     // Serialize bootstrap/migration, including concurrent legacy-token upgrades.
     // Already-current startup below performs catalog reads only.
-    let mut connection = postgres::Client::connect(url, postgres::NoTls)
-        .map_err(|e| format!("Failed to connect to PostgreSQL: {}", e))?;
+    let mut connection =
+        auth_postgres_client(url).map_err(|e| format!("Failed to connect to PostgreSQL: {}", e))?;
     let mut client = connection
         .transaction()
         .map_err(|e| postgres_schema_error("begin initialization", &e))?;
@@ -794,19 +794,11 @@ fn purge_legacy_redis_password_reset_keys(
 
 /// Initialize Redis session storage
 fn init_redis_sessions(url: &str) -> std::result::Result<(), String> {
-    // Convert valkey:// to redis:// for the redis crate
-    let redis_url = if url.starts_with("valkey://") {
-        url.replacen("valkey://", "redis://", 1)
-    } else {
-        url.to_string()
-    };
+    // valkey:// and valkeys:// become the redis crate's redis:// and rediss://.
+    let redis_url = crate::stdlib::redis_tls::normalize(url);
 
-    // Test connection
-    let client = redis::Client::open(redis_url.as_str())
-        .map_err(|e| format!("Failed to create Redis client: {}", e))?;
-
-    let mut conn = client
-        .get_connection()
+    // Test connection (TLS for rediss://, verified against the host CA store)
+    let mut conn = auth_redis_connection(&redis_url)
         .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
 
     // Test with a PING
