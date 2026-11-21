@@ -794,7 +794,15 @@ async fn build_concurrent(
     progress["phase"] = json!("record");
     let (position, catalog) = locked_attempt(db, inputs, saved).await?;
     if position != applied + 1 {
-        return Err(plan_state::history(inputs, applied + 1, position));
+        // `history` takes covered counts, not ledger positions: the plan
+        // was made with `base` covered, and the ledger now covers the
+        // migrations before the attempt.
+        let base = validate(inputs, saved)?;
+        return Err(plan_state::history(
+            inputs,
+            base,
+            position.saturating_sub(1),
+        ));
     }
     if !catalog.uncovered.is_empty()
         || json_digest(&catalog) != saved["plan"]["execution"]["prefix_fingerprints"][applied + 1]

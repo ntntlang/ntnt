@@ -527,6 +527,155 @@ fn stale_plans_name_what_changed(f: Fixture) {
         "{r}"
     );
 }
+/// Review r1 (#423): a migration added below, or removed from, the ones a
+/// plan treats as applied is named for what happened, never as a change to
+/// a migration that did not change, and following the advice gives a
+/// passing migrate.
+fn stale_plans_name_changes_below_the_plan(f: Fixture) {
+    let s = f.schema();
+    let table = |name: &str| format!("CREATE TABLE {s}.{name}(id INTEGER PRIMARY KEY);\n");
+    let dir = f.root().join("migrations");
+    f.sql("0010_a.sql", &table("a"));
+    f.sql("0020_b.sql", &table("b"));
+    let initial = f.plan("initial.json");
+    let applied = f.apply("initial.json", initial["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    f.sql("0030_c.sql", &table("c"));
+    let plan = f.plan("review.json");
+    let migrate = |file: &str, plan: &Value| f.apply(file, plan["plan_digest"].as_str());
+    let stale = |r: &Value| -> Value {
+        assert_ne!(r["outcome"], "pass", "{r}");
+        diagnostic(r, "DB_PLAN_STALE").clone()
+    };
+    let against = |file: &str| {
+        let r = f.command("status", &["--against", file]);
+        diagnostic(&r, "DB_PLAN_STALE")["message"].clone()
+    };
+    let status = "`ntnt db status --database app --target test`";
+
+    // A pending migration added between the applied ones and the plan's.
+    f.sql("0025_m.sql", &table("m"));
+    assert_eq!(
+        stale(&migrate("review.json", &plan))["message"],
+        "0025_m.sql was added to migrations/ after the plan was made, before 0030_c.sql."
+    );
+    std::fs::remove_file(dir.join("0025_m.sql")).unwrap();
+
+    // An applied migration removed: not blamed on the pending one.
+    std::fs::remove_file(dir.join("0020_b.sql")).unwrap();
+    let d = stale(&migrate("review.json", &plan));
+    let removed = "The plan treats 2 migration(s) as applied, all numbered below 0030_c.sql, the first it would apply, and migrations/ now holds 1 numbered below it: applied migrations were removed or renumbered after the plan was made.";
+    assert_eq!(d["message"], removed, "{d}");
+    assert_eq!(against("review.json"), removed);
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.starts_with(&format!(
+            "{status} names an applied migration that is missing from migrations/"
+        )),
+        "{d}"
+    );
+    assert!(
+        next_action.ends_with("then rerun migrate with this plan."),
+        "{d}"
+    );
+    // Following the advice: status names it and how to restore it.
+    let r = f.command("status", &[]);
+    let missing = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(missing["source"], "0020_b.sql", "{r}");
+    assert!(
+        missing["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("restore migrations/0020_b.sql"),
+        "{r}"
+    );
+    f.sql("0020_b.sql", &table("b"));
+
+    // A migration merged in below the applied ones is the one named.
+    f.sql("0005_x.sql", &table("x"));
+    let d = stale(&migrate("review.json", &plan));
+    let added = "0005_x.sql was added to migrations/ after the plan was made, numbered below 0020_b.sql, which the plan treats as applied.";
+    assert_eq!(d["message"], added, "{d}");
+    assert_eq!(against("review.json"), added);
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.starts_with("To run this plan as reviewed, move migrations/0005_x.sql out of migrations/ and rerun migrate with it."),
+        "{d}"
+    );
+    assert!(
+        next_action.contains(&format!(
+            "renumber it as {status} advises (DB_HISTORY_DIVERGENT), then plan, review and approve again"
+        )),
+        "{d}"
+    );
+    // Following its first advice: the plan runs as reviewed.
+    std::fs::rename(dir.join("0005_x.sql"), f.root().join("0005_x.sql")).unwrap();
+    let r = migrate("review.json", &plan);
+    assert_eq!(r["outcome"], "pass", "{r}");
+
+    // Following its second: keep the migration, renumbered as status says.
+    f.sql("0040_d.sql", &table("d"));
+    let next = f.plan("next.json");
+    std::fs::rename(f.root().join("0005_x.sql"), dir.join("0005_x.sql")).unwrap();
+    let d = stale(&migrate("next.json", &next));
+    assert_eq!(
+        d["message"],
+        "0005_x.sql was added to migrations/ after the plan was made, numbered below 0030_c.sql, which the plan treats as applied.",
+        "{d}"
+    );
+    let r = f.command("status", &[]);
+    let divergent = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(divergent["source"], "0005_x.sql", "{r}");
+    assert!(
+        divergent["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("such as migrations/0031_x.sql"),
+        "{r}"
+    );
+    std::fs::rename(dir.join("0005_x.sql"), dir.join("0031_x.sql")).unwrap();
+    let renumbered = f.plan("renumbered.json");
+    let r = migrate("renumbered.json", &renumbered);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("status", &[])["history"]["applied_count"], 5);
+}
+/// Review r1 (#423): on an adopted target too, a migration added between
+/// the ones the plan treats as applied and the plan's is named, and planning
+/// again, as advised, gives a passing migrate.
+fn stale_plans_name_a_migration_added_after_an_adoption(f: Fixture) {
+    let s = f.schema();
+    let table = |name: &str| format!("CREATE TABLE {s}.{name}(id INTEGER PRIMARY KEY);\n");
+    f.sql("0010_a.sql", &table("a"));
+    f.execute(&table("a"));
+    adoption_checks(
+        &f,
+        &format!("SELECT NOT EXISTS (SELECT 1 FROM {s}.a WHERE id IS NULL)"),
+    );
+    let adoption = f.command("plan", &["--adopt-through", "10", "--out", "adoption.json"]);
+    assert_eq!(adoption["outcome"], "pass", "{adoption}");
+    let adopted = f.apply("adoption.json", adoption["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{adopted}");
+    f.sql("0020_b.sql", &table("b"));
+    let plan = f.plan("review.json");
+    f.sql("0015_m.sql", &table("m"));
+    let r = f.apply("review.json", plan["plan_digest"].as_str());
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert_eq!(
+        d["message"],
+        "0015_m.sql was added to migrations/ after the plan was made, before 0020_b.sql.",
+        "{r}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("Plan, review and approve again"),
+        "{r}"
+    );
+    let again = f.plan("again.json");
+    let r = f.apply("again.json", again["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+}
 fn contract_failures(create: fn() -> Fixture) {
     for (phase, check) in [
         ("requires", "SELECT false"),
@@ -622,6 +771,24 @@ fn sqlite_stale_plans_name_what_changed() {
 #[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
 fn postgres_stale_plans_name_what_changed() {
     stale_plans_name_what_changed(Fixture::pg())
+}
+#[test]
+fn sqlite_stale_plans_name_changes_below_the_plan() {
+    stale_plans_name_changes_below_the_plan(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_stale_plans_name_changes_below_the_plan() {
+    stale_plans_name_changes_below_the_plan(Fixture::pg())
+}
+#[test]
+fn sqlite_stale_plans_name_a_migration_added_after_an_adoption() {
+    stale_plans_name_a_migration_added_after_an_adoption(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_stale_plans_name_a_migration_added_after_an_adoption() {
+    stale_plans_name_a_migration_added_after_an_adoption(Fixture::pg())
 }
 /// #423: a PostgreSQL target whose session settings changed after the plan
 /// names the setting with both values.

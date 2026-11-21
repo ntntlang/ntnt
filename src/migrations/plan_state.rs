@@ -3,7 +3,7 @@
 //! policy, the target itself, its history or its catalog. An artifact that is
 //! not an intact saved plan (edited by hand, a forged digest, a blocked plan)
 //! is invalid rather than stale, and its refusal says only that.
-use super::inventory::{json_digest, CapturedInputs};
+use super::inventory::{json_digest, CapturedInputs, Migration};
 use super::model::{History, HistoryEntry};
 use super::Diagnostic;
 use serde_json::{json, Value};
@@ -253,26 +253,129 @@ pub(super) fn policy(
     Ok(())
 }
 
+/// The ledger of a target that applied `applied`, in order, with `ntnt db
+/// migrate`, or that has no ledger yet when there are none.
+fn ledger_of<'a>(
+    inputs: &CapturedInputs,
+    applied: impl IntoIterator<Item = &'a Migration>,
+) -> History {
+    let entries: Vec<HistoryEntry> = applied
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| HistoryEntry {
+            position: i as i64 + 1,
+            id: m.id.to_string(),
+            name: m.name.clone(),
+            checksum: m.checksum.clone(),
+            state: "applied".into(),
+        })
+        .collect();
+    let present = !entries.is_empty();
+    History {
+        present,
+        scope: present
+            .then(|| json!({"database":inputs.database_name,"schema":inputs.config.schema})),
+        entries,
+    }
+}
 /// The ledger of a target whose first `count` captured migrations were all
 /// applied by `ntnt db migrate`, or that has no ledger yet.
 fn applied_ledger(inputs: &CapturedInputs, count: usize) -> History {
-    History {
-        present: count > 0,
-        scope: (count > 0)
-            .then(|| json!({"database":inputs.database_name,"schema":inputs.config.schema})),
-        entries: inputs
-            .migrations
-            .iter()
-            .take(count)
-            .enumerate()
-            .map(|(i, m)| HistoryEntry {
-                position: i as i64 + 1,
-                id: m.id.to_string(),
-                name: m.name.clone(),
-                checksum: m.checksum.clone(),
-                state: "applied".into(),
+    ledger_of(inputs, inputs.migrations.iter().take(count))
+}
+/// The ledger of a target that adopted the first `adopted` captured
+/// migrations and then applied the rest of the first `through` with
+/// `ntnt db migrate`.
+fn adopted_ledger(inputs: &CapturedInputs, adopted: usize, through: usize) -> Option<History> {
+    let mut history = ledger_of(inputs, inputs.migrations.get(adopted..through)?);
+    for entry in &mut history.entries {
+        entry.position += adopted as i64;
+    }
+    history.entries.insert(0, inputs.checkpoint(adopted).ok()?);
+    history.present = true;
+    history.scope = Some(json!({"database":inputs.database_name,"schema":inputs.config.schema}));
+    Some(history)
+}
+
+/// The refusal of a plan whose first pending migration, `first`, is now at
+/// index `at` of the captured migrations, though the plan treats the `base`
+/// before it as applied: migrations numbered below it were added or removed
+/// after the plan was made (review r1). An added migration is named when
+/// the plan's base ledger is one `ntnt db migrate` wrote, so the files it
+/// covers can be told from the new ones; a removed one is gone, and
+/// `ntnt db status` names it from the target's ledger.
+fn changed_below(
+    inputs: &CapturedInputs,
+    binding: &Value,
+    base: usize,
+    at: usize,
+    first: &str,
+) -> Diagnostic {
+    let dir = &inputs.config.migrations_dir;
+    let migrations = &inputs.migrations;
+    let status = format!(
+        "`ntnt db status --database {} --target {}`",
+        inputs.database_name, inputs.target_name
+    );
+    if at < base {
+        return stale(
+            format!("The plan treats {base} migration(s) as applied, all numbered below {first}, the first it would apply, and {dir}/ now holds {at} numbered below it: applied migrations were removed or renumbered after the plan was made."),
+            format!("{status} names an applied migration that is missing from {dir}/ and how to restore it. Restore each one under the name it was applied with, then rerun migrate with this plan."),
+        );
+    }
+    let digest = &binding["base_history_digest"];
+    let planned = |applied: &[&Migration]| {
+        json_digest(&ledger_of(inputs, applied.iter().copied())) == *digest
+    };
+    let before: Vec<&Migration> = migrations[..at].iter().collect();
+    // The first `base` are still the applied ones when they rebuild the
+    // plan's ledger, with or without an adopted checkpoint first.
+    let unchanged = planned(&before[..base])
+        || (1..=base).any(|adopted| {
+            adopted_ledger(inputs, adopted, base).is_some_and(|h| json_digest(&h) == *digest)
+        });
+    if unchanged {
+        // The applied migrations are unchanged: the new ones follow them.
+        let added = &before[base..];
+        let more = match added.len() {
+            1 => " was".to_owned(),
+            n => format!(" and {} more migration(s) were", n - 1),
+        };
+        return stale(
+            format!(
+                "{}{more} added to {dir}/ after the plan was made, before {first}.",
+                added[0].name
+            ),
+            "Plan, review and approve again: the reviewed SQL is no longer what would run."
+                .to_owned(),
+        );
+    }
+    // One more below the applied ones: the one without which the files
+    // before `first` are the plan's ledger.
+    let below = (at == base + 1)
+        .then(|| {
+            (0..base).find(|&skip| {
+                let rest: Vec<&Migration> = before
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, m)| (i != skip).then_some(*m))
+                    .collect();
+                planned(&rest)
             })
-            .collect(),
+        })
+        .flatten();
+    match below {
+        Some(index) => {
+            let (added, last) = (&before[index].name, &before[at - 1].name);
+            stale(
+                format!("{added} was added to {dir}/ after the plan was made, numbered below {last}, which the plan treats as applied."),
+                format!("To run this plan as reviewed, move {dir}/{added} out of {dir}/ and rerun migrate with it. To keep {added}, renumber it as {status} advises (DB_HISTORY_DIVERGENT), then plan, review and approve again."),
+            )
+        }
+        None => stale(
+            format!("The plan treats {base} migration(s) as applied, all numbered below {first}, the first it would apply, and {dir}/ now holds {at} numbered below it: migrations were added after the plan was made."),
+            format!("To run this plan as reviewed, move the added migrations out of {dir}/ and rerun migrate with it. To keep them, renumber each one {status} names as numbered below an applied migration (DB_HISTORY_DIVERGENT) as it advises, then plan, review and approve again."),
+        ),
     }
 }
 
@@ -332,6 +435,18 @@ pub(super) fn inputs(
     // The plan lists the migrations it would apply, with their checksums.
     {
         let planned = plan["pending"].as_array().map_or(&[][..], Vec::as_slice);
+        // Find the first by name: when it is no longer right after the
+        // migrations the plan treats as applied, those changed (review r1).
+        if let Some(entry) = planned.first() {
+            let Some(name) = simple(&entry["source"]) else {
+                return Err(invalid());
+            };
+            if let Some(at) = migrations.iter().position(|m| m.name == name) {
+                if at != base {
+                    return Err(changed_below(inputs, b, base, at, name));
+                }
+            }
+        }
         let current = &migrations[base..];
         for (index, entry) in planned.iter().enumerate() {
             let Some(name) = simple(&entry["source"]) else {

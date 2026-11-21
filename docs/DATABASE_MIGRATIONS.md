@@ -1016,7 +1016,10 @@ and `--against` alike, and the message names the binding that changed:
 - the selection, checked before any I/O: `review.json was planned for database app,
   target development; this run selected database app, target staging.`;
 - an input: the pending migration that changed (with both checksums), was added or
-  was removed, or the manifest itself;
+  was removed; a migration added below the ones the plan treats as applied (named
+  when the plan's ledger tells it from them, with how to run the plan without it or
+  renumber it) or an applied one removed (`status` names it and how to restore it);
+  or the manifest itself;
 - the policy: `[databases.app.limits] in ntnt.toml changed after the plan was made:
   statement_seconds: plan 90, now 600.`, the engine or schema, or another part of the
   database's configuration;
