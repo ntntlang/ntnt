@@ -589,6 +589,7 @@ pub(crate) fn sqlite_refusal(sql: &str) -> Option<SqliteRefusal> {
                 locks: vec![],
                 lock_warnings: vec![],
                 non_transactional: false,
+                outside_scope: vec![],
             };
             classify(&mut probe, s, "sqlite");
             let cascade = probe.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES");
