@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased (0.6.3)
+## Unreleased
 
-See [unreleased notes](docs/release-notes/unreleased.md).
+No changes recorded since 0.6.3.
+
+## 0.6.3
+
+See the [versioned announcement and upgrade guidance](docs/release-notes/v0.6.3.md).
 
 ### Security
 
@@ -47,6 +51,8 @@ See [unreleased notes](docs/release-notes/unreleased.md).
 - `ntnt test` waits until the app's server is listening before sending requests,
   so slow-starting apps no longer fail their first requests; `--port 0` picks a free
   port.
+- The Windows release's `.sha256` file ends its line with LF, so macOS
+  `shasum -a 256 -c` accepts it.
 
 ## 0.6.2
 

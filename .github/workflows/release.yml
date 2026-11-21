@@ -163,7 +163,9 @@ jobs:
         shell: pwsh
         run: |
           $hash = (Get-FileHash -Algorithm SHA256 ntnt-${{ matrix.name }}.zip).Hash.ToLower()
-          "$hash  ntnt-${{ matrix.name }}.zip" | Out-File -Encoding ascii ntnt-${{ matrix.name }}.zip.sha256
+          # One LF-terminated line, as on Unix: Out-File would end it with CRLF on
+          # Windows, which `shasum -a 256 -c` (macOS) rejects.
+          "$hash  ntnt-${{ matrix.name }}.zip`n" | Set-Content -NoNewline -Encoding ascii ntnt-${{ matrix.name }}.zip.sha256
           Get-Content ntnt-${{ matrix.name }}.zip.sha256
 
       - name: Upload artifact

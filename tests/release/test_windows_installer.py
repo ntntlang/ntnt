@@ -69,8 +69,8 @@ def release_archive(binary=RELEASE_BINARY):
 
 
 def sidecar(archive):
-    """The .sha256 file the release workflow publishes: lowercase hex, two spaces, CRLF."""
-    return f"{hashlib.sha256(archive).hexdigest()}  {ASSET}\r\n"
+    """The .sha256 file the release workflow publishes: lowercase hex, two spaces, LF."""
+    return f"{hashlib.sha256(archive).hexdigest()}  {ASSET}\n"
 
 
 WORKFLOW_SIDECAR = object()
@@ -227,7 +227,8 @@ class WindowsInstallerBehaviourTests(unittest.TestCase):
         archive = release_archive()
         digest = hashlib.sha256(archive).hexdigest()
         checksums = {
-            "release workflow format (CRLF)": sidecar(archive),
+            "release workflow format (LF)": sidecar(archive),
+            "releases up to v0.6.2 (CRLF)": f"{digest}  {ASSET}\r\n",
             "uppercase hex, LF": f"{digest.upper()}  {ASSET}\n",
             "binary-mode marker, no newline": f"{digest} *{ASSET}",
             "UTF-8 byte order mark": f"\ufeff{digest}  {ASSET}\r\n",
