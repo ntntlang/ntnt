@@ -68,6 +68,40 @@ pub(crate) struct Postgres {
     task: tokio::task::JoinHandle<()>,
     /// sslmode, trust source and the TLS version this client negotiated.
     transport: Value,
+    /// Set once `prepare_scratch` validated this session as scratch: the
+    /// managed scope it replays and what lay outside that scope then.
+    scratch: std::sync::OnceLock<Box<ScratchScope>>,
+}
+/// A prepared scratch database's managed scope and its `OUTSIDE_SCOPE` rows.
+struct ScratchScope {
+    scope: Vec<String>,
+    outside: std::collections::BTreeMap<String, Value>,
+}
+/// The managed scope: the managed schema first, then the schemas the
+/// history creates.
+fn scope(schema: &str, extra: &[String]) -> Vec<String> {
+    std::iter::once(schema.to_owned())
+        .chain(extra.iter().cloned())
+        .collect()
+}
+/// Objects a diagnostic lists at most; its message gives the full count.
+const LISTED_OBJECTS: usize = 100;
+/// `DB_OUTSIDE_SCOPE` for `migration`, naming `objects`.
+fn outside_scope(migration: &Migration, message: &str, mut objects: Vec<String>) -> Diagnostic {
+    let total = objects.len();
+    objects.truncate(LISTED_OBJECTS);
+    let count = if total > LISTED_OBJECTS {
+        format!(" The first {LISTED_OBJECTS} of {total} are listed.")
+    } else {
+        String::new()
+    };
+    let mut d = Diagnostic::new(
+        "DB_OUTSIDE_SCOPE",
+        &format!("{message} NTNT inspects only the managed scope: the configured schema and the schemas this history creates with CREATE SCHEMA.{count}"),
+    )
+    .with_objects(&objects);
+    d.source = Some(migration.name.clone());
+    d
 }
 impl Drop for Postgres {
     fn drop(&mut self) {
@@ -93,7 +127,8 @@ use super::model::{Catalog, History, HistoryEntry};
 /// Small relational boundary: each adapter owns its native catalog and operation
 /// capabilities. A driver alone does not confer migration support.
 pub(crate) trait RelationalAdapter {
-    async fn catalog(&self, schema: &str, role: &str) -> Result<Catalog>;
+    /// Inspect `schema` and the `extra` schemas of the managed scope.
+    async fn catalog(&self, schema: &str, extra: &[String], role: &str) -> Result<Catalog>;
     fn capabilities(version: i32) -> Value;
 }
 impl Postgres {
@@ -179,6 +214,7 @@ impl Postgres {
             client,
             task,
             transport,
+            scratch: std::sync::OnceLock::new(),
         })
     }
     pub async fn batch(&self, sql: &str) -> Result<()> {
@@ -330,7 +366,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         if checks.len() != 1 || !checks[0].get::<_, bool>(0) {
             return Err(bad());
         }
-        let ledger_scope = self.catalog("_ntnt", "").await.map_err(|_| bad())?;
+        let ledger_scope = self.catalog("_ntnt", &[], "").await.map_err(|_| bad())?;
         if ledger_scope.uncovered.iter().any(|key| {
             ledger_scope
                 .objects
@@ -393,14 +429,15 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 .collect(),
         })
     }
-    pub async fn validate_execution_scope(&self, schema: &str) -> Result<()> {
+    pub async fn validate_execution_scope(&self, schema: &str, extra: &[String]) -> Result<()> {
         // A cross-scope dependent is not an owned object. Even non-cascading changes
         // are conservatively rejected rather than promising a transitive effect bound.
-        let incoming = self.rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_class c ON c.oid=k.confrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_class f ON f.oid=k.conrelid JOIN pg_catalog.pg_namespace fn ON fn.oid=f.relnamespace WHERE n.nspname=$1 AND fn.nspname<>$1)", &[&schema]).await?;
+        // Foreign keys between schemas of the managed scope are inspected.
+        let incoming = self.rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_class c ON c.oid=k.confrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_class f ON f.oid=k.conrelid JOIN pg_catalog.pg_namespace fn ON fn.oid=f.relnamespace WHERE n.nspname=ANY($1) AND fn.nspname<>ALL($1))", &[&scope(schema, extra)]).await?;
         if incoming[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_EXTERNAL_DEPENDENCY",
-                "Incoming foreign keys from outside the managed schema block execution.",
+                "Incoming foreign keys from outside the managed scope block execution.",
             ));
         }
         Ok(())
@@ -664,6 +701,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         target: &Identity,
         endpoint: &Endpoint,
         schema: &str,
+        extra: &[String],
     ) -> Result<Identity> {
         self.begin_readonly().await?;
         let identity = self.identity(endpoint).await?;
@@ -707,7 +745,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         if !r.get::<_, bool>(0) {
             return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions or default grants."));
         }
-        let public = self.catalog("public", &endpoint.role).await?;
+        let public = self.catalog("public", &[], &endpoint.role).await?;
         if public.objects.len() != 1
             || !public.objects.contains_key("schema:public")
             || !public.uncovered.is_empty()
@@ -725,7 +763,30 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             "{create}SET LOCAL search_path=pg_catalog,\"{schema}\";"
         ))
         .await?;
+        // Scratch holds nothing else, so whatever a replayed migration adds
+        // or changes outside the managed scope from here on is its own work.
+        let scope = scope(schema, extra);
+        let outside = self.outside(&scope).await?;
+        self.scratch
+            .set(Box::new(ScratchScope { scope, outside }))
+            .map_err(|_| {
+                Diagnostic::new("DB_SCRATCH_NOT_EMPTY", "Scratch was already prepared.")
+            })?;
         Ok(identity)
+    }
+    /// `OUTSIDE_SCOPE` rows: what lies outside `scope`, keyed.
+    async fn outside(&self, scope: &[String]) -> Result<std::collections::BTreeMap<String, Value>> {
+        Ok(self
+            .rows(super::catalog_sql::OUTSIDE_SCOPE, &[&scope])
+            .await?
+            .into_iter()
+            .map(|r| {
+                (
+                    r.get(0),
+                    r.get::<_, Option<Value>>(1).unwrap_or(Value::Null),
+                )
+            })
+            .collect())
     }
     /// Reject unsupported live invocation paths before preparing any authored
     /// check. Names alone and provolatile are not proofs: only builtin base types,
@@ -743,8 +804,8 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         }
         Ok(())
     }
-    pub async fn check_purity(&self, schema: &str) -> Result<()> {
-        let catalog = self.catalog(schema, "").await?;
+    pub async fn check_purity(&self, schema: &str, extra: &[String]) -> Result<()> {
+        let catalog = self.catalog(schema, extra, "").await?;
         if !catalog.uncovered.is_empty() {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
@@ -818,6 +879,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         // A lone CREATE INDEX CONCURRENTLY replays as the equivalent plain
@@ -832,10 +894,28 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         let script = concurrent
             .as_ref()
             .map_or(migration.sql.as_str(), |c| c.replay_sql.as_str());
+        if super::analysis::is_empty(&migration.sql, "postgresql") {
+            let mut d = super::empty_migration();
+            d.source = Some(migration.name.clone());
+            return Err(d);
+        }
         if !super::analysis::analyze(&migration.sql, schema).replay_supported {
             let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.");
             d.source = Some(migration.name.clone());
             return Err(d);
+        }
+        let named = super::analysis::outside_scope(&migration.sql, schema, extra);
+        if !named.is_empty() {
+            let statements = named
+                .iter()
+                .map(|(number, name)| format!("statement {number} names {name}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(outside_scope(
+                migration,
+                &format!("Migration creates, changes or drops objects outside the managed scope ({statements})."),
+                named.into_iter().map(|(_, name)| name).collect(),
+            ));
         }
         // Replay runs several migrations in one transaction. If an earlier one
         // ran here, constraint modes can only be restored when same-named
@@ -908,6 +988,24 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         if !deferred.is_empty() {
             self.batch(&format!("SET CONSTRAINTS {} DEFERRED", deferred.join(",")))
                 .await?;
+        }
+        // In scratch, compare what lies outside the managed scope with the
+        // state it was prepared in: anything this migration created or
+        // changed there would never be inspected.
+        if let Some(scratch) = self.scratch.get() {
+            let now = self.outside(&scratch.scope).await?;
+            let changed: std::collections::BTreeSet<&String> = now
+                .keys()
+                .chain(scratch.outside.keys())
+                .filter(|key| now.get(*key) != scratch.outside.get(*key))
+                .collect();
+            if !changed.is_empty() {
+                return Err(outside_scope(
+                    migration,
+                    "Replaying this migration created or changed objects outside the managed scope.",
+                    changed.into_iter().cloned().collect(),
+                ));
+            }
         }
         Ok(())
     }
@@ -993,17 +1091,23 @@ impl RelationalAdapter for Postgres {
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "managed_schema_extensions":"version", "custom_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
-    async fn catalog(&self, schema: &str, role: &str) -> Result<Catalog> {
+    async fn catalog(&self, schema: &str, extra: &[String], role: &str) -> Result<Catalog> {
         self.batch("SET LOCAL search_path=pg_catalog").await?;
+        let scope = scope(schema, extra);
         let mut catalog = Catalog::default();
         for (kind, sql) in super::catalog_sql::QUERIES {
-            for r in self.rows(sql, &[&schema]).await? {
+            for r in self.rows(sql, &[&schema, &scope]).await? {
                 let name: String = r.get(0);
                 let mut value: Value = r.get(1);
                 let supported: bool = r.get(2);
                 canonical_roles(&mut value, role);
                 protect_definitions(&mut value);
-                let key = format!("{kind}:{name}");
+                // Keys in the managed schema stay unqualified; keys in the
+                // scope's other schemas lead with the quoted schema name.
+                let key = match r.get::<_, Option<String>>(3) {
+                    None => format!("{kind}:{name}"),
+                    Some(qualifier) => format!("{qualifier}.{kind}:{name}"),
+                };
                 if !supported {
                     catalog.uncovered.push(key.clone());
                 }

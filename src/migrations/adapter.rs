@@ -1,6 +1,6 @@
 //! Two concrete native adapters, one plan/history/authorization/execution core.
 //! This is intentionally not a plugin or portable-SQL framework.
-use super::inventory::{Endpoint, Migration};
+use super::inventory::{CatalogDigests, Endpoint, Migration};
 use super::model::{Catalog, History};
 use super::postgres::{self, Postgres, RelationalAdapter};
 use super::sqlite::{self, Sqlite};
@@ -71,10 +71,43 @@ impl Adapter {
             Self::Sqlite(db) => db.identity().await.map(Identity::Sqlite),
         }
     }
-    pub async fn catalog(&self, schema: &str, role: &str) -> Result<Catalog> {
+    /// The managed scope's catalog: `schema` and, for PostgreSQL, the `extra`
+    /// schemas the history creates (`CapturedInputs::history_schemas`).
+    pub async fn catalog(&self, schema: &str, extra: &[String], role: &str) -> Result<Catalog> {
         match self {
-            Self::Postgres(pg) => pg.catalog(schema, role).await,
+            Self::Postgres(pg) => pg.catalog(schema, extra, role).await,
             Self::Sqlite(db) => db.catalog().await,
+        }
+    }
+    /// `catalog().uncovered` and `json_digest(&catalog())`, without keeping
+    /// the catalog. SQLite fingerprints the catalog it maintains itself and
+    /// leaves `digests` unused.
+    pub async fn fingerprint(
+        &self,
+        schema: &str,
+        extra: &[String],
+        role: &str,
+        digests: &mut CatalogDigests,
+    ) -> Result<(Vec<String>, String)> {
+        match self {
+            Self::Postgres(pg) => {
+                let catalog = pg.catalog(schema, extra, role).await?;
+                let fingerprint = digests.digest(&catalog);
+                Ok((catalog.uncovered, fingerprint))
+            }
+            Self::Sqlite(db) => db.fingerprint().await,
+        }
+    }
+    /// `catalog().uncovered`, without keeping the catalog.
+    pub async fn coverage(
+        &self,
+        schema: &str,
+        extra: &[String],
+        role: &str,
+    ) -> Result<Vec<String>> {
+        match self {
+            Self::Postgres(pg) => Ok(pg.catalog(schema, extra, role).await?.uncovered),
+            Self::Sqlite(db) => db.coverage().await,
         }
     }
     pub async fn history(&self) -> Result<History> {
@@ -189,9 +222,9 @@ impl Adapter {
             Self::Sqlite(_) => Ok(None),
         }
     }
-    pub async fn validate_execution_scope(&self, schema: &str) -> Result<()> {
+    pub async fn validate_execution_scope(&self, schema: &str, extra: &[String]) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.validate_execution_scope(schema).await,
+            Self::Postgres(pg) => pg.validate_execution_scope(schema, extra).await,
             Self::Sqlite(_) => Ok(()),
         }
     }
@@ -212,10 +245,11 @@ impl Adapter {
         target: &Identity,
         endpoint: &Endpoint,
         schema: &str,
+        extra: &[String],
     ) -> Result<Identity> {
         match (self, target) {
             (Self::Postgres(pg), Identity::Postgres(target)) => pg
-                .prepare_scratch(target, endpoint, schema)
+                .prepare_scratch(target, endpoint, schema, extra)
                 .await
                 .map(Identity::Postgres),
             (Self::Sqlite(db), Identity::Sqlite(target)) => {
@@ -227,22 +261,24 @@ impl Adapter {
             )),
         }
     }
-    /// `limit` is PostgreSQL's statement limit. SQLite keeps its fixed
-    /// per-operation deadline.
+    /// `limit` bounds the migration on a target: each PostgreSQL statement, or
+    /// the whole SQLite script. Scratch replay keeps SQLite's fixed bound.
+    /// `extra` lists the schemas the history creates (PostgreSQL; empty for SQLite).
     pub async fn execute_captured(
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.execute_captured(migration, schema, limit).await,
-            Self::Sqlite(db) => db.execute_captured(migration).await,
+            Self::Postgres(pg) => pg.execute_captured(migration, schema, extra, limit).await,
+            Self::Sqlite(db) => db.execute_captured(migration, limit).await,
         }
     }
-    pub async fn check_purity(&self, schema: &str) -> Result<()> {
+    pub async fn check_purity(&self, schema: &str, extra: &[String]) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.check_purity(schema).await,
+            Self::Postgres(pg) => pg.check_purity(schema, extra).await,
             Self::Sqlite(db) => db.check_purity().await,
         }
     }

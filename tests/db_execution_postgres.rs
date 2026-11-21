@@ -2357,3 +2357,178 @@ fn migrator_wait_bounds_the_wait_for_a_competing_migrator() {
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["progress"][0]["state"], "committed", "{r}");
 }
+
+/// Migrate a fresh history, asserting each step passes.
+fn migrate_all(f: &Fixture, path: &str) -> Value {
+    let plan = f.plan(path);
+    let r = f.apply(path, plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    r
+}
+fn drift_names(r: &Value, object: &str, change: &str) -> bool {
+    r["drift"]["differences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["object"] == object && d["change"] == change)
+}
+
+/// #420: a schema the history creates is managed through its whole life: a
+/// foreign key from it into the managed schema is not an external dependency,
+/// a later rename or DROP SCHEMA replays like any other change, and drift is
+/// reported under its current name.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn created_schemas_are_managed_across_foreign_keys_renames_and_drops() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);
+CREATE SCHEMA audit;
+CREATE TABLE audit.log (id int PRIMARY KEY, account int REFERENCES app.accounts(id));",
+    );
+    migrate_all(&f, "first.json");
+    // The next migration runs while audit.log references app.accounts.
+    f.sql(
+        "0002_email.sql",
+        "ALTER TABLE app.accounts ADD COLUMN email text;",
+    );
+    migrate_all(&f, "second.json");
+    f.sql(
+        "0003_archive.sql",
+        "ALTER SCHEMA audit RENAME TO audit_archive;",
+    );
+    migrate_all(&f, "third.json");
+    let renamed = f.command("verify");
+    assert_eq!(renamed["outcome"], "pass", "{renamed}");
+    let objects = renamed["catalog"]["objects"].as_object().unwrap();
+    assert!(
+        objects.contains_key("audit_archive.relation:log"),
+        "{:?}",
+        objects.keys()
+    );
+    assert!(
+        !objects
+            .keys()
+            .any(|k| k.starts_with("audit.") || k == "schema:audit"),
+        "{:?}",
+        objects.keys()
+    );
+    // A privilege change out of band is drift under the schema's new name.
+    f.target()
+        .batch_execute("GRANT SELECT ON audit_archive.log TO PUBLIC")
+        .unwrap();
+    let drift = f.command("verify");
+    assert_eq!(drift["outcome"], "fail", "{drift}");
+    assert!(
+        drift_names(&drift, "audit_archive.relation:log", "changed"),
+        "{}",
+        drift["drift"]
+    );
+    f.target()
+        .batch_execute("REVOKE SELECT ON audit_archive.log FROM PUBLIC")
+        .unwrap();
+    f.sql(
+        "0004_retire.sql",
+        "DROP TABLE audit_archive.log; DROP SCHEMA audit_archive;",
+    );
+    migrate_all(&f, "fourth.json");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    // Recreating the dropped schema out of band is drift too.
+    f.target()
+        .batch_execute("CREATE SCHEMA audit_archive")
+        .unwrap();
+    let recreated = f.command("verify");
+    assert_eq!(recreated["outcome"], "fail", "{recreated}");
+    assert!(
+        drift_names(&recreated, "schema:audit_archive", "unexpected"),
+        "{}",
+        recreated["drift"]
+    );
+}
+
+/// Adopting an existing database compares the schemas the history creates.
+/// A managed view over one of them is covered, so adoption checks may run.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn adoption_compares_the_schemas_the_history_creates() {
+    use std::io::Write;
+    let f = Fixture::new();
+    let schema = "CREATE TABLE app.accounts (id int PRIMARY KEY);
+CREATE SCHEMA audit;
+CREATE TABLE audit.log (id int PRIMARY KEY, msg text);
+CREATE VIEW app.recent AS SELECT id, msg FROM audit.log;";
+    f.sql("0001_initial.sql", schema);
+    f.target().batch_execute(schema).unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.root.path().join("ntnt.toml"))
+            .unwrap(),
+        "\n[databases.app.adoption_checks]\naccounts='SELECT count(*)=0 FROM app.accounts'"
+    )
+    .unwrap();
+    f.target()
+        .batch_execute("ALTER TABLE audit.log ADD COLUMN unplanned text")
+        .unwrap();
+    let blocked = f.command_args("plan", &["--adopt-through", "1"]);
+    assert_eq!(blocked["outcome"], "fail", "{blocked}");
+    assert!(
+        drift_names(&blocked, "audit.column:log.unplanned", "unexpected"),
+        "{}",
+        blocked["drift"]
+    );
+    f.target()
+        .batch_execute("ALTER TABLE audit.log DROP COLUMN unplanned")
+        .unwrap();
+    let plan = f.command_args("plan", &["--adopt-through", "1", "--out", "adopt.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let r = f.apply("adopt.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+/// `reconcile` compares the schemas the history creates, like migrate.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn reconcile_compares_the_schemas_the_history_creates() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t (id int); CREATE SCHEMA audit; CREATE TABLE audit.log (id int);",
+    );
+    migrate_all(&f, "initial.json");
+    f.sql(
+        "0002_index.sql",
+        "CREATE INDEX CONCURRENTLY t_id ON app.t(id);",
+    );
+    let plan = f.plan("upgrade.json");
+    assert_eq!(
+        plan["plan"]["pending"][0]["analysis"]["non_transactional"], true,
+        "{plan}"
+    );
+    // The state migrate leaves when it stops after recording the attempt and
+    // before the build starts.
+    f.target()
+        .execute(
+            "INSERT INTO _ntnt.schema_migrations_v2 VALUES (2, '2', '0002_index.sql', $1, 'running', 'app', 'app')",
+            &[&plan["source"]["migrations"][1]["checksum"].as_str().unwrap()],
+        )
+        .unwrap();
+    f.target()
+        .batch_execute("ALTER TABLE audit.log ADD COLUMN unplanned int")
+        .unwrap();
+    let mismatch = reconcile(&f, &plan);
+    assert!(code(&mismatch, "DB_RECONCILE_MISMATCH"), "{mismatch}");
+    assert_eq!(attempt_state(&f).as_deref(), Some("running"));
+    f.target()
+        .batch_execute("ALTER TABLE audit.log DROP COLUMN unplanned")
+        .unwrap();
+    let r = reconcile(&f, &plan);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["reconciliation"]["resolution"], "not_started", "{r}");
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}

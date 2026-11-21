@@ -6,7 +6,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::*;
 use ntnt::{
-    error::IntentError,
+    error::{ErrorOrigin, IntentError, OriginStep},
     intent, intent_studio_server,
     interpreter::{ExecutionMode, Interpreter},
     lexer::Lexer,
@@ -772,13 +772,139 @@ enum WorkersCommands {
     },
 }
 
+/// A runtime error from `ntnt run` together with the files its line and call
+/// sites were recorded in while it unwound (#412).
+#[derive(Debug)]
+struct RunError {
+    error: IntentError,
+    origin: ErrorOrigin,
+    /// The entry file as resolved for loading.
+    entry: PathBuf,
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for RunError {}
+
+/// Most call-site notes shown for one error; the middle of a longer chain is
+/// summarised.
+const MAX_CALL_SITE_NOTES: usize = 16;
+
+impl RunError {
+    /// The file the error's line is in, when that is not the entry file.
+    fn raised_elsewhere(&self) -> Option<&Path> {
+        let file = self.origin.frames.first()?.file.as_deref()?;
+        (file != self.entry).then_some(file)
+    }
+
+    /// How the entry file reached the line: one note per call site, outward,
+    /// with consecutive repeats (recursion) folded.
+    fn call_site_notes(&self, typed_entry: Option<&Path>) -> Vec<String> {
+        let mut notes: Vec<(String, usize)> = Vec::new();
+        for frame in self.origin.frames.iter().skip(1) {
+            let verb = match frame.step {
+                Some(OriginStep::Import) => "imported from",
+                Some(OriginStep::Call) | None => "called from",
+            };
+            let file = match &frame.file {
+                Some(file) => shown_source_path(file, typed_entry, &self.entry),
+                None => typed_entry.unwrap_or(&self.entry).display().to_string(),
+            };
+            let note = format!("{verb} {file}:{}", frame.line);
+            match notes.last_mut() {
+                Some((last, repeats)) if *last == note => *repeats += 1,
+                _ => notes.push((note, 0)),
+            }
+        }
+        let mut notes: Vec<String> = notes
+            .into_iter()
+            .map(|(note, repeats)| match repeats {
+                0 => note,
+                1 => format!("{note} (and once more)"),
+                n => format!("{note} (and {n} more times)"),
+            })
+            .collect();
+        if notes.len() > MAX_CALL_SITE_NOTES {
+            let half = MAX_CALL_SITE_NOTES / 2;
+            let hidden = notes.len() - 2 * half;
+            notes.splice(
+                half..notes.len() - half,
+                [format!("... {hidden} more call sites")],
+            );
+        }
+        notes
+    }
+}
+
+/// `path` as the entry file was typed: under the entry's directory it keeps
+/// the typed directory (`lib/x.tnt`, `../app/lib/x.tnt`); elsewhere it is
+/// relative to the working directory when inside it, otherwise absolute.
+fn shown_source_path(path: &Path, typed_entry: Option<&Path>, entry: &Path) -> String {
+    if let Some(typed) = typed_entry {
+        if path == entry {
+            return typed.display().to_string();
+        }
+        let typed_dir = typed.parent().unwrap_or(Path::new(""));
+        if let Some(rest) = entry.parent().and_then(|dir| path.strip_prefix(dir).ok()) {
+            // Only when the typed directory is the entry's own: through a
+            // symlinked entry file it would name a path that may not exist.
+            if same_directory(typed_dir, entry) {
+                return typed_dir.join(rest).display().to_string();
+            }
+        }
+    }
+    let cwd = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
+    if let Some(rest) = cwd
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf))
+    {
+        return rest.display().to_string();
+    }
+    path.display().to_string()
+}
+
+/// Whether `typed_dir`, as typed (empty for the working directory), is the
+/// directory of the resolved file `entry`.
+fn same_directory(typed_dir: &Path, entry: &Path) -> bool {
+    let typed_dir = if typed_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        typed_dir
+    };
+    match (
+        typed_dir.canonicalize(),
+        entry.parent().map(Path::canonicalize),
+    ) {
+        (Ok(typed), Some(Ok(resolved))) => typed == resolved,
+        _ => false,
+    }
+}
+
 /// Format and display an error with rich context (error codes, source snippets, suggestions).
 fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
+    let (intent_err, run_error) = match error.downcast_ref::<RunError>() {
+        Some(run_error) => (Some(&run_error.error), Some(run_error)),
+        None => (error.downcast_ref::<IntentError>(), None),
+    };
     // Try to downcast to IntentError for rich formatting
-    if let Some(intent_err) = error.downcast_ref::<IntentError>() {
+    if let Some(intent_err) = intent_err {
         let code = intent_err.error_code();
         let line_info = intent_err.line();
         let col_info = intent_err.column();
+        // An error raised in another file (an imported module) is shown, with
+        // its source, against that file; otherwise against the entry file.
+        let raised_elsewhere = run_error.and_then(|run| Some((run, run.raised_elsewhere()?)));
+        let location: Option<(String, &Path)> = match raised_elsewhere {
+            Some((run, file)) => Some((
+                shown_source_path(file, file_path.map(PathBuf::as_path), &run.entry),
+                file,
+            )),
+            None => file_path.map(|path| (path.display().to_string(), path.as_path())),
+        };
 
         // Error header: error[E006]: Undefined variable: usres
         eprintln!(
@@ -789,14 +915,13 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
             "]".dimmed(),
         );
         // Show file:line location if available
-        if let (Some(line), Some(path)) = (line_info, file_path) {
-            let display_path = path.display();
+        if let (Some(line), Some((display_path, _))) = (line_info, &location) {
             eprintln!("  {} {}:{}", "-->".blue().bold(), display_path, line);
         }
         eprintln!("  {} {}", "=".blue().bold(), intent_err);
 
         // Source code snippet (for errors with line numbers and a known file)
-        if let (Some(line), Some(path)) = (line_info, file_path) {
+        if let (Some(line), Some((_, path))) = (line_info, location) {
             if let Ok(source) = fs::read_to_string(path) {
                 let lines: Vec<&str> = source.lines().collect();
                 let line_idx = line.saturating_sub(1); // 0-indexed
@@ -880,12 +1005,22 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
                     .join(", ");
                 eprintln!("  {} {}", "where:".cyan().bold(), rendered);
             }
-            if *call_line > 0 && Some(*call_line) != line_info {
+            // A clause in another file gets `called from` notes below, which
+            // name the call site with its file; this note would repeat it
+            // without the file.
+            if *call_line > 0 && raised_elsewhere.is_none() && Some(*call_line) != line_info {
                 eprintln!(
                     "  {} contract checked for call at line {}",
                     "note:".cyan().bold(),
                     call_line
                 );
+            }
+        }
+
+        // Call sites that led from the entry file to a line in another file
+        if let Some((run, _)) = raised_elsewhere {
+            for note in run.call_site_notes(file_path.map(PathBuf::as_path)) {
+                eprintln!("  {} {}", "note:".cyan().bold(), note);
             }
         }
 
@@ -1400,7 +1535,18 @@ fn run_file_with_workers(
     // even on eval error, so schedules/tasks don't outlive the program (rule 28)
     ntnt::stdlib::shutdown_runtimes();
 
-    result?;
+    if let Err(error) = result {
+        // Keep the files the error's line and call sites came from (#412).
+        return Err(match interpreter.error_origin(&error) {
+            Some(origin) => RunError {
+                error,
+                origin,
+                entry: source_file.path().to_path_buf(),
+            }
+            .into(),
+            None => error.into(),
+        });
+    }
 
     Ok(())
 }

@@ -1,8 +1,38 @@
 # Changelog
 
-## Unreleased
+## Unreleased (0.6.4)
 
-No changes recorded since 0.6.3.
+See [unreleased notes](docs/release-notes/unreleased.md).
+
+### Fixed
+
+- `ntnt db` (SQLite): migrations can use the date and time functions, so timestamp
+  defaults plan and migrate; a statement SQLite refuses names its number and the
+  function or table it used (#414).
+- `ntnt db` (SQLite): an empty scratch takes the target's journal mode, and a
+  scratch settings mismatch names each setting with both values (#413).
+- `ntnt db` (SQLite): partial and expression indexes plan, migrate and verify; a
+  changed predicate or expression is drift (#411).
+- `ntnt db`: `DB_COVERAGE_INCOMPLETE` names the uncovered objects (`objects`) and
+  the migration whose replay produced them (`source`) (#411).
+- `ntnt db new` holds the `ntnt.toml` lock while it numbers a migration, so
+  concurrent runs cannot take the same ID; a run that finds the lock held fails
+  with the new `DB_NEW_CONFLICT` and creates nothing (#388).
+- `ntnt db` (SQLite): a drop that would run ON DELETE actions on child tables is
+  refused with DB_REBUILD_REQUIRED unless the migration uses sqlite_rebuild
+  (#419).
+- `ntnt db` (SQLite): migrations on a target run under `statement_seconds` (90 s
+  by default) instead of a fixed 5 s; DB_STATEMENT_LIMIT names the statement
+  (#429).
+- `ntnt db`: a migration with no statements fails with DB_MIGRATION_EMPTY
+  (#428).
+- `ntnt db` (PostgreSQL): inspection covers the schemas the history creates, and
+  changes to other schemas are refused with DB_OUTSIDE_SCOPE (#420).
+- `ntnt db` (PostgreSQL): a policy that calls a routine outside the managed scope
+  is uncovered (#434).
+- `ntnt run`: a runtime error raised in an imported module names that module's
+  file and line, shows its source, and lists the call sites that led there
+  (#412).
 
 ## 0.6.3
 
