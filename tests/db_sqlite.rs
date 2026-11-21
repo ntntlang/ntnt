@@ -1476,6 +1476,46 @@ fn a_missing_approval_declaration_is_named() {
     assert_eq!(applied["outcome"], "pass", "{applied}");
 }
 
+/// #425 (cli-01): a plan whose save fails after the replay (here: the saved
+/// plan would exceed the 1 MiB readback limit) prints no plan digest in the
+/// human report, since there is no saved plan to approve.
+#[test]
+fn a_plan_whose_save_failed_prints_no_digest() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    // About 1,000,000 bytes of intent IDs in the sidecar: within the 1 MiB
+    // input limit, but over it in the pretty-printed saved plan.
+    let id = "x".repeat(128);
+    let ids = vec![format!("{id:?}"); 7600].join(",\n");
+    f.sql("0001_initial.toml", &format!("intent_ids = [\n{ids}\n]\n"));
+    let template = f.process("plan");
+    let mut process = std::process::Command::new(template.get_program());
+    process.args(
+        template
+            .get_args()
+            .filter(|arg| *arg != std::ffi::OsStr::new("--json")),
+    );
+    for (key, value) in template.get_envs() {
+        match value {
+            Some(value) => process.env(key, value),
+            None => process.env_remove(key),
+        };
+    }
+    let output = process
+        .current_dir(f.root.path())
+        .args(["--out", "big.json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{stdout}");
+    assert!(stdout.contains("DB_OUTPUT_LIMIT"), "{stdout}");
+    assert!(!stdout.contains("Plan digest"), "{stdout}");
+    assert!(!f.root.path().join("big.json").exists());
+}
+
 /// #413: a scratch that is not empty keeps its journal mode and is reported as
 /// not empty; nothing in it is changed.
 #[test]

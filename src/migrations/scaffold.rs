@@ -154,7 +154,15 @@ fn selection_flags(manifest: &Path, database: Option<&str>) -> String {
 }
 
 /// Local-development steps after init, consistent with the documented quick start.
-fn next_steps(engine: Engine, name: &str, secrets: &[String; 3], flags: &str) -> Vec<String> {
+/// `review` names the plan file for the first migration, which `ntnt db new`
+/// prints too.
+fn next_steps(
+    engine: Engine,
+    name: &str,
+    secrets: &[String; 3],
+    flags: &str,
+    review: &str,
+) -> Vec<String> {
     let [target, replay, approval] = secrets;
     let (provision, values) = match engine {
         Engine::Sqlite => (
@@ -177,8 +185,8 @@ fn next_steps(engine: Engine, name: &str, secrets: &[String; 3], flags: &str) ->
         provision,
         format!("For local development, export NTNT_ENV=development NTNT_SECRETS_PROVIDER=env and set {target} and {replay} to {values}."),
         format!("Create the first migration with `ntnt db new initial{flags}`, then write its SQL."),
-        format!("Run `ntnt db status --target development{flags}`, then `ntnt db plan --target development{flags} --out review.json`."),
-        format!("Review review.json and the SQL, set {approval} to its plan_digest, then run `ntnt db migrate --target development{flags} --plan review.json`."),
+        format!("Run `ntnt db status --target development{flags}`, then `ntnt db plan --target development{flags} --out {review}`."),
+        format!("Review {review} and the SQL, set {approval} to its plan_digest, then run `ntnt db migrate --target development{flags} --plan {review}`."),
     ]
 }
 
@@ -639,7 +647,12 @@ fn initialize_with(
         .and_then(toml::Value::as_table)
         .map_or(0, |databases| databases.len());
     let flags = selection_flags(manifest, (declared > 1).then_some(name));
-    let steps = next_steps(args.engine, name, &secrets, &flags);
+    // The plan file the first migration's plan command names (#425).
+    let review = next_id(&migrations).map_or_else(
+        |_| "review-0001.json".to_owned(),
+        |(id, width)| review_file(id, width),
+    );
+    let steps = next_steps(args.engine, name, &secrets, &flags, &review);
     let mut lines = vec![
         if appended {
             format!(
@@ -740,6 +753,13 @@ fn next_id(dir: &Path) -> Result<(u64, usize)> {
     Ok((next, width))
 }
 
+/// The plan file for migration `id`, written `width` digits wide as its file
+/// name is: a new file for each migration, since `--out` never replaces one
+/// (#425).
+fn review_file(id: u64, width: usize) -> String {
+    format!("review-{id:0width$}.json")
+}
+
 fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
     create_migration_with(args, File::try_lock, |_| {})
 }
@@ -822,7 +842,8 @@ fn create_migration_with(
             config.engine
         ),
         format!(
-            "Write its SQL, then review it with `ntnt db plan --target <target>{flags} --out review.json`."
+            "Write its SQL, then review it with `ntnt db plan --target <target>{flags} --out {}`.",
+            review_file(id, width)
         ),
     ];
     let report = json!({

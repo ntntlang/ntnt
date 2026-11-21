@@ -131,10 +131,10 @@ export APP_DATABASE_FILE="$(pwd -P)/data/app.sqlite"
 export APP_REPLAY_FILE="$(pwd -P)/data/replay.sqlite"
 
 ntnt db status --target development
-ntnt db plan --target development --out review.json
-# Review review.json and the SQL. Then approve exactly this plan:
-export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review.json)"
-ntnt db migrate --target development --plan review.json
+ntnt db plan --target development --out review-0001.json
+# Review review-0001.json and the SQL. Then approve exactly this plan:
+export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review-0001.json)"
+ntnt db migrate --target development --plan review-0001.json
 ntnt db verify --target development
 ```
 
@@ -148,8 +148,10 @@ journal_mode: plan delete, now wal`; plan and approve again.
 `migrate` without `APP_MIGRATION_APPROVAL` fails with `DB_APPROVAL_REQUIRED` and
 writes nothing; its `next_action` names `APP_MIGRATION_APPROVAL` and the plan's
 digest to set it to, then rerun `migrate` with the same plan. Rerunning the same plan reports `already_applied`. For the next
-change, run `ntnt db new <name>` (it creates `migrations/0002_<name>.sql`), write
-its SQL, and plan, approve and migrate again. Each new plan has a new digest.
+change, run `ntnt db new <name>`: it creates `migrations/0002_<name>.sql` and prints
+`ntnt db plan --target <target> --out review-0002.json`. Write its SQL, then plan
+into that new file, approve its digest and migrate it, as above. `--out` never
+replaces a file, so each plan gets its own; each new plan has a new digest.
 
 ### PostgreSQL
 
@@ -226,9 +228,9 @@ export APP_DATABASE="host=127.0.0.1 user=app_owner dbname=app_development passwo
 export APP_REPLAY_DATABASE="host=127.0.0.1 user=app_replay_owner dbname=app_replay password=dev-only-replay sslmode=disable"
 
 ntnt db status --target development
-ntnt db plan --target development --out review.json
-export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review.json)"
-ntnt db migrate --target development --plan review.json
+ntnt db plan --target development --out review-0001.json
+export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review-0001.json)"
+ntnt db migrate --target development --plan review-0001.json
 ntnt db verify --target development
 ```
 
@@ -955,7 +957,7 @@ naming a target, and a blocked plan says its outcome was not `pass`. An unreadab
 `--against` file is reported as `DB_INPUT_IO` naming the file and the cause, and one
 that is not JSON as `DB_PLAN_INVALID`.
 
-For `plan --out`, the file contains the compact plan descriptor and result metadata, not duplicate catalog/source display fields; stdout still contains the full report. `status`/`verify --out` save their report. All saved artifacts share the reader's 1 MiB bound: oversized output fails before creating a file rather than producing an unreadable plan. Files are new-only (`--out` cannot replace a source, existing plan or symlink); on Unix, new reports are mode 0600.
+For `plan --out`, the file contains the compact plan descriptor and result metadata, not duplicate catalog/source display fields; stdout still contains the full report. `status`/`verify --out` save their report. All saved artifacts share the reader's 1 MiB bound: oversized output fails before creating a file rather than producing an unreadable plan. Files are new-only (`--out` cannot replace a source, existing plan or symlink); on Unix, new reports are mode 0600. `--out` is checked before any work runs: a file that already exists, or a directory that does not, fails with `DB_OUTPUT` naming the path and the cause (`Cannot save the plan to review.json: it already exists, and --out never replaces a file.`), and its `next_action` suggests a free name such as `review-0002.json`. A save that fails later names the operating system's error, and the human report then shows no plan digest.
 
 Every saved plan has `authorized = false`, `executable = false`, `automatic_safe = false` (the artifact alone grants no capability), and a `requires_review` or `blocked` classification. Known drop/constraint-removal/cast/CASCADE/DML/authorization hazards are reported conservatively. Lock/scan labels are qualitative, not production duration estimates. Missing data checks and still-deployed application compatibility remain explicit. `migrate` validates the execution format and all prefix evidence under its own lock and requires independent provider authority; the digest alone is not an approval token.
 

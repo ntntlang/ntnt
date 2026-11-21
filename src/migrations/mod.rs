@@ -242,10 +242,139 @@ fn database_runtime_on<T>(
     result
 }
 
+/// What `--out` holds for `command`.
+fn saved_artifact(command: &str) -> &'static str {
+    if command == "plan" {
+        "plan"
+    } else {
+        "report"
+    }
+}
+/// A file name for `--out` that does not exist yet, next to `path`: named for
+/// the command and the newest migration, as `ntnt db new` suggests
+/// (`review-0002.json` for a plan).
+fn free_output_name(
+    path: &std::path::Path,
+    command: &str,
+    inputs: Option<&inventory::CapturedInputs>,
+) -> Option<String> {
+    let newest = inputs?.migrations.last()?;
+    let id = newest.name.split_once('_')?.0;
+    let stem = if command == "plan" { "review" } else { command };
+    let suggestion = path.with_file_name(format!("{stem}-{id}.json"));
+    let free = |path: &std::path::Path| std::fs::symlink_metadata(path).is_err();
+    let suggestion = if free(&suggestion) {
+        suggestion
+    } else {
+        // The next ID's name, for when this migration's is taken.
+        let next = format!("{:0width$}", newest.id.checked_add(1)?, width = id.len());
+        Some(path.with_file_name(format!("{stem}-{next}.json"))).filter(|p| free(p))?
+    };
+    Some(inventory::shown_os(suggestion.as_os_str()))
+}
+/// `DB_OUTPUT` for `--out` `path`, which cannot be created for `cause`, with
+/// advice for that cause (#425).
+fn unwritable_output(
+    path: &std::path::Path,
+    command: &str,
+    cause: OutputCause,
+    suggestion: Option<&str>,
+) -> Diagnostic {
+    let shown = inventory::shown_os(path.as_os_str());
+    let what = saved_artifact(command);
+    let directory = || {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map_or_else(
+                || ".".to_owned(),
+                |parent| inventory::shown_os(parent.as_os_str()),
+            )
+    };
+    let (problem, next_action) = match cause {
+        OutputCause::Exists => (
+            "it already exists, and --out never replaces a file".to_owned(),
+            match suggestion {
+                Some(name) => format!("Pass --out a file that does not exist yet, such as {name}; ntnt db never replaces an existing file, so keep or move the old one."),
+                None => "Pass --out a file that does not exist yet; ntnt db never replaces an existing file, so keep or move the old one.".to_owned(),
+            },
+        ),
+        OutputCause::NoDirectory => (
+            format!("its directory {} does not exist", directory()),
+            format!("Create the directory {} first, or pass --out a new file in an existing directory.", directory()),
+        ),
+        OutputCause::NotDirectory => (
+            format!("{} is not a directory", directory()),
+            "Pass --out a new file in an existing directory.".to_owned(),
+        ),
+        OutputCause::Create(error) => (
+            format!("it cannot be created ({error})"),
+            "Pass --out a new file in a directory this user can write.".to_owned(),
+        ),
+        OutputCause::Write(error) => (
+            format!("writing it failed ({error}); the new file may be incomplete"),
+            format!("Remove the incomplete {shown}, fix the cause (such as a full disk), then rerun with --out."),
+        ),
+    };
+    let mut d = Diagnostic::new(
+        "DB_OUTPUT",
+        &format!("Cannot save the {what} to {shown}: {problem}."),
+    );
+    d.source = Some(shown);
+    d.next_action = next_action;
+    d
+}
+/// Why `--out` cannot be saved.
+enum OutputCause {
+    Exists,
+    NoDirectory,
+    NotDirectory,
+    Create(std::io::Error),
+    Write(std::io::Error),
+}
+/// Refuse an `--out` that cannot be created, before any work runs (#425):
+/// one that exists, or whose directory does not. Anything else is found when
+/// the file is created.
+fn check_output(path: &std::path::Path, command: &str, suggestion: Option<&str>) -> Result<()> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(unwritable_output(
+            path,
+            command,
+            OutputCause::Exists,
+            suggestion,
+        ));
+    }
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    match std::fs::metadata(directory) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(unwritable_output(
+            path,
+            command,
+            OutputCause::NotDirectory,
+            suggestion,
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(unwritable_output(
+            path,
+            command,
+            OutputCause::NoDirectory,
+            suggestion,
+        )),
+        // Found again, with its cause, when the file is created.
+        Err(_) => Ok(()),
+    }
+}
+
 /// Save a bounded report or compact plan to a new file without replacing existing data.
 /// Artifact size is checked against the reader limit before creation. An I/O failure
 /// returns an error and may leave a partial newly created file, never a success verdict.
-fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value) -> Result<()> {
+fn save_report(
+    path: &std::path::Path,
+    command: &str,
+    report: &serde_json::Value,
+    suggestion: Option<&str>,
+) -> Result<()> {
     use std::io::Write;
     // Save the plan descriptor, not duplicated display catalogs and source
     // summaries. stdout still contains the complete observation report.
@@ -265,6 +394,7 @@ fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value
     let output_error = || {
         Diagnostic::new("DB_OUTPUT", "Cannot save report. Destination must be a new writable file; existing files are never replaced.")
     };
+    let failed = |cause| unwritable_output(path, command, cause, suggestion);
     let bytes = serde_json::to_vec_pretty(&artifact).map_err(|_| output_error())?;
     if bytes.len() > inventory::MAX_INPUT_BYTES {
         return Err(Diagnostic::new(
@@ -279,9 +409,17 @@ fn save_report(path: &std::path::Path, command: &str, report: &serde_json::Value
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path).map_err(|_| output_error())?;
-    file.write_all(&bytes).map_err(|_| output_error())?;
-    file.sync_all().map_err(|_| output_error())
+    let mut file = options.open(path).map_err(|error| {
+        failed(match error.kind() {
+            std::io::ErrorKind::AlreadyExists => OutputCause::Exists,
+            std::io::ErrorKind::NotFound => OutputCause::NoDirectory,
+            _ => OutputCause::Create(error),
+        })
+    })?;
+    file.write_all(&bytes)
+        .map_err(|error| failed(OutputCause::Write(error)))?;
+    file.sync_all()
+        .map_err(|error| failed(OutputCause::Write(error)))
 }
 
 /// One-line human summary of a PostgreSQL session's transport.
@@ -334,6 +472,15 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         &options.target,
         options.database.as_deref(),
     );
+    // An --out that cannot be created is refused before any work (#425).
+    let suggestion = options
+        .out
+        .as_deref()
+        .and_then(|path| free_output_name(path, command, inputs.as_ref().ok()));
+    let refused_output = options
+        .out
+        .as_deref()
+        .and_then(|path| check_output(path, command, suggestion.as_deref()).err());
     // How a stale plan's refusal names the files given (#423).
     let shown_manifest = inventory::shown_os(options.manifest.as_os_str());
     let shown_plan = execution_plan
@@ -358,6 +505,9 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     "DB_CONFIG",
                     "migrate and reconcile use only --plan; --adopt-through belongs to plan.",
                 ));
+            }
+            if let Some(d) = refused_output.clone() {
+                return Err(d);
             }
             let bytes = inventory::file_bytes(inventory::Input::Plan(&path, "--plan"))?;
             let saved = serde_json::from_slice(&bytes).map_err(|_| {
@@ -398,6 +548,9 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             .and_then(|inputs| {
                 if options.adopt_through.is_some() && (command!="plan" || options.against.is_some()) {
                     return Err(Diagnostic::new("DB_CONFIG","--adopt-through is only for an explicit plan, not status/verify/--against."));
+                }
+                if let Some(d) = refused_output.clone() {
+                    return Err(d);
                 }
                 let mut adopt_through=options.adopt_through;
                 if let Some(prior)=&prior {
@@ -448,13 +601,22 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         }
         report["display_filter"] = serde_json::json!(filter);
     }
+    // Whether --out (when given) was saved: only then is there a saved plan
+    // whose digest the human report may show (#425).
+    let mut saved = true;
     if let Some(path) = &options.out {
-        if let Err(diagnostic) = save_report(path, command, &report) {
+        let failure = match refused_output {
+            Some(refused) => Some(refused),
+            None => save_report(path, command, &report, suggestion.as_deref()).err(),
+        };
+        if let Some(diagnostic) = failure {
+            saved = false;
             report["outcome"] = serde_json::json!("fail");
-            report["diagnostics"]
-                .as_array_mut()
-                .unwrap()
-                .push(serde_json::json!(diagnostic));
+            let diagnostics = report["diagnostics"].as_array_mut().unwrap();
+            // A refusal before the work is already the command's failure.
+            if !diagnostics.contains(&serde_json::json!(diagnostic)) {
+                diagnostics.push(serde_json::json!(diagnostic));
+            }
         }
     }
     let output = serde_json::to_string_pretty(&report)?;
@@ -579,7 +741,7 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 r["observed_index"].as_str().unwrap_or("not inspected")
             );
         }
-        if let Some(d) = report.get("plan_digest") {
+        if let Some(d) = report.get("plan_digest").filter(|_| saved) {
             println!("Plan digest: {d} (not authorization)");
         }
         println!(
@@ -751,7 +913,7 @@ mod tests {
             "outcome": "pass",
             "plan": {"padding": "x".repeat(super::inventory::MAX_INPUT_BYTES)},
         });
-        let error = super::save_report(&path, "plan", &report).unwrap_err();
+        let error = super::save_report(&path, "plan", &report, None).unwrap_err();
         assert_eq!(error.code, "DB_OUTPUT_LIMIT");
         assert!(!path.exists());
     }
