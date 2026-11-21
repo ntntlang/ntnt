@@ -266,3 +266,19 @@ fn quoted(text: &str) -> bool {
 fn symbol(text: &str) -> bool {
     !text.is_empty() && text.len() <= 2 && text.chars().all(|c| "(),;.=<>!+-*/%|&".contains(c))
 }
+
+/// Why SQLite cannot write a file, by its SQLITE_READONLY result code.
+pub(super) fn read_only_cause(code: i32) -> &'static str {
+    use rusqlite::ffi;
+    match code {
+        ffi::SQLITE_READONLY_DIRECTORY => {
+            "its directory is not writable, so SQLite cannot create the journal beside it"
+        }
+        ffi::SQLITE_READONLY_CANTLOCK | ffi::SQLITE_READONLY_CANTINIT => {
+            "SQLite cannot write or lock the WAL shared-memory file (-shm) beside it"
+        }
+        ffi::SQLITE_READONLY_RECOVERY => "its WAL needs a recovery that only a writer can run",
+        ffi::SQLITE_READONLY_DBMOVED => "it was moved or deleted while ntnt had it open",
+        _ => "SQLite opened it read-only, because the user running ntnt cannot write it",
+    }
+}

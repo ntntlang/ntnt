@@ -39,6 +39,10 @@ pub(super) struct Identity {
     pub authority: Value,
 }
 
+/// How a diagnostic about the session's file itself begins; the session
+/// names the file's role and secret in its place (`State::attribute`).
+const FILE_SUBJECT: &str = "The SQLite file ";
+
 fn sql_error(error: rusqlite::Error) -> Diagnostic {
     // An error that points at a token of the input SQL carries its SQLite code
     // separately from an ordinary failure; classify both by that code.
@@ -59,6 +63,12 @@ fn sql_error(error: rusqlite::Error) -> Diagnostic {
     // SQLite's own message only in shapes that hold identifiers alone, and
     // always the extended result code's name (#424).
     let message = match sqlite {
+        // A file SQLite cannot write is not a statement's fault.
+        Some(e) if e.code == rusqlite::ErrorCode::ReadOnly => format!(
+            "{FILE_SUBJECT}is not writable ({}): {}.",
+            super::sqlite_errors::name(e.extended_code),
+            super::sqlite_errors::read_only_cause(e.extended_code)
+        ),
         Some(e) => {
             let name = super::sqlite_errors::name(e.extended_code);
             match text.and_then(|text| super::sqlite_errors::detail(e.extended_code, text)) {
@@ -435,6 +445,8 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                     ),
                     // This refusal already names its statement.
                     None if error.code == "DB_REBUILD_REQUIRED" => error,
+                    // The session's file, not this statement, failed (#424).
+                    None if error.message.starts_with(FILE_SUBJECT) => error,
                     // SQLite interrupted the statement at its deadline.
                     None if error.code == "DB_TIMEOUT" => statement_limit(statement, limit, replay),
                     None => {
@@ -745,6 +757,24 @@ struct State {
     cache: Cache,
 }
 impl State {
+    /// Name this session's file, by its role and secret and never its path,
+    /// in a diagnostic about the file itself: SQLite cannot write it (#424).
+    fn attribute(&self, mut d: Diagnostic) -> Diagnostic {
+        let Some(rest) = d.message.strip_prefix(FILE_SUBJECT) else {
+            return d;
+        };
+        let owner = self.file.owner();
+        let (role, secret) = (owner.role, &owner.secret);
+        d.message = format!("The SQLite {role} file (secret {secret}) {rest}");
+        if d.code == "DB_SQLITE" {
+            d.next_action = if role == "scratch" {
+                format!("Make the scratch file that {secret} names, and its directory, writable by the user running ntnt (SQLite writes its journal or WAL beside the file), or set {secret} to another empty, writable file; then rerun.")
+            } else {
+                format!("Make the target file that {secret} names, and its directory, writable by the user running ntnt (SQLite writes its journal or WAL beside the file). A plan binds the file's permissions, so then plan, review and approve again, and run migrate with the new plan.")
+            };
+        }
+        d
+    }
     fn identity(&self) -> Result<Identity> {
         let authority = self.file.check_connection(&self.conn)?;
         let settings = json!({
@@ -1309,7 +1339,7 @@ impl Sqlite {
                     Some(move || cancelled.load(Ordering::Acquire) || Instant::now() >= deadline),
                 )
                 .map_err(sql_error)?;
-            operation(&mut state)
+            operation(&mut state).map_err(|d| state.attribute(d))
         });
         match tokio::time::timeout(limit + DISCARD_GRACE, work).await {
             Ok(result) => result

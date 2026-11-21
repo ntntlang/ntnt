@@ -159,3 +159,82 @@ fn sqlite_migrate_failure_names_the_statement_and_how_to_continue() {
     let again = f.apply("seed.json", p["plan_digest"].as_str());
     assert_eq!(again["outcome"], "pass", "{again}");
 }
+#[cfg(unix)]
+fn chmod(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+/// Root writes files whatever their mode, so these cases need another user.
+#[cfg(unix)]
+fn root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// A scratch file SQLite cannot write is named by its role and secret, not
+/// blamed on statement 1, and the advice works (#424 sq-15).
+#[cfg(unix)]
+#[test]
+fn sqlite_read_only_scratch_is_named_not_blamed_on_a_statement() {
+    if root() {
+        return;
+    }
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);",
+    );
+    chmod(&f.scratch_path, 0o444);
+    let r = f.command("plan", &[]);
+    let d = diagnostic(&r, "DB_SQLITE");
+    assert!(
+        message(d).starts_with(
+            "The SQLite scratch file (secret DB_SCRATCH) is not writable (SQLITE_READONLY"
+        ),
+        "{r}"
+    );
+    assert!(!message(d).contains("Statement"), "{r}");
+    assert!(next_action(d).contains("DB_SCRATCH names"), "{r}");
+    assert!(
+        !r.to_string().contains(f.root.path().to_str().unwrap()),
+        "{r}"
+    );
+    chmod(&f.scratch_path, 0o644);
+    let r = f.command("plan", &[]);
+    assert_eq!(r["outcome"], "pass", "{r}");
+}
+
+/// A target file SQLite cannot write is named by its role and secret, and
+/// the advice works (#424 sq-15).
+#[cfg(unix)]
+#[test]
+fn sqlite_read_only_target_is_named_and_the_advice_works() {
+    if root() {
+        return;
+    }
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);",
+    );
+    chmod(&f.target_path, 0o444);
+    let p = f.plan("read-only.json");
+    let failed = f.apply("read-only.json", p["plan_digest"].as_str());
+    let d = diagnostic(&failed, "DB_SQLITE");
+    assert!(
+        message(d).starts_with(
+            "The SQLite target file (secret DB_TARGET) is not writable (SQLITE_READONLY"
+        ),
+        "{failed}"
+    );
+    assert!(!message(d).contains("Statement"), "{failed}");
+    assert!(next_action(d).contains("DB_TARGET names"), "{failed}");
+    assert!(
+        next_action(d).contains("plan, review and approve again"),
+        "{failed}"
+    );
+    // Following the advice: make it writable, then plan and migrate again.
+    chmod(&f.target_path, 0o644);
+    let p = f.plan("writable.json");
+    let r = f.apply("writable.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+}

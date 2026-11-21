@@ -170,6 +170,9 @@ impl FileBinding {
     pub fn id(&self) -> &str {
         &self.id
     }
+    pub fn owner(&self) -> &Owner {
+        &self.owner
+    }
     pub fn check(&self) -> Result<Value> {
         let (id, authority) = self.observe()?;
         if id != self.id {
