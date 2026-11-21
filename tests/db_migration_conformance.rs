@@ -111,6 +111,21 @@ impl Fixture {
         serde_json::from_slice(&output.stdout)
             .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
     }
+    /// `ntnt db new <name>`'s JSON report, run in the project as a developer
+    /// would; it reads only the manifest and the migrations directory.
+    fn new_migration(&self, name: &str) -> Value {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["db", "new", name, "--json"])
+            .current_dir(self.root())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
     /// Declare a second target, `staging`, whose secret is never set.
     fn declare_staging(&self) {
         let endpoint = match self {
@@ -959,6 +974,212 @@ fn sqlite_adopts_populated_checkpoint_then_upgrades() {
 #[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
 fn postgres_adopts_populated_checkpoint_then_upgrades() {
     adopt_populated_checkpoint_then_upgrade(Fixture::pg())
+}
+
+/// The ordinary `DB_DRIFT` advice, which drift outside an adoption keeps.
+const DRIFT_ADVICE: &str = "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.";
+const SHELL_DATABASE: &str = "NTNT_TEST_SQLITE_SHELL_DATABASE";
+const SHELL_SQL: &str = "NTNT_TEST_SQLITE_SHELL_SQL";
+/// Run `sql` on the SQLite file `database` from `dir`, as an operator's
+/// `sqlite3` shell started there would: a relative `ATTACH` path resolves in
+/// `dir`. The child is this test binary running only `sqlite_shell_child`, so
+/// this process keeps its own working directory.
+fn sqlite_shell(dir: &Path, database: &Path, sql: &str) {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "sqlite_shell_child", "--nocapture"])
+        .env(SHELL_DATABASE, database)
+        .env(SHELL_SQL, sql)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("sqlite shell ran"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+/// The SQL runner `sqlite_shell` starts; without its variables it does nothing.
+#[test]
+fn sqlite_shell_child() {
+    let (Some(database), Ok(sql)) = (std::env::var_os(SHELL_DATABASE), std::env::var(SHELL_SQL))
+    else {
+        return;
+    };
+    rusqlite::Connection::open(database)
+        .unwrap()
+        .execute_batch(&sql)
+        .unwrap();
+    println!("sqlite shell ran");
+}
+/// #431 (cli-03): an application that ran its own migrations keeps its own
+/// ledger in the managed schema. Adoption refuses that table as drift, and the
+/// advice names it and how to retire it; followed as written, the adoption
+/// plan passes and adopts every migration, and `new` continues the history at
+/// its width.
+fn adopt_an_app_after_retiring_its_own_ledger(f: Fixture) {
+    let s = f.schema().to_owned();
+    // The target as the application's runner built it: each migration in turn,
+    // recorded in its ledger with one row per applied file.
+    let applied_at = match f {
+        Fixture::Postgres(_) => "timestamptz NOT NULL DEFAULT now()",
+        Fixture::Sqlite(_) => "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    };
+    f.execute(&format!(
+        "CREATE TABLE {s}.schema_migrations(version TEXT PRIMARY KEY NOT NULL,applied_at {applied_at})"
+    ));
+    for (name, sql) in [
+        (
+            "001_items.sql",
+            format!("CREATE TABLE {s}.items(id INTEGER PRIMARY KEY,value TEXT);"),
+        ),
+        (
+            "002_settings.sql",
+            format!("CREATE TABLE {s}.settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);"),
+        ),
+    ] {
+        f.sql(name, &sql);
+        f.execute(&format!(
+            "{sql}\nINSERT INTO {s}.schema_migrations(version) VALUES('{name}');"
+        ));
+    }
+    f.execute(&format!("INSERT INTO {s}.items VALUES(17,'retained')"));
+    adoption_checks(
+        &f,
+        &format!("SELECT NOT EXISTS (SELECT 1 FROM {s}.items WHERE value IS NULL)"),
+    );
+
+    let refused = f.command("plan", &["--adopt-through", "2"]);
+    assert_eq!(refused["outcome"], "fail", "{refused}");
+    let ledger = match f {
+        Fixture::Postgres(_) => "relation:schema_migrations",
+        Fixture::Sqlite(_) => "table:\"schema_migrations\"",
+    };
+    assert!(
+        refused["drift"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["object"] == ledger && d["change"] == "unexpected"),
+        "{refused}"
+    );
+    let advice = diagnostic(&refused, "DB_DRIFT")["next_action"]
+        .as_str()
+        .unwrap();
+    for part in [
+        format!("migrations through ID 2 do not create: {s}.schema_migrations."),
+        "previous migration ledger".to_owned(),
+        "docs/DATABASE_MIGRATIONS.md#retiring-an-applications-previous-migration-ledger".to_owned(),
+        "stop the old migration runner".to_owned(),
+        format!("Otherwise, {}", DRIFT_ADVICE.replacen('R', "r", 1)),
+    ] {
+        assert!(advice.contains(&part), "{part:?} is not in {advice:?}");
+    }
+    // Names come from the catalog, never from rows.
+    assert!(!advice.contains("001_items"), "{advice}");
+    let parts: Vec<&str> = advice.split('`').collect();
+    assert_eq!(parts.len(), 3, "one command in {advice:?}");
+    let retire = parts[1];
+    match &f {
+        Fixture::Postgres(_) => {
+            assert_eq!(
+                retire,
+                format!(
+                    "CREATE SCHEMA IF NOT EXISTS app_legacy; ALTER TABLE {s}.schema_migrations SET SCHEMA app_legacy;"
+                )
+            );
+            f.execute(retire);
+            assert_eq!(
+                f.count("SELECT count(*) FROM app_legacy.schema_migrations"),
+                2
+            );
+        }
+        Fixture::Sqlite(sqlite) => {
+            assert_eq!(
+                retire,
+                "ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations; DROP TABLE main.schema_migrations; DETACH DATABASE legacy;"
+            );
+            sqlite_shell(f.root(), &sqlite.target_path, retire);
+            let archive =
+                rusqlite::Connection::open(f.root().join("legacy-ledger.sqlite")).unwrap();
+            let rows: i64 = archive
+                .query_row("SELECT count(*) FROM main.schema_migrations", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 2);
+            assert_eq!(
+                f.count("SELECT count(*) FROM main.sqlite_schema WHERE name='schema_migrations'"),
+                0
+            );
+        }
+    }
+
+    let plan = f.command("plan", &["--adopt-through", "2", "--out", "adoption.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    assert_eq!(plan["plan"]["action"]["kind"], "adopt_baseline");
+    let adopted = f.apply("adoption.json", plan["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{adopted}");
+    assert_eq!(adopted["progress"][0]["kind"], "adopt_baseline");
+    assert_eq!(adopted["progress"][0]["state"], "committed");
+    let verified = f.command("verify", &[]);
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["history"]["adopted_count"], 2);
+
+    // The next migration keeps the history's three digits.
+    let created = f.new_migration("add_label");
+    assert_eq!(
+        created["migration"]["source"], "003_add_label.sql",
+        "{created}"
+    );
+    let path = f.root().join("migrations/003_add_label.sql");
+    let header = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        format!("{header}ALTER TABLE {s}.items ADD COLUMN label TEXT DEFAULT 'expanded';\n"),
+    )
+    .unwrap();
+    let upgrade = f.plan("review-003.json");
+    let applied = f.apply("review-003.json", upgrade["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let states: Vec<&Value> = applied["progress"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| &p["state"])
+        .collect();
+    assert_eq!(
+        states,
+        ["baseline_covered", "baseline_covered", "committed"],
+        "{applied}"
+    );
+    let verified = f.command("verify", &[]);
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["history"]["covered_count"], 3);
+    assert_eq!(verified["history"]["adopted_count"], 2);
+    assert_eq!(verified["history"]["applied_count"], 1);
+    assert_eq!(
+        f.text(&format!("SELECT label FROM {s}.items WHERE id=17")),
+        "expanded"
+    );
+
+    // Drift outside an adoption keeps the ordinary advice.
+    f.execute(&format!("CREATE TABLE {s}.stray(id INTEGER)"));
+    let drifted = f.command("verify", &[]);
+    assert_eq!(
+        diagnostic(&drifted, "DB_DRIFT")["next_action"],
+        DRIFT_ADVICE,
+        "{drifted}"
+    );
+}
+#[test]
+fn sqlite_adopts_an_app_after_retiring_its_own_ledger() {
+    adopt_an_app_after_retiring_its_own_ledger(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_adopts_an_app_after_retiring_its_own_ledger() {
+    adopt_an_app_after_retiring_its_own_ledger(Fixture::pg())
 }
 
 #[test]

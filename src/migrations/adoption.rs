@@ -172,3 +172,271 @@ pub(super) fn format(engine: &str) -> &'static str {
         "postgresql-adoption-v1"
     }
 }
+
+/// Where the docs say how to retire an application's previous migration ledger.
+const RETIRE_LEDGER_DOCS: &str =
+    "docs/DATABASE_MIGRATIONS.md#retiring-an-applications-previous-migration-ledger";
+/// PostgreSQL keywords that cannot name a schema unquoted: the reserved ones,
+/// and those reserved except as function or type names.
+const POSTGRES_RESERVED: &str = "all analyse analyze and any array as asc asymmetric authorization binary both case cast check collate collation column concurrently constraint create cross current_catalog current_date current_role current_schema current_time current_timestamp current_user default deferrable desc distinct do else end except false fetch for foreign freeze from full grant group having ilike in initially inner intersect into is isnull join lateral leading left like limit localtime localtimestamp natural not notnull null offset on only or order outer overlaps placing primary references returning right select session_user similar some symmetric system_user table tablesample then to trailing true union unique user using variadic verbose when where window with";
+/// Every SQLite keyword; quoting one that SQLite would also take bare is harmless.
+const SQLITE_KEYWORDS: &str = "abort action add after all alter always analyze and as asc attach autoincrement before begin between by cascade case cast check collate column commit conflict constraint create cross current current_date current_time current_timestamp database default deferrable deferred delete desc detach distinct do drop each else end escape except exclude exclusive exists explain fail filter first following for foreign from full generated glob group groups having if ignore immediate in index indexed initially inner insert instead intersect into is isnull join key last left like limit match materialized natural no not nothing notnull null nulls of offset on or order others outer over partition plan pragma preceding primary query raise range recursive references regexp reindex release rename replace restrict returning right rollback row rows savepoint select set table temp temporary then ties to transaction trigger unbounded union unique update using vacuum values view virtual when where window with without";
+
+/// `name` as SQL on `engine` writes it: bare when it is lowercase ASCII
+/// letters, digits and underscores, starts with a letter or underscore and is
+/// no keyword that would need quoting; double-quoted otherwise.
+fn sql_name(engine: &str, name: &str) -> String {
+    let keywords = if engine == "sqlite" {
+        SQLITE_KEYWORDS
+    } else {
+        POSTGRES_RESERVED
+    };
+    let bare = name
+        .bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_lowercase() || b == b'_')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && !keywords.split(' ').any(|keyword| keyword == name);
+    if bare {
+        name.to_owned()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
+/// The schema and name, as SQL writes them, of a table that a drift
+/// difference with catalog key `key` and observed definition `observed`
+/// names; `None` for any other object. PostgreSQL keys a table in the managed
+/// schema `relation:<name>` and one elsewhere `<quoted schema>.relation:<name>`
+/// (a relation of kind `r` or `p`); SQLite keys it `table:"<name>"`.
+fn table(engine: &str, schema: &str, key: &str, observed: &Value) -> Option<(String, String)> {
+    if engine == "sqlite" {
+        let quoted = key.strip_prefix("table:\"")?.strip_suffix('"')?;
+        return Some((
+            "main".into(),
+            sql_name(engine, &quoted.replace("\"\"", "\"")),
+        ));
+    }
+    if !matches!(observed["kind"].as_str(), Some("r" | "p")) {
+        return None;
+    }
+    if let Some(name) = key.strip_prefix("relation:") {
+        return Some((sql_name(engine, schema), sql_name(engine, name)));
+    }
+    // quote_ident quotes a schema name that holds a dot or a colon, and doubles
+    // any quote inside it, so its key ends at the first quote that is not
+    // doubled; a bare one ends at the first dot.
+    let end = if key.starts_with('"') {
+        let mut quotes = key.match_indices('"').skip(1).peekable();
+        loop {
+            let (at, _) = quotes.next()?;
+            if quotes.peek().is_some_and(|(next, _)| *next == at + 1) {
+                quotes.next();
+            } else {
+                break at + 1;
+            }
+        }
+    } else {
+        key.find('.')?
+    };
+    let (qualifier, rest) = key.split_at(end);
+    let name = rest.strip_prefix(".relation:")?;
+    Some((qualifier.to_owned(), sql_name(engine, name)))
+}
+
+/// Advice for an adoption of the migrations through `through_id` that is
+/// refused as drift because the target holds tables those migrations do not
+/// create, such as the application's previous migration ledger (#431). It
+/// names those tables, from the drift `differences` and never from rows, says
+/// how to retire a ledger on `engine` before planning again, and otherwise
+/// gives the `ordinary` advice. `None` when no such table differs. The refusal
+/// stays: an unexpected object is never adopted, moved or dropped.
+pub(super) fn retire_ledger_advice(
+    ordinary: &str,
+    engine: &str,
+    schema: &str,
+    through_id: &str,
+    differences: &Value,
+) -> Option<String> {
+    let tables: Vec<(String, String)> = differences
+        .as_array()?
+        .iter()
+        .filter(|d| d["change"] == "unexpected")
+        .filter_map(|d| table(engine, schema, d["object"].as_str()?, &d["observed"]))
+        .collect();
+    let listed: Vec<String> = tables.iter().map(|(s, n)| format!("{s}.{n}")).collect();
+    let (held, subject, qualified, name, placeholder) = match tables.as_slice() {
+        [] => return None,
+        [(s, n)] => (
+            format!("a table that the migrations through ID {through_id} do not create: {s}.{n}"),
+            "it is",
+            format!("{s}.{n}"),
+            n.clone(),
+            "",
+        ),
+        _ => (
+            format!(
+                "tables that the migrations through ID {through_id} do not create: {}",
+                listed.join(", ")
+            ),
+            "one of them is",
+            "<table>".to_owned(),
+            "<table>".to_owned(),
+            if engine == "sqlite" {
+                ", with <table> the ledger's table name,"
+            } else {
+                ", with <table> the ledger's name as listed"
+            },
+        ),
+    };
+    let retire = if engine == "sqlite" {
+        format!("then copy the table to another file and drop it by running `ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.{name} AS SELECT * FROM main.{name}; DROP TABLE main.{name}; DETACH DATABASE legacy;`{placeholder} on the target in the directory where legacy-ledger.sqlite should be written")
+    } else {
+        format!("then move the table to a schema of its own with `CREATE SCHEMA IF NOT EXISTS app_legacy; ALTER TABLE {qualified} SET SCHEMA app_legacy;`{placeholder} (or archive its rows and drop it)")
+    };
+    let mut otherwise = ordinary.chars();
+    let otherwise = otherwise
+        .next()
+        .map(|first| first.to_lowercase().chain(otherwise).collect::<String>())
+        .unwrap_or_default();
+    Some(format!("The target holds {held}. If {subject} the application's previous migration ledger, retire it as {RETIRE_LEDGER_DOCS} describes: stop the old migration runner so it cannot recreate the table, {retire}, and plan the adoption again. Otherwise, {otherwise}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ORDINARY: &str = "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.";
+
+    /// An unexpected drift difference, observed with relation `kind` if any.
+    fn unexpected(object: &str, kind: Option<&str>) -> Value {
+        json!({"object": object, "change": "unexpected", "expected": null,
+            "observed": kind.map_or(json!({}), |kind| json!({"kind": kind}))})
+    }
+
+    #[test]
+    fn a_postgresql_ledger_is_named_with_the_commands_that_retire_it() {
+        let differences = json!([
+            unexpected("column:schema_migrations.version", None),
+            unexpected("constraint:schema_migrations.schema_migrations_pkey", None),
+            unexpected("relation:schema_migrations", Some("r")),
+            unexpected("relation:schema_migrations_pkey", Some("i")),
+        ]);
+        assert_eq!(
+            retire_ledger_advice(ORDINARY, "postgresql", "public", "33", &differences).unwrap(),
+            "The target holds a table that the migrations through ID 33 do not create: public.schema_migrations. If it is the application's previous migration ledger, retire it as docs/DATABASE_MIGRATIONS.md#retiring-an-applications-previous-migration-ledger describes: stop the old migration runner so it cannot recreate the table, then move the table to a schema of its own with `CREATE SCHEMA IF NOT EXISTS app_legacy; ALTER TABLE public.schema_migrations SET SCHEMA app_legacy;` (or archive its rows and drop it), and plan the adoption again. Otherwise, review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state."
+        );
+    }
+
+    #[test]
+    fn a_sqlite_ledger_is_named_with_the_commands_that_retire_it() {
+        let differences = json!([
+            unexpected("column:\"schema_migrations\".\"version\"", None),
+            unexpected("index:\"sqlite_autoindex_schema_migrations_1\"", None),
+            unexpected("table:\"schema_migrations\"", None),
+        ]);
+        assert_eq!(
+            retire_ledger_advice(ORDINARY, "sqlite", "main", "1", &differences).unwrap(),
+            "The target holds a table that the migrations through ID 1 do not create: main.schema_migrations. If it is the application's previous migration ledger, retire it as docs/DATABASE_MIGRATIONS.md#retiring-an-applications-previous-migration-ledger describes: stop the old migration runner so it cannot recreate the table, then copy the table to another file and drop it by running `ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations; DROP TABLE main.schema_migrations; DETACH DATABASE legacy;` on the target in the directory where legacy-ledger.sqlite should be written, and plan the adoption again. Otherwise, review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state."
+        );
+    }
+
+    /// Several tables are all named, as SQL writes them, and the command
+    /// takes the ledger's name in place of `<table>`.
+    #[test]
+    fn several_tables_are_named_and_the_command_takes_the_ledgers_name() {
+        let differences = json!([
+            unexpected("\"Odd.Sche\"\"ma\".relation:x", Some("r")),
+            unexpected("audit.relation:log", Some("p")),
+            unexpected("relation:SequelizeMeta", Some("r")),
+            unexpected("relation:order", Some("r")),
+            unexpected("relation:schema_migrations", Some("r")),
+        ]);
+        let advice =
+            retire_ledger_advice(ORDINARY, "postgresql", "user", "2", &differences).unwrap();
+        assert!(
+            advice.starts_with("The target holds tables that the migrations through ID 2 do not create: \"Odd.Sche\"\"ma\".x, audit.log, \"user\".\"SequelizeMeta\", \"user\".\"order\", \"user\".schema_migrations. If one of them is the application's previous migration ledger,"),
+            "{advice}"
+        );
+        assert!(
+            advice.contains("`CREATE SCHEMA IF NOT EXISTS app_legacy; ALTER TABLE <table> SET SCHEMA app_legacy;`, with <table> the ledger's name as listed (or archive"),
+            "{advice}"
+        );
+        let differences = json!([
+            unexpected("table:\"order\"", None),
+            unexpected("table:\"schema_migrations\"", None),
+            unexpected("table:\"we\"\"ird\"", None),
+        ]);
+        let advice = retire_ledger_advice(ORDINARY, "sqlite", "main", "2", &differences).unwrap();
+        assert!(
+            advice.contains("do not create: main.\"order\", main.schema_migrations, main.\"we\"\"ird\". If one of them is"),
+            "{advice}"
+        );
+        assert!(
+            advice.contains("`ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.<table> AS SELECT * FROM main.<table>; DROP TABLE main.<table>; DETACH DATABASE legacy;`, with <table> the ledger's table name, on the target in the directory"),
+            "{advice}"
+        );
+    }
+
+    /// Drift with no table the history does not create keeps the ordinary advice.
+    #[test]
+    fn other_differences_keep_the_ordinary_advice() {
+        let changed = |object: &str, change: &str| json!({"object": object, "change": change, "expected": {"kind": "r"}, "observed": {"kind": "r"}});
+        for (engine, differences) in [
+            ("postgresql", json!([])),
+            (
+                "postgresql",
+                json!([
+                    unexpected("column:t.extra", None),
+                    unexpected("index:t_extra", None),
+                    unexpected("relation:t_extra", Some("i")),
+                    unexpected("relation:t_id_seq", Some("S")),
+                    unexpected("relation:v", Some("v")),
+                    unexpected("relation:m", Some("m")),
+                    unexpected("schema:audit", None),
+                    changed("relation:t", "changed"),
+                    changed("relation:u", "missing"),
+                ]),
+            ),
+            (
+                "sqlite",
+                json!([
+                    unexpected("index:\"i\"", None),
+                    unexpected("view:\"v\"", None),
+                    unexpected("trigger:\"g\"", None),
+                    unexpected("column:\"t\".\"extra\"", None),
+                    changed("table:\"t\"", "changed"),
+                    changed("table:\"u\"", "missing"),
+                ]),
+            ),
+        ] {
+            assert_eq!(
+                retire_ledger_advice(ORDINARY, engine, "app", "1", &differences),
+                None,
+                "{differences}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_are_quoted_only_where_sql_needs_it() {
+        for (engine, name, written) in [
+            ("postgresql", "schema_migrations", "schema_migrations"),
+            ("postgresql", "public", "public"),
+            ("postgresql", "_sqlx_migrations", "_sqlx_migrations"),
+            ("postgresql", "user", "\"user\""),
+            ("postgresql", "SequelizeMeta", "\"SequelizeMeta\""),
+            ("postgresql", "1st", "\"1st\""),
+            ("postgresql", "we\"ird", "\"we\"\"ird\""),
+            ("postgresql", "", "\"\""),
+            ("sqlite", "main", "main"),
+            ("sqlite", "user", "user"),
+            ("sqlite", "order", "\"order\""),
+            ("sqlite", "Settings", "\"Settings\""),
+        ] {
+            assert_eq!(sql_name(engine, name), written, "{engine} {name}");
+        }
+    }
+}

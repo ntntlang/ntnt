@@ -797,6 +797,9 @@ not in the migrations directory (`Migration ID 7 is not in migrations; the highe
 ID there is 1.`); a target that already has an ntnt ledger, whose history needs
 ordinary `plan` and `migrate`; or a legacy v1 ledger that is empty, records
 migrations that are not applied, or ends at a different ID than the one requested.
+A target that holds tables the selected migrations do not create, such as the
+application's own migration ledger, is refused with `DB_DRIFT` instead; see
+[Retiring an application's previous migration ledger](#retiring-an-applications-previous-migration-ledger).
 
 Declare **at least one named adoption check** in the selected database's manifest:
 
@@ -835,6 +838,48 @@ against current data, then commits only the validated ledger change in that same
 transaction. SQL errors, false checks, drift, wrong targets, unknown ledgers and
 failed cleanup cannot become a successful adoption. An adoption plan never also
 applies pending migrations; plan those separately afterward.
+
+### Retiring an application's previous migration ledger
+
+An application that ran its own migrations usually recorded them in a ledger table
+of its own in the managed schema, such as `public.schema_migrations` (PostgreSQL)
+or `main.schema_migrations` (SQLite). No migration creates that table, so
+`plan --adopt-through <last-id>` refuses the adoption with `DB_DRIFT`: the target
+holds an object the history does not create, and such an object is never adopted.
+The refusal's `next_action` names each table the history does not create and, in
+case one is the old ledger, the steps below for the engine. `ntnt db` never moves
+or drops the table itself. Retire the ledger by hand, outside `ntnt db`, then plan
+the adoption again:
+
+1. Stop the old migration runner, and remove it from deploy scripts, so it cannot
+   recreate the table or apply a file that `ntnt db` now applies. This is the
+   "retire old migration writers" step that
+   [Recognized legacy PostgreSQL history](#recognized-legacy-postgresql-history)
+   asks for.
+2. PostgreSQL: move the table out of the managed schema. Its indexes, constraints
+   and owned sequences move with it, and its rows are kept:
+
+   ```sql
+   CREATE SCHEMA IF NOT EXISTS app_legacy;
+   ALTER TABLE public.schema_migrations SET SCHEMA app_legacy;
+   ```
+
+   Or archive its rows elsewhere, then `DROP TABLE public.schema_migrations;`.
+3. SQLite: a database file has no other schema that `ntnt db` leaves alone, so copy
+   the table to another file and drop it, for example in the `sqlite3` shell opened
+   on the target:
+
+   ```sql
+   ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy;
+   CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations;
+   DROP TABLE main.schema_migrations;
+   DETACH DATABASE legacy;
+   ```
+
+   `legacy-ledger.sqlite` is created in the shell's current directory.
+
+Use the managed schema and table names that `next_action` gives. A table that is
+not an old ledger is ordinary drift: reconcile it deliberately before adopting.
 
 ### Checkpoint and history truth
 
@@ -892,7 +937,10 @@ ownership/physical definitions are refused, not reconstructed, acknowledged or
 repaired. There is no arbitrary Flyway/application-ledger importer and no SQLite
 legacy-ledger import. Do not change checksums or seed a recognized-looking table to
 bypass this boundary. Older NTNT versions do not understand the new states and
-fail closed; retire old migration writers before adopting/importing a deployment.
+fail closed; retire old migration writers before adopting/importing a deployment,
+and retire an application's own ledger as
+[Retiring an application's previous migration ledger](#retiring-an-applications-previous-migration-ledger)
+describes.
 
 ### Rehearsal and operational boundary
 

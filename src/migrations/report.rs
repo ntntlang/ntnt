@@ -829,7 +829,21 @@ async fn inspect_observed(
     }
     report["outcome"] = report["drift"]["outcome"].clone();
     if report["drift"]["outcome"] == "fail" {
-        diagnostic(&mut report,Diagnostic::new("DB_DRIFT","Observed managed catalog differs from the replayed applied prefix; inspect object-level differences."));
+        let mut drift = Diagnostic::new("DB_DRIFT","Observed managed catalog differs from the replayed applied prefix; inspect object-level differences.");
+        // An adoption refused for tables the history does not create says
+        // how to retire an application's previous ledger (#431).
+        if let Some(advice) = adoption.as_ref().and_then(|action| {
+            super::adoption::retire_ledger_advice(
+                &drift.next_action,
+                &inputs.config.engine,
+                &inputs.config.schema,
+                &action.through_id,
+                &report["drift"]["differences"],
+            )
+        }) {
+            drift.next_action = advice;
+        }
+        diagnostic(&mut report, drift);
     }
     // Binding excludes observation time, display filters and scratch physical IDs.
     // It includes every authority-relevant source, policy, target and base fact.
