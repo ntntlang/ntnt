@@ -2980,3 +2980,112 @@ CREATE VIEW app.writes AS SELECT ok FROM {s}.writes;"
         );
     }
 }
+
+/// Check purity gates what a check can reach, not every inspected schema. A
+/// check names only managed-schema relations and reaches others only through
+/// the views among them. Views that call user routines in a schema the
+/// history creates and in `public`, which no managed view reads, leave the
+/// managed schema's checks to run.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_run_beside_views_no_check_can_reach() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE SCHEMA audit;
+CREATE FUNCTION audit.label() RETURNS text IMMUTABLE LANGUAGE sql AS $$ SELECT 'audit' $$;
+CREATE VIEW audit.labelled AS SELECT audit.label() AS label;
+CREATE FUNCTION public.stamp() RETURNS text IMMUTABLE LANGUAGE sql AS $$ SELECT 'public' $$;
+CREATE VIEW public.stamped AS SELECT public.stamp() AS stamp;
+CREATE TABLE app.accounts (id int PRIMARY KEY);",
+    );
+    f.sql("0002_seed.sql", "INSERT INTO app.accounts VALUES (1);");
+    std::fs::write(
+        f.root.path().join("migrations/0002_seed.toml"),
+        "[ensures]\nseeded = 'SELECT EXISTS (SELECT 1 FROM app.accounts)'\n",
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let outside = names_in(&plan["plan"]["execution"]["outside_objects"]);
+    for key in ["public.relation:stamped", "public.routine:stamp()"] {
+        assert!(outside.contains(&key), "{key}: {outside:?}");
+    }
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+}
+
+/// What a check reaches through views is gated in any schema, not only in
+/// the inspected ones. The fixture, not the history, puts a view chain that
+/// ends in a writing function into `pg_catalog` of both databases: a covered
+/// managed view may read there although no plan inspects it. A managed view
+/// over the chain is refused before its check runs, so the function never
+/// writes (a sequence advance would survive the rollback).
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_refuse_views_that_reach_a_writing_function_outside_the_inspected_scope() {
+    let f = Fixture::new();
+    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Checks lock what they read in SHARE mode, which a view grants with
+    // UPDATE. Only a superuser writes a system catalog, so the function
+    // runs as its owner.
+    for database in [&f.target, &f.scratch] {
+        config.dbname(database);
+        let mut admin = config.connect(postgres::NoTls).unwrap();
+        admin
+            .batch_execute(
+                "SET allow_system_table_mods = on;
+CREATE TABLE pg_catalog.ntnt_test_calls (n bigint);
+CREATE SEQUENCE pg_catalog.ntnt_test_call_count;
+CREATE FUNCTION pg_catalog.ntnt_test_touch() RETURNS boolean VOLATILE SECURITY DEFINER LANGUAGE sql
+  AS $$ INSERT INTO pg_catalog.ntnt_test_calls VALUES (nextval('pg_catalog.ntnt_test_call_count')) RETURNING true $$;
+CREATE VIEW pg_catalog.ntnt_test_writes AS SELECT pg_catalog.ntnt_test_touch() AS ok;
+CREATE VIEW pg_catalog.ntnt_test_relay AS SELECT ok FROM pg_catalog.ntnt_test_writes;
+GRANT SELECT, UPDATE ON pg_catalog.ntnt_test_relay, pg_catalog.ntnt_test_writes TO PUBLIC;",
+            )
+            .unwrap();
+    }
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0001_initial.toml"),
+        "[ensures]\nempty = 'SELECT NOT EXISTS (SELECT 1 FROM app.accounts)'\n",
+    )
+    .unwrap();
+    f.sql(
+        "0002_writes.sql",
+        "CREATE VIEW app.writes AS SELECT ok FROM pg_catalog.ntnt_test_relay;",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_writes.toml"),
+        "[ensures]\nwrites = 'SELECT EXISTS (SELECT 1 FROM app.writes WHERE ok)'\n",
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert!(code(&r, "DB_CHECK_UNSUPPORTED"), "{r}");
+    // The first migration's check ran and committed; the check that reads
+    // the chain never ran.
+    assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+    config.dbname(&f.target);
+    let row = config
+        .connect(postgres::NoTls)
+        .unwrap()
+        .query_one(
+            "SELECT (SELECT count(*) FROM pg_catalog.ntnt_test_calls), (SELECT is_called FROM pg_catalog.ntnt_test_call_count)",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        (row.get::<_, i64>(0), row.get::<_, bool>(1)),
+        (0, false),
+        "the function ran"
+    );
+}

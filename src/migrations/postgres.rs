@@ -834,11 +834,12 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         }
         Ok(())
     }
-    /// Gate checks on the live catalog. Checks read managed-schema tables
-    /// and views, and a view reads what its query names, so the conditions
-    /// hold in every schema inspected: the managed schema, the `extra`
-    /// schemas the history creates, and the objects it creates elsewhere
-    /// (`outside`, by catalog key, as `catalog_sql` matches them in `$3`).
+    /// Gate checks on the live catalog. A check names only managed-schema
+    /// relations, and reading a view reads what its rules depend on, so the
+    /// conditions hold for every relation a check can reach: the managed
+    /// schema's, and transitively every relation a view among them reads, in
+    /// any schema. Objects no check can reach leave checks alone. `extra` and
+    /// `outside` scope the coverage check, as in every inspection.
     pub async fn check_purity(
         &self,
         schema: &str,
@@ -852,23 +853,28 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
                 "Live objects exceed contract purity coverage.",
             ));
         }
-        // $1 is the managed scope; $2 the outside objects. A relation there
-        // is `<quoted schema>.relation:<name>`.
-        let safe = self.rows(r#"SELECT NOT EXISTS (
+        // A check names only managed-schema relations ($1). Reading a view
+        // reads the relations its rules depend on, in any schema, so `reach`
+        // follows views from there, transitively.
+        let safe = self.rows(r#"WITH RECURSIVE reach(rel) AS (
+            SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1
+            UNION
+            SELECT d.refobjid FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v'
+            JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
+            JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::regclass)
+          SELECT NOT EXISTS (
           SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
-          JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-          WHERE (n.nspname=ANY($1) OR (cardinality($2::text[])>0 AND quote_ident(n.nspname)||'.relation:'||c.relname=ANY($2))) AND c.relkind='r'
+          WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind='r'
           AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace WHERE t.oid=a.atttypid AND tn.nspname<>'pg_catalog'))
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast WHERE oid>=16384 AND castcontext IN ('i','a'))
-          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-            WHERE (n.nspname=ANY($1) OR (cardinality($2::text[])>0 AND quote_ident(n.nspname)||'.relation:'||c.relname=ANY($2))) AND c.relkind NOT IN ('r','p','i','I','S','v'))
-          -- A check may read a view, which may read other views in the scope.
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind NOT IN ('r','p','i','I','S','v'))
+          -- A check may read a view, and through it what the view reads.
           -- Views may only use builtin non-volatile functions, so reading one
           -- cannot write or take advisory locks.
-          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class v JOIN pg_catalog.pg_namespace n ON n.oid=v.relnamespace
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class v
             JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid
             JOIN pg_catalog.pg_proc p ON d.refclassid='pg_catalog.pg_proc'::regclass AND p.oid=d.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
-            WHERE (n.nspname=ANY($1) OR (cardinality($2::text[])>0 AND quote_ident(n.nspname)||'.relation:'||v.relname=ANY($2))) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&scope(schema, extra), &outside]).await?;
+            WHERE v.oid IN (SELECT rel FROM reach) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema]).await?;
         if !safe[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
