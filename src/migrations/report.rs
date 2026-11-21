@@ -1209,14 +1209,22 @@ mod tests {
         assert_eq!(code(Err(failure("DB_TIMEOUT"))), Err("DB_TIMEOUT".into()));
     }
 
-    /// The tables outside coverage in each state, by name.
+    /// The tables outside coverage in each state, by name. Each state must
+    /// have a catalog: one whose inspection failed (None) fails, naming its
+    /// migration, so it can never match a covered state.
     fn uncovered_tables(states: &[Option<Vec<String>>]) -> Vec<Vec<String>> {
         states
             .iter()
-            .map(|state| {
+            .enumerate()
+            .map(|(index, state)| {
+                let Some(state) = state else {
+                    panic!(
+                        "after migration {} the inspection returned no catalog",
+                        index + 1
+                    )
+                };
                 state
                     .iter()
-                    .flatten()
                     .map(|key| {
                         key.strip_prefix("table:\"")
                             .and_then(|k| k.strip_suffix('"'))
@@ -1244,6 +1252,25 @@ mod tests {
         let (failed, states) = assert_incremental_inspection_is_exact(&scripts, usize::MAX, None);
         assert_eq!(failed, Vec::<String>::new());
         assert_eq!(uncovered_tables(&states), [vec![], vec!["view:\"v\""]]);
+    }
+
+    /// `uncovered_tables` names each state's uncovered tables, `[]` for a
+    /// catalog with nothing uncovered.
+    #[test]
+    fn uncovered_tables_names_what_each_catalog_leaves_uncovered() {
+        let states = [
+            Some(vec![]),
+            Some(vec!["table:\"t\"".to_owned(), "view:\"v\"".to_owned()]),
+        ];
+        assert_eq!(uncovered_tables(&states), [vec![], vec!["t", "view:\"v\""]]);
+    }
+
+    /// A state whose inspection returned no catalog cannot match a covered
+    /// one: `uncovered_tables` fails, naming the migration.
+    #[test]
+    #[should_panic(expected = "after migration 2 the inspection returned no catalog")]
+    fn uncovered_tables_fails_for_a_state_without_a_catalog() {
+        uncovered_tables(&[Some(vec![]), None, Some(vec![])]);
     }
 
     /// #421: a table's programs are reused across changes below it in its
