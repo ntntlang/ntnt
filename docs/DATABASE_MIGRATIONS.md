@@ -167,6 +167,10 @@ connections first.
 The managed schema must already exist on the target. Create it as the owner role,
 for example `PGPASSWORD=dev-only-owner psql -h 127.0.0.1 -U app_owner -d app_development -c 'CREATE SCHEMA app'`.
 Skip this if you use `schema = "public"`. Leave the scratch database empty.
+Migrations may create further schemas with `CREATE SCHEMA`; NTNT inspects those
+too (see [Managed scope](#managed-scope)). Each owner role above owns its database,
+which gives it the `CREATE` privilege that needs, and it owns the schemas its
+migrations create. Do not create those schemas in advance.
 
 `ntnt db init --engine postgresql` writes this manifest (its comments are omitted here):
 
@@ -267,7 +271,7 @@ required = true
 - Connections reuse the existing **`std/secrets` providers and declaration validation**. Development's environment provider reads the exact logical name. Production uses the configured Unix-socket provider; the environment provider remains disabled in production. See [Secrets Agent Protocol](secrets-agent-protocol.md). Declarations are read from the captured manifest, not reopened during replay.
 - A connection secret must specify exactly one host, the declared `user`/`dbname`, an explicit `sslmode`, and no startup `options`. [TLS](#tls) describes the transport rules; there is no silent downgrade to plaintext.
 - Physical database, role and managed-schema names use ASCII letters/digits/underscores, start with a letter, and are at most 63 bytes. SQL object identifiers may be quoted. System schemas and `_ntnt` cannot be the managed schema; `public` is supported and is where most applications keep their tables.
-- The **target managed schema must already exist**. Read-only commands never create it or `_ntnt`. Authorized `migrate` bootstraps its scoped ledger only inside the first migration transaction, after locked validation of an empty recognized base. A nonempty unrecognized scope is never assumed to have empty history.
+- The **target managed schema must already exist**. Read-only commands never create it or `_ntnt`. Schemas the migrations create join the [managed scope](#managed-scope); the target role needs the `CREATE` privilege on the database for them (a database owner has it). Authorized `migrate` bootstraps its scoped ledger only inside the first migration transaction, after locked validation of an empty recognized base. A nonempty unrecognized scope is never assumed to have empty history.
 - The declared target role is the logical owner for expected owner/grant canonicalization. Scratch uses its separate owner role. Other owners/grantees remain distinct; ownership and grants are never stripped wholesale. Multi-owner histories or additional grants that cannot be reproduced by the supported history will not receive a clean comparison. Target authority/membership facts are also bound into plans.
 
 ### TLS
@@ -343,7 +347,7 @@ For each PostgreSQL migration, the runner:
 4. Verifies the resulting catalog against that exact prefix fingerprint, records the relation locks the transaction holds in `progress[].locks`, and inserts the success ledger entry in the same transaction.
 5. Commits that migration before starting the next. Failure never rolls back an earlier committed migration.
 
-If a lock is not granted within one second, or the session is chosen as a deadlock victim, the whole migration transaction rolls back and is retried after a backoff (250 ms doubling, with jitter), up to 4 attempts; `progress[].lock_retries` counts them. A short lock timeout keeps application queries from queueing behind a migration that is waiting for a lock. Statements that need strong locks (most `ALTER TABLE`, `DROP`, `CREATE INDEX` without `CONCURRENTLY`) still block other access to their table while the migration transaction is open; this is **not online migration tooling** for long rewrites. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the managed schema and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
+If a lock is not granted within one second, or the session is chosen as a deadlock victim, the whole migration transaction rolls back and is retried after a backoff (250 ms doubling, with jitter), up to 4 attempts; `progress[].lock_retries` counts them. A short lock timeout keeps application queries from queueing behind a migration that is waiting for a lock. Statements that need strong locks (most `ALTER TABLE`, `DROP`, `CREATE INDEX` without `CONCURRENTLY`) still block other access to their table while the migration transaction is open; this is **not online migration tooling** for long rewrites. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the [managed scope](#managed-scope) and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
 
 Every source/plan is captured before I/O; no validated filename is reopened during execution. A new invocation recaptures it. Same-plan reruns after partial/all commits recognize matching immutable history and the expected catalog at each ordered prefix, without reapplying SQL or rerunning already-applied transition checks. Edited SQL/checks, missing/reordered history, catalog drift, other stores/targets, changed policy/authority or extra unsupported extensions fail closed.
 
@@ -539,13 +543,88 @@ Supported catalog fingerprints include:
 
 Quoted identifier components are unambiguously quoted in composite object keys. OIDs and ACL array order do not become semantic differences. The declared owner role maps to a typed managed-role marker in target/scratch, while every other role and the PUBLIC grantee remain distinct. Sequence counters are never read or fingerprinted.
 
-Plain views, sequences, SQL and PL/pgSQL functions/procedures (full definition, owner and grants), user triggers, RLS policies, declarative partitions in the managed schema, expression/partial indexes on built-in access methods, and extensions installed in the managed schema (by version) are compared like tables: an out-of-band change is reported as drift on the named object. Materialized views, functions in other languages, non-partition inheritance or partitions outside the managed scope, foreign/custom types, custom collations/operator classes/access methods, extensions in other schemas, event triggers, security labels, other namespace objects and references to routines outside `pg_catalog` and the managed schema expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. Comparison is by definition, not behavior: NTNT does not analyze what a function body or policy expression does. This is not dependency closure, security-policy verification or replication/publication configuration auditing.
+Plain views, sequences, SQL and PL/pgSQL functions/procedures (full definition, owner and grants), user triggers, RLS policies, declarative partitions in their parent's schema, expression/partial indexes on built-in access methods, and extensions installed in the managed scope (by version) are compared like tables: an out-of-band change is reported as drift on the named object. Materialized views, functions in other languages, non-partition inheritance or partitions in another schema than their parent, foreign/custom types, custom collations/operator classes/access methods, extensions in other schemas, event triggers, security labels, other namespace objects and references to routines outside `pg_catalog` and the managed scope expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. Comparison is by definition, not behavior: NTNT does not analyze what a function body or policy expression does. This is not dependency closure, security-policy verification or replication/publication configuration auditing.
 
 Engine-deparsed SQL, defaults, expressions, comments and storage option payloads are represented by **definition hashes**, not printed literals: schema definitions can themselves contain credentials. Object names, structural fields, owner/grant facts and object-level differences remain visible. This avoids echoing connection credentials, SQL error payloads or live row samples. It is not an SQL dump; review source SQL separately through appropriately authorized tooling.
 
 Drift compares `observed` with `expected(applied_prefix)`, not repository HEAD. Differences name the affected object and show expected/observed properties or definition fingerprints. An incomplete comparison is `unknown`, never “no drift.” Unsupported pending SQL can block a candidate plan while a separately verified applied prefix still passes. `verify` does not replay pending SQL.
 
 `DB_COVERAGE_INCOMPLETE` names what could not be inspected: its `objects` field lists the uncovered catalog keys, for example `index:"contact_requests_pending"` or `table:"t"`. When the objects are on the target, `catalog.uncovered` lists them too. When replaying a migration produced them, they exist only in the replayed intermediate catalog, and `source` names that migration. The human output prints both fields under the diagnostic.
+
+### Managed scope
+
+PostgreSQL inspects the **managed scope**: the configured `schema` plus every
+schema the captured migration history creates. A schema is created by the history
+when a top-level `CREATE SCHEMA <name>` statement in any captured migration names
+it (pending migrations included), or when an `ALTER SCHEMA <old> RENAME TO <new>`
+renames such a schema. The set comes from the captured SQL, before any database is
+read, so `status`, `plan`, `verify`, `migrate` and `reconcile` inspect the same
+schemas, and the plan's input digest binds them. Reports list them in
+`target.history_schemas`. A `CREATE SCHEMA` inside a `DO` block or function body,
+`CREATE SCHEMA AUTHORIZATION <role>` without a schema name, and the reserved names
+`pg_*`, `information_schema` and `_ntnt` never join the scope.
+
+```sql
+-- migrations/0001_initial.sql
+CREATE TABLE app.accounts (id int PRIMARY KEY);
+CREATE SCHEMA audit;
+CREATE TABLE audit.log (id int PRIMARY KEY, account int REFERENCES app.accounts (id));
+```
+
+Objects in `audit` get the same inspection and coverage rules as the managed
+schema's: an out-of-band `DROP TABLE audit.log` or `GRANT SELECT ON audit.log TO
+PUBLIC` is drift on `audit.relation:log`, and an unsupported object there, such as
+a materialized view, makes the result `unknown`. Catalog keys in those schemas
+start with the schema name (quoted where PostgreSQL would quote it):
+`audit.relation:log`, `audit.column:log.account`, `audit.index:log_pkey`. A schema
+itself is `schema:audit`. Keys in the managed schema stay unqualified
+(`relation:accounts`), so a history without `CREATE SCHEMA` keeps exactly the
+catalog, plan digests and saved plans it had before the scope was added. A plan
+saved by an earlier release for a history with `CREATE SCHEMA` did not inspect those
+schemas; `migrate` reports it as `DB_PLAN_STALE`, so plan it again.
+
+Foreign keys, views, triggers, column defaults and policies may refer to any schema
+of the scope. A later migration may rename or drop (`DROP SCHEMA audit`, without
+`CASCADE`) a schema the history created; replay produces the expected state and a
+schema that is recreated out of band is drift. A schema the history will create
+belongs to the scope from the start: if the target already has a schema of that
+name, its contents are compared with the replayed history (an unexpected schema is
+drift; with no ledger, objects there need [adoption](#explicit-adoption-of-existing-databases)).
+Schemas the history creates are owned by the migration role on the target and by
+the scratch role in replay; both map to the managed-role marker. `requires`,
+`ensures` and `adoption_checks` still read only managed-schema tables. Lock
+predictions, `progress[].locks` and `CREATE INDEX CONCURRENTLY` cover managed-schema
+tables only.
+
+Anything a migration would create, change or drop outside the managed scope would
+never be inspected, so it is refused with `DB_OUTSIDE_SCOPE`. Its `source` names
+the migration and `objects` names what lies outside the scope:
+
+- **Before the script runs**, in replay and on the target: a top-level statement
+  that creates, alters, drops, truncates or grants on an object named with a schema
+  outside the scope (`CREATE TABLE public.audit_log`, `DROP TABLE IF EXISTS
+  public.legacy`, `CREATE INDEX ... ON shared.t`), or that creates, alters, drops
+  or grants on such a schema itself (`DROP SCHEMA IF EXISTS shared`, `GRANT USAGE
+  ON SCHEMA public`, `GRANT ... ON ALL TABLES IN SCHEMA public`, `CREATE EXTENSION
+  ... WITH SCHEMA public`). The message gives the statement number; `objects` lists
+  the names as written (`public.legacy`). `pg_temp` is not outside the scope. These
+  statements can be no-ops in empty scratch or fail there for lack of the schema,
+  so they are refused by name before replay.
+- **After each replayed migration**: scratch must hold nothing outside the scope
+  that it was not provisioned with: no other schema, no object in `public` (unless
+  `public` is the managed schema or the history creates it), and `public`'s owner
+  and privileges unchanged. `objects` lists catalog-style keys such as
+  `public.relation:audit_log` or `schema:reporting`. This catches what statement
+  analysis cannot see: `DO` blocks and function bodies, `SET search_path`,
+  `ALTER ... SET SCHEMA`, and extensions that install objects in `public`.
+
+Keep shared objects, such as extensions installed in `public` for several
+applications, out of migrations and provision them separately, or install an
+extension in the managed schema. A statement inside a `DO` block or function body
+that acts outside the scope only on the target (for example dropping a `public`
+table if it exists) is not detected; keep such SQL out of migrations. Database-wide
+objects without a schema, such as publications and large objects, remain outside
+inspection.
 
 ### Scoped execution ledger and legacy inspection
 
@@ -849,4 +928,4 @@ cargo test --locked --lib migrations::postgres::tests::target_transaction_is_rea
 
 The shared conformance suite executes the same history/drift, approval/stale/wrong-target, contract failure and committed-prefix recovery scenarios on both native adapters. It also exercises populated baseline adoption, exact multi-file coverage, required check failures, unknown ledgers and later upgrades. PostgreSQL cases import only recognized immutable legacy history and reject unsafe ledger definitions. Adoption commit-fault tests distinguish baseline/import records from SQL execution; SQLite cases cover competing adopters, cancellation/timeout and busy-COMMIT recovery. SQLite-only tests also cover physical file aliases/replacement, read-only nonmutation, WAL, bounded busy waits, competing CLI processes, forced process death before commit and after an acknowledged-to-SQLite prefix, busy-COMMIT fresh reconciliation, timeout/discard, ledger tampering, redaction and populated rebuild preservation. `tests/db_sqlite_indexes.rs` covers partial (including partial unique) and expression indexes through plan, migrate and verify, out-of-band predicate and expression drift, a rebuild that must recreate a partial index unchanged, the function allowlist for predicates and expressions, and coverage diagnostics that name the uncovered objects. Native SQLite fixtures provision disposable local files only; no service is needed.
 
-PostgreSQL fixtures create/drop databases and roles. They test real read-only transactions, no target bootstrap, applied-prefix versus pending drift, invalid indexes, constraint validity/grants, immutable SQL/metadata history, malformed/RLS/view ledgers, unknown coverage, physical scratch collisions, low-privilege/empty/matching scratch, redaction, bounded waits, cleanup, source replacement during a blocked inspection, and target/source/authority-bound plans. Execution tests additionally cover fresh construction, populated upgrade preservation, exact authority, stale plans, partial commits and reruns, false/NULL/shape/type/error/timeout checks, native/advisory contention, configured statement and migrator-wait limits (scaled to seconds), snapshots after lock acquisition, process cancellation, unsafe/scoped ledgers, unsupported effects and source replacement. A test-only wire proxy drops connections before COMMIT, after durable COMMIT but before acknowledgement, during rollback, and during reconciliation. It is not linked into release code and exposes no authorization bypass. These executed fixture checks are not evidence about arbitrary application business behavior or real deployment compatibility.
+PostgreSQL fixtures create/drop databases and roles. They test schemas the history creates (drift, coverage and grants there, cross-schema foreign keys, renames, `DROP SCHEMA`, adoption and reconciliation), `DB_OUTSIDE_SCOPE` refusals, single-schema fingerprints recorded before the scope was added, real read-only transactions, no target bootstrap, applied-prefix versus pending drift, invalid indexes, constraint validity/grants, immutable SQL/metadata history, malformed/RLS/view ledgers, unknown coverage, physical scratch collisions, low-privilege/empty/matching scratch, redaction, bounded waits, cleanup, source replacement during a blocked inspection, and target/source/authority-bound plans. Execution tests additionally cover fresh construction, populated upgrade preservation, exact authority, stale plans, partial commits and reruns, false/NULL/shape/type/error/timeout checks, native/advisory contention, configured statement and migrator-wait limits (scaled to seconds), snapshots after lock acquisition, process cancellation, unsafe/scoped ledgers, unsupported effects and source replacement. A test-only wire proxy drops connections before COMMIT, after durable COMMIT but before acknowledgement, during rollback, and during reconciliation. It is not linked into release code and exposes no authorization bypass. These executed fixture checks are not evidence about arbitrary application business behavior or real deployment compatibility.

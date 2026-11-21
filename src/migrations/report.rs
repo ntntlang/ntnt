@@ -206,7 +206,11 @@ pub(super) async fn inspect(
         target.begin_readonly().await?;
         let identity = target.identity(&inputs.endpoint).await?;
         let catalog = target
-            .catalog(&inputs.config.schema, &inputs.endpoint.role)
+            .catalog(
+                &inputs.config.schema,
+                &inputs.history_schemas,
+                &inputs.endpoint.role,
+            )
             .await?;
         // Retain a history error as a report diagnostic alongside the catalog.
         let history = target.history().await;
@@ -254,6 +258,9 @@ async fn inspect_observed(
         "history":{"outcome":"unknown"},"drift":{"outcome":"unknown","differences":[]},
         "assertions":{"outcome":"not_run","executed":0,"reason":"Transition contracts are not executed by catalog replay or read-only inspection."},
         "diagnostics":[],"limitations":["Catalog equivalence is not data correctness or business compatibility.","No production row scans or lock-duration estimates.","No target DDL, adoption, authorization or repair.","Noncooperating concurrent DDL/writers are not excluded by this observation."]});
+    if !inputs.history_schemas.is_empty() {
+        report["target"]["history_schemas"] = json!(inputs.history_schemas);
+    }
     let history = match history {
         Ok(h) => h,
         Err(d) => {
@@ -323,18 +330,31 @@ async fn inspect_observed(
             .await?;
             let work = async {
                 let scratch_identity = scratch
-                    .prepare_scratch(&identity, &scratch_config.endpoint, &inputs.config.schema)
+                    .prepare_scratch(
+                        &identity,
+                        &scratch_config.endpoint,
+                        &inputs.config.schema,
+                        &inputs.history_schemas,
+                    )
                     .await?;
                 report["scratch"] = json!({"identity":scratch_identity,"disposable":true});
                 fingerprints.push(json_digest(
                     &scratch
-                        .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
+                        .catalog(
+                            &inputs.config.schema,
+                            &inputs.history_schemas,
+                            &scratch_config.endpoint.role,
+                        )
                         .await?,
                 ));
                 if reference == 0 {
                     expected = Some(
                         scratch
-                            .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
+                            .catalog(
+                                &inputs.config.schema,
+                                &inputs.history_schemas,
+                                &scratch_config.endpoint.role,
+                            )
                             .await?,
                     );
                 }
@@ -352,11 +372,16 @@ async fn inspect_observed(
                         .execute_captured(
                             migration,
                             &inputs.config.schema,
+                            &inputs.history_schemas,
                             super::inventory::Limits::default().statement(),
                         )
                         .await?;
                     let step = scratch
-                        .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
+                        .catalog(
+                            &inputs.config.schema,
+                            &inputs.history_schemas,
+                            &scratch_config.endpoint.role,
+                        )
                         .await?;
                     if !step.uncovered.is_empty() {
                         // The target's catalog.uncovered cannot name these:
@@ -373,7 +398,11 @@ async fn inspect_observed(
                     if index + 1 == reference {
                         expected = Some(
                             scratch
-                                .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
+                                .catalog(
+                                    &inputs.config.schema,
+                                    &inputs.history_schemas,
+                                    &scratch_config.endpoint.role,
+                                )
                                 .await?,
                         );
                     }
@@ -381,7 +410,11 @@ async fn inspect_observed(
                 if command == "plan" {
                     candidate = Some(
                         scratch
-                            .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
+                            .catalog(
+                                &inputs.config.schema,
+                                &inputs.history_schemas,
+                                &scratch_config.endpoint.role,
+                            )
                             .await?,
                     );
                 }

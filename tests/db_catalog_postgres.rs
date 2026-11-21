@@ -832,3 +832,280 @@ fn sql_errors_and_unrecognized_ledger_values_do_not_leak_literals() {
     assert!(has_code(&r, "DB_HISTORY_DIVERGENT"));
     assert!(!r.to_string().contains("ntnt245_private_ledger"));
 }
+
+fn diagnostic<'a>(r: &'a Value, code: &str) -> Option<&'a Value> {
+    r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == code)
+}
+
+fn names(list: &Value) -> Vec<&str> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+/// #420: a schema the migration history creates belongs to the managed scope.
+/// An out-of-band change there is drift on the named object, exactly as in
+/// the managed schema, never a pass.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn objects_in_a_schema_the_history_creates_are_inspected() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);\nCREATE SCHEMA audit;\nCREATE TABLE audit.log (id int PRIMARY KEY, msg text);\n",
+    );
+    let plan = f.plan("plan.json");
+    let applied = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let clean = f.command("verify");
+    assert_eq!(clean["outcome"], "pass", "{clean}");
+    for (change, object) in [
+        (
+            "ALTER TABLE audit.log DROP COLUMN msg",
+            "audit.column:log.msg",
+        ),
+        ("DROP TABLE audit.log", "audit.relation:log"),
+    ] {
+        f.target().batch_execute(change).unwrap();
+        let r = f.command("verify");
+        assert_eq!(r["outcome"], "fail", "{change}: {r}");
+        assert!(has_code(&r, "DB_DRIFT"), "{change}: {r}");
+        assert!(
+            r["drift"]["differences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["object"] == object && d["change"] == "missing"),
+            "{change}: {}",
+            r["drift"]["differences"]
+        );
+    }
+    // Keys in a created schema are qualified; the managed schema's are not.
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "schema:app",
+        "schema:audit",
+        "relation:accounts",
+        "audit.relation:log",
+        "audit.column:log.msg",
+        "audit.index:log_pkey",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    assert_eq!(
+        clean["target"]["history_schemas"],
+        serde_json::json!(["audit"])
+    );
+}
+
+/// Coverage and privileges apply in a created schema as in the managed one.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn uncovered_objects_and_grants_in_a_created_schema_are_reported() {
+    let f = Fixture::new();
+    f.seed_first("CREATE SCHEMA audit; CREATE TABLE audit.log (id int);");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    f.target()
+        .batch_execute("GRANT SELECT ON audit.log TO PUBLIC")
+        .unwrap();
+    let granted = f.command("verify");
+    assert_eq!(granted["drift"]["outcome"], "fail", "{granted}");
+    assert!(
+        granted["drift"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["object"] == "audit.relation:log" && d["change"] == "changed"),
+        "{}",
+        granted["drift"]["differences"]
+    );
+    f.target()
+        .batch_execute("REVOKE SELECT ON audit.log FROM PUBLIC")
+        .unwrap();
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    f.target()
+        .batch_execute("CREATE MATERIALIZED VIEW audit.summary AS SELECT 1 AS n")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["drift"]["outcome"], "unknown", "{r}");
+    let coverage = diagnostic(&r, "DB_COVERAGE_INCOMPLETE").unwrap_or_else(|| panic!("{r}"));
+    assert!(
+        names(&coverage["objects"]).contains(&"audit.view:summary"),
+        "{coverage}"
+    );
+    assert!(
+        names(&r["catalog"]["uncovered"]).contains(&"audit.view:summary"),
+        "{r}"
+    );
+}
+
+/// A migration that would create, change or drop objects outside the
+/// managed scope (in `public`, or in a schema the history did not create)
+/// is refused, and the diagnostic names the object and its schema.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn statements_outside_the_managed_scope_are_refused_and_named() {
+    let f = Fixture::new();
+    // A shared schema and a table in public that exist on the target only.
+    f.target()
+        .batch_execute("CREATE SCHEMA shared; CREATE TABLE public.legacy (id int)")
+        .unwrap();
+    for (sql, object) in [
+        ("CREATE TABLE public.leak (id int);", "public.leak"),
+        ("CREATE TABLE shared.leak (id int);", "shared.leak"),
+        // A no-op in scratch, but it would drop a table on the target.
+        ("DROP TABLE IF EXISTS public.legacy;", "public.legacy"),
+        (
+            "GRANT SELECT ON ALL TABLES IN SCHEMA public TO PUBLIC;",
+            "public",
+        ),
+        // Statement text the analysis cannot see into: replay observes it.
+        (
+            "DO $$ BEGIN CREATE TABLE public.leak (id int); END $$;",
+            "public.relation:leak",
+        ),
+        (
+            "SET LOCAL search_path = public; CREATE TABLE leak (id int);",
+            "public.relation:leak",
+        ),
+        ("GRANT CREATE ON SCHEMA public TO PUBLIC;", "public"),
+    ] {
+        f.sql(
+            "0001_initial.sql",
+            &format!("CREATE TABLE app.t (id int);\n{sql}\n"),
+        );
+        let r = f.command("plan");
+        assert_ne!(r["outcome"], "pass", "{sql}: {r}");
+        assert_eq!(r["plan"]["candidate"]["outcome"], "unknown", "{sql}: {r}");
+        let refused = diagnostic(&r, "DB_OUTSIDE_SCOPE")
+            .unwrap_or_else(|| panic!("{sql}: {}", r["diagnostics"]));
+        assert_eq!(refused["source"], "0001_initial.sql", "{refused}");
+        assert!(
+            names(&refused["objects"]).contains(&object),
+            "{sql}: {refused}"
+        );
+    }
+    // Planning never touched the target's objects outside the scope.
+    assert!(f
+        .target()
+        .query_one("SELECT to_regclass('public.legacy') IS NOT NULL AND to_regclass('public.leak') IS NULL AND to_regclass('shared.leak') IS NULL", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+}
+
+/// Two migrations of a single-schema history. It reaches every catalog query
+/// whose SQL #420 changed.
+const SINGLE_SCHEMA_HISTORY: [(&str, &str); 2] = [
+    (
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id integer PRIMARY KEY, email text NOT NULL UNIQUE, parent integer REFERENCES app.accounts(id), CHECK (id > 0));
+CREATE INDEX accounts_email_lower ON app.accounts (lower(email)) WHERE email <> '';
+CREATE TABLE app.events (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, account integer NOT NULL REFERENCES app.accounts(id) ON DELETE CASCADE);
+CREATE VIEW app.account_emails AS SELECT id, email FROM app.accounts;
+CREATE SEQUENCE app.counter;
+CREATE FUNCTION app.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE TRIGGER accounts_touch BEFORE UPDATE ON app.accounts FOR EACH ROW EXECUTE FUNCTION app.touch();
+ALTER TABLE app.accounts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY accounts_all ON app.accounts USING (true);
+GRANT SELECT ON app.account_emails TO PUBLIC;
+",
+    ),
+    (
+        "0002_created.sql",
+        "ALTER TABLE app.accounts ADD COLUMN created timestamp DEFAULT now();",
+    ),
+];
+
+/// A history without CREATE SCHEMA keeps exactly the catalog it had before
+/// #420, so plans saved by earlier releases keep validating. The
+/// fingerprints were recorded with ntnt 0.6.4 before #420 (81a5ad0). They
+/// differ between PostgreSQL major versions (for example the default table
+/// privileges gained MAINTAIN in 17), never within one.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn single_schema_catalog_fingerprints_are_unchanged() {
+    let mut f = Fixture::new();
+    for (name, sql) in SINGLE_SCHEMA_HISTORY {
+        f.sql(name, sql);
+    }
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let major = f
+        .admin
+        .query_one(
+            "SELECT current_setting('server_version_num')::int / 10000",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i32>(0);
+    let empty = "e0b5e359882940c7b4bc8008309032618468ec05ea2b92f0435e3d4ae3ec82d7";
+    let expected = match major {
+        16 => [
+            empty,
+            "fa27beb077d616c4dc1ba83c0f922432668c5f0a4501b2012a457eed579b878d",
+            "91c98d8aac0941393b1983539e57a22461e93321e80f732059ae9b5e755f3615",
+        ],
+        17 => [
+            empty,
+            "ace2b9aae2336edacbe65862d184d70af85f9dc489ef785562e3c765807234a0",
+            "10e838513cc36a4e69753c906b42a05152998f7e1d661ee321626edcdd849e5f",
+        ],
+        18 => [
+            empty,
+            "d47d0d362be207d3759c1947cdea743a9511573519bb83dae68f667990f482b3",
+            "7f7835ca0326767f0776785a3ce3386a3ea435c79263524d13a11d4d258e7423",
+        ],
+        other => panic!("no recorded fingerprints for PostgreSQL {other}"),
+    };
+    assert_eq!(
+        r["plan"]["execution"]["prefix_fingerprints"],
+        serde_json::json!(expected),
+        "PostgreSQL {major}"
+    );
+    // Nor did the plan or its binding gain a field.
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(
+        keys(&r["plan"]),
+        [
+            "authorized",
+            "automatic_safe",
+            "binding",
+            "candidate",
+            "classification",
+            "data_checks",
+            "executable",
+            "execution",
+            "pending",
+            "required_authority"
+        ]
+    );
+    assert_eq!(
+        keys(&r["plan"]["binding"]),
+        [
+            "adapter",
+            "applied_count",
+            "base_catalog_digest",
+            "base_history_digest",
+            "canonicalization_version",
+            "database",
+            "expected_base_digest",
+            "format_version",
+            "input_digest",
+            "managed_schema",
+            "policy_digest",
+            "target",
+            "target_name"
+        ]
+    );
+    assert!(
+        r["target"].get("history_schemas").is_none(),
+        "{}",
+        r["target"]
+    );
+}

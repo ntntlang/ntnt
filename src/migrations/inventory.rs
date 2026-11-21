@@ -234,6 +234,9 @@ pub(crate) struct CapturedInputs {
     pub endpoint: Endpoint,
     pub document: toml::Value,
     pub migrations: Vec<Migration>,
+    /// PostgreSQL: the schemas the captured history creates, inspected with
+    /// the managed schema (see `analysis::history_schemas`). Empty for SQLite.
+    pub history_schemas: Vec<String>,
     pub input_digest: String,
     pub policy_digest: String,
 }
@@ -659,6 +662,14 @@ impl CapturedInputs {
             database_name.as_bytes(),
             json_digest(&summaries).as_bytes(),
         ]);
+        let history_schemas = if config.engine == "postgresql" {
+            super::analysis::history_schemas(
+                migrations.iter().map(|m| m.sql.as_str()),
+                &config.schema,
+            )
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             config,
             database_name,
@@ -666,6 +677,7 @@ impl CapturedInputs {
             endpoint,
             document,
             migrations,
+            history_schemas,
             input_digest,
             policy_digest,
         })
