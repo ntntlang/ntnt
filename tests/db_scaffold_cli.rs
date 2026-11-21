@@ -588,6 +588,31 @@ fn new_numbers_after_the_highest_existing_id_and_keeps_its_padding() {
     assert_eq!(r["migration"]["source"], "000121_wider.sql");
 }
 
+/// A history numbered with three digits, as larrimon's `001_` to `034_` is,
+/// gets three-digit IDs: `035_` lists after `034_` in `ls` and shell-glob
+/// order, which a runner applying `migrations/*.sql` in turn relies on (#431).
+#[test]
+fn new_keeps_a_three_digit_history_in_glob_order() {
+    let root = tempfile::tempdir().unwrap();
+    pass(root.path(), &["init", "--engine", "postgresql"]);
+    let migrations = root.path().join("migrations");
+    for id in 1..=34 {
+        std::fs::write(migrations.join(format!("{id:03}_step.sql")), "SELECT 1;\n").unwrap();
+    }
+    let r = pass(root.path(), &["new", "add_widget"]);
+    assert_eq!(r["migration"]["id"], "35");
+    assert_eq!(r["migration"]["source"], "035_add_widget.sql");
+    let names: Vec<String> = snapshot(&migrations).into_keys().collect();
+    assert_eq!(names.len(), 35);
+    assert_eq!(names.last().unwrap(), "035_add_widget.sql", "{names:?}");
+
+    let output = db(root.path()).args(["new", "add_gadget"]).bounded_output();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("036_add_gadget.sql"), "{text}");
+    assert!(text.contains("--out review-036.json`"), "{text}");
+}
+
 #[test]
 fn new_rejects_invalid_names_without_creating_files() {
     let root = tempfile::tempdir().unwrap();

@@ -42,10 +42,12 @@ PostgreSQL schema, role and database names derive from it. If `ntnt.toml` exists
 `init` appends the section and keeps every existing byte. It refuses, changing
 nothing, when the manifest already declares that database or one of those secrets,
 or when another declared database already uses `migrations/`. `new` numbers the
-file after the highest existing ID, zero-padded to four digits (or wider, to match
-existing files). Migration names use lowercase ASCII letters, digits and
-underscores, and `new` never overwrites a file. Writing the same files by hand
-works just as well.
+file after the highest existing ID, zero-padded to the width of the widest existing
+ID, or to four digits in an empty directory: a history numbered `001_` to `034_`
+gets `035_`, which `ls` and shell globs list after it. `ntnt db` itself orders
+migrations by numeric ID, not by file name. Migration names use lowercase ASCII
+letters, digits and underscores, and `new` never overwrites a file. Writing the
+same files by hand works just as well.
 
 `init` and `new` take turns through an exclusive lock on `ntnt.toml`. `init` holds
 it from reading the manifest until it has written it, and `new` from reading the
