@@ -1523,6 +1523,31 @@ fn token_schemas(t: &[&sqlparser::tokenizer::Token]) -> Vec<(String, String)> {
     found
 }
 
+/// A statement's significant tokens before the SQL-standard routine body
+/// (`BEGIN ATOMIC ... END`) of a `CREATE [OR REPLACE] FUNCTION` or
+/// `PROCEDURE`, or all of them. PostgreSQL parses such a body when it defines
+/// the routine and runs it only when the routine is called, as it does a
+/// quoted body. The body is the routine's last clause, so it runs to the end
+/// of the statement, `CASE ... END` inside it included.
+fn before_routine_body<'a, 'b>(
+    t: &'b [&'a sqlparser::tokenizer::Token],
+) -> &'b [&'a sqlparser::tokenizer::Token] {
+    let kind = if keyword(t.get(1), "OR") && keyword(t.get(2), "REPLACE") {
+        3
+    } else {
+        1
+    };
+    if !keyword(t.first(), "CREATE")
+        || !(keyword(t.get(kind), "FUNCTION") || keyword(t.get(kind), "PROCEDURE"))
+    {
+        return t;
+    }
+    let body = (kind + 1..t.len())
+        .find(|&i| keyword(t.get(i), "BEGIN") && keyword(t.get(i + 1), "ATOMIC"))
+        .unwrap_or(t.len());
+    &t[..body]
+}
+
 /// The schemas each top-level statement may create, change, drop, grant or
 /// revoke objects in, as (statement number, folded schema, name as written,
 /// how it is named):
@@ -1549,7 +1574,9 @@ fn schema_names(sql: &str) -> Vec<(usize, String, String, Via)> {
             .map(|t| &t.token)
             .filter(|t| !matches!(t, Token::Whitespace(_)))
             .collect();
-        for schema in search_path_schemas(&t) {
+        // A routine body runs when the routine is called, not here.
+        let outer = before_routine_body(&t);
+        for schema in search_path_schemas(outer) {
             found.push((number, schema.clone(), schema, Via::SearchPath));
         }
         let rows = matches!(t.first(), Some(Token::Word(w)) if w.quote_style.is_none() && ROW_STATEMENTS.iter().any(|k| w.value.eq_ignore_ascii_case(k)));
@@ -1557,7 +1584,7 @@ fn schema_names(sql: &str) -> Vec<(usize, String, String, Via)> {
             .filter(|&i| i > 0 && keyword(t.get(i), "SET") && keyword(t.get(i + 1), "SCHEMA"))
             .flat_map(|i| names_after_schema(&t, i + 2))
             .collect();
-        let shapes = if rows { vec![] } else { token_schemas(&t) };
+        let shapes = if rows { vec![] } else { token_schemas(outer) };
         let parsed = (tokens.len() <= 4096)
             .then(|| {
                 Parser::new(&dialect)
@@ -2295,6 +2322,47 @@ mod tests {
                 .collect();
             assert_eq!(protected_targets(sql), expected, "{sql}");
         }
+    }
+    /// A SQL-standard routine body (`BEGIN ATOMIC ... END`) runs only when
+    /// the routine is called, like a quoted body: the schemas it names or
+    /// puts on the search path are not listed. A top-level `set_config` call
+    /// still is, after such a body too (review on #435, analysis.rs).
+    #[test]
+    fn routine_bodies_are_opaque_to_the_scope_scan() {
+        let created = ["audit".to_string()];
+        let flags = |sql: &str| serde_json::to_value(outside_scope(sql, "app", &created)).unwrap();
+        let body = "CREATE FUNCTION app.saved_path() RETURNS text LANGUAGE SQL BEGIN ATOMIC SELECT pg_catalog.set_config('search_path', '_ntnt', true); END;";
+        for sql in [
+            body,
+            // CASE ... END inside the body does not end it.
+            "CREATE OR REPLACE FUNCTION app.f(x int) RETURNS text LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN x > 0 THEN set_config('search_path', 'public', true) END; SELECT count(*)::text FROM public.legacy; SELECT set_config('search_path', '_ntnt', true); END",
+            "CREATE PROCEDURE app.p() LANGUAGE sql BEGIN ATOMIC INSERT INTO app.t SELECT id FROM _ntnt.schema_migrations_v2; END",
+        ] {
+            assert_eq!(protected_targets(sql), [], "{sql}");
+            assert_eq!(flags(sql), serde_json::json!([]), "{sql}");
+        }
+        for (sql, statement) in [
+            (
+                "SELECT pg_catalog.set_config('search_path', '_ntnt', true);".to_owned(),
+                1,
+            ),
+            (
+                format!("{body} SELECT pg_catalog.set_config('search_path', '_ntnt', true);"),
+                2,
+            ),
+        ] {
+            assert_eq!(
+                protected_targets(&sql),
+                [(statement, "_ntnt".to_string())],
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            flags(&format!(
+                "{body} SELECT set_config('search_path', 'public', true)"
+            )),
+            serde_json::json!([{"statement": 2, "schema": "public", "via": "search_path"}])
+        );
     }
     #[test]
     fn statements_outside_the_managed_scope_are_flagged() {
