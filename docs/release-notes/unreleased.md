@@ -17,5 +17,17 @@
   target, which `std/db/sqlite` `connect()` switches to WAL. Any other setting
   that differs fails with `DB_SCRATCH_MISMATCH`, naming each setting and both
   values. These cases used to fail with `DB_SQLITE` "code 1" (#413).
+- **Partial and expression indexes.** `CREATE INDEX ... WHERE ...`, unique or
+  not, and indexes on expressions such as `lower(email)` plan, migrate and
+  verify, and a predicate or expression changed outside a migration is reported
+  as drift. They used to leave every plan `unknown` with
+  `DB_COVERAGE_INCOMPLETE` (#411).
+
+## `ntnt db` on every engine
+
+- **Coverage diagnostics name the objects.** `DB_COVERAGE_INCOMPLETE` lists the
+  catalog objects outside supported inspection in a new `objects` field, and
+  when replaying a migration produced them, `source` names that migration.
+  Human output prints a diagnostic's `Source:` and `Objects:` lines (#411).
 
 See [NTNT v0.6.3](v0.6.3.md) for the previous release.

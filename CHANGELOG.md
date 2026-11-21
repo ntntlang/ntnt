@@ -11,6 +11,10 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   function, table or PRAGMA it used (#414).
 - `ntnt db` (SQLite): an empty scratch takes the target's journal mode, and a
   scratch settings mismatch names each setting with both values (#413).
+- `ntnt db` (SQLite): partial and expression indexes plan, migrate and verify; a
+  changed predicate or expression is drift (#411).
+- `ntnt db`: `DB_COVERAGE_INCOMPLETE` names the uncovered objects (`objects`) and
+  the migration whose replay produced them (`source`) (#411).
 
 ## 0.6.3
 
