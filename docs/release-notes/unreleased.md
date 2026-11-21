@@ -69,6 +69,11 @@ reports a runtime error in an imported module against that module's file.
   report `DB_TARGET_CHANGED` instead of comparing if it changed in between. A
   saved plan whose pending migrations act outside the managed scope must be
   planned again (#420).
+- **Checks follow views across schemas.** `[requires]`, `[ensures]` and
+  adoption checks are refused with `DB_CHECK_UNSUPPORTED`, before any of them
+  runs, when a view they can read reaches a non-builtin or volatile function
+  through views in any schema. Before, only views in the managed schema were
+  checked, so such a check could run a function that writes (#420).
 - **Policies that call outside routines.** A row-level security policy that
   calls a routine outside `pg_catalog` and the managed scope is now uncovered.
   It used to be reported as covered (#434).

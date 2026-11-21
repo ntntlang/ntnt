@@ -35,6 +35,9 @@ See [unreleased notes](docs/release-notes/unreleased.md).
 - `ntnt db` (SQLite): replay inspection reuses unchanged work, so long
   histories, including ones dense in foreign keys, plan in seconds; SQLite
   operations get an 8 MiB stack (#421).
+- `ntnt db` (PostgreSQL): contract checks are refused before they run when a view
+  they can read reaches a non-builtin or volatile function through views in
+  another schema (#420).
 - `ntnt db` (PostgreSQL): a policy that calls a routine outside the managed scope
   is uncovered (#434).
 - `ntnt db`: refusals name the file, secret, migration or flag they are about and
