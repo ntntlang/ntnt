@@ -97,8 +97,9 @@ fn default_migrator_wait_seconds() -> u64 {
     DEFAULT_MIGRATOR_WAIT_SECONDS
 }
 
-/// PostgreSQL `[databases.<name>.limits]` for `migrate` and `reconcile` on
-/// the target, in whole seconds. Omitted fields keep their defaults.
+/// `[databases.<name>.limits]` for `migrate` and `reconcile` on the target, in
+/// whole seconds. PostgreSQL takes both fields; SQLite takes `statement_seconds`
+/// for one migration script (#429). Omitted fields keep their defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Limits {
@@ -156,11 +157,12 @@ impl Limits {
             "total_deadline_seconds": self.total_deadline().as_secs(),
         })
     }
-    fn validate(&self, database: &str, engine: &str) -> Result<()> {
+    fn validate(&self, database: &str, engine: &str, declares_wait: bool) -> Result<()> {
         let table = format!("[databases.{database}.limits]");
-        if engine != "postgresql" {
+        // SQLite has no migrator advisory lock to wait for.
+        if engine != "postgresql" && declares_wait {
             return Err(invalid(&format!(
-                "{table} applies only to PostgreSQL; SQLite keeps its fixed operation limits."
+                "{table} migrator_wait_seconds applies only to PostgreSQL; SQLite takes statement_seconds only."
             )));
         }
         for (field, value, min, max) in [
@@ -298,9 +300,16 @@ impl CapturedInputs {
     pub fn limits(&self) -> Limits {
         self.config.limits.unwrap_or_default()
     }
-    /// The limits a plan binds. SQLite has none: it keeps fixed limits.
+    /// The limits a plan binds. PostgreSQL binds its effective limits. SQLite
+    /// binds `statement_seconds` only when the manifest declares the table, so
+    /// plans saved without one keep their digests (#429).
     pub fn plan_limits(&self) -> Option<serde_json::Value> {
-        (self.config.engine == "postgresql").then(|| serde_json::json!(self.limits()))
+        if self.config.engine == "postgresql" {
+            return Some(serde_json::json!(self.limits()));
+        }
+        self.config
+            .limits
+            .map(|limits| serde_json::json!({ "statement_seconds": limits.statement_seconds }))
     }
     /// Bind the exact covered source prefix without claiming its SQL was executed.
     pub fn checkpoint(&self, count: usize) -> Result<super::model::HistoryEntry> {
@@ -418,7 +427,11 @@ impl CapturedInputs {
             )),
         }
         if let Some(limits) = &config.limits {
-            limits.validate(&database_name, &config.engine)?;
+            let declares_wait = raw
+                .get("limits")
+                .and_then(|limits| limits.get("migrator_wait_seconds"))
+                .is_some();
+            limits.validate(&database_name, &config.engine, declares_wait)?;
         }
         if config.adoption_checks.len() > 64
             || config.adoption_checks.iter().any(|(name, sql)| {
@@ -692,6 +705,56 @@ role="target_role"
         .unwrap();
         manifest
     }
+    fn sqlite_project(limits: Option<&str>) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("migrations")).unwrap();
+        let limits = limits.map_or(String::new(), |l| format!("[databases.app.limits]\n{l}\n"));
+        std::fs::write(
+            root.path().join("ntnt.toml"),
+            format!("[databases.app]\nengine = \"sqlite\"\nschema = \"main\"\nmigrations_dir = \"migrations\"\n[databases.app.targets.local]\nconnection_secret = \"DB_TARGET\"\n{limits}[secrets.DB_TARGET]\n"),
+        )
+        .unwrap();
+        root
+    }
+    #[test]
+    fn sqlite_takes_statement_seconds_and_binds_it_only_when_declared() {
+        let load = |root: &tempfile::TempDir| {
+            CapturedInputs::load(&root.path().join("ntnt.toml"), "local", None)
+        };
+        // Without the table nothing is bound, so earlier SQLite plans keep their digests.
+        let absent = load(&sqlite_project(None)).unwrap();
+        assert_eq!(absent.plan_limits(), None);
+        assert_eq!(absent.limits().statement().as_secs(), 90);
+        let declared = load(&sqlite_project(Some("statement_seconds = 600"))).unwrap();
+        assert_eq!(
+            declared.plan_limits(),
+            Some(serde_json::json!({"statement_seconds": 600}))
+        );
+        assert_eq!(declared.limits().statement().as_secs(), 600);
+        assert_ne!(declared.policy_digest, absent.policy_digest);
+        // SQLite has no migrator advisory lock to wait for.
+        let Err(error) = load(&sqlite_project(Some("migrator_wait_seconds = 10"))) else {
+            panic!("SQLite accepted migrator_wait_seconds");
+        };
+        assert_eq!(error.code, "DB_CONFIG");
+        assert!(
+            error
+                .message
+                .contains("migrator_wait_seconds applies only to PostgreSQL"),
+            "{}",
+            error.message
+        );
+        let Err(error) = load(&sqlite_project(Some("statement_seconds = 1"))) else {
+            panic!("SQLite accepted statement_seconds = 1");
+        };
+        assert!(
+            error
+                .message
+                .contains("statement_seconds must be from 2 to 86400"),
+            "{}",
+            error.message
+        );
+    }
     #[test]
     fn absent_limits_keep_the_defaults_and_the_earlier_digests() {
         let root = project();
@@ -838,25 +901,6 @@ role="target_role"
             "{}",
             d.message
         );
-    }
-    #[test]
-    fn sqlite_rejects_limits_it_would_not_apply() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("migrations")).unwrap();
-        let manifest = root.path().join("ntnt.toml");
-        std::fs::write(
-            &manifest,
-            "[databases.app]\nengine=\"sqlite\"\nschema=\"main\"\nmigrations_dir=\"migrations\"\n[databases.app.targets.local]\nconnection_secret=\"TEST_FILE\"\n[secrets.TEST_FILE]\n",
-        )
-        .unwrap();
-        let sqlite = CapturedInputs::load(&manifest, "local", None).unwrap();
-        assert_eq!(sqlite.plan_limits(), None);
-        let manifest = with_limits(&root, "statement_seconds = 600");
-        let d = CapturedInputs::load(&manifest, "local", None)
-            .err()
-            .unwrap();
-        assert_eq!(d.code, "DB_CONFIG");
-        assert!(d.message.contains("only to PostgreSQL"), "{}", d.message);
     }
     #[test]
     fn json_identity_uses_sorted_object_keys_not_rust_field_order() {

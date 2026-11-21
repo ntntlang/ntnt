@@ -1389,8 +1389,12 @@ fn sqlite_failed_statement_is_numbered() {
 /// instead of leaving CI waiting on a query that would run for hours.
 const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// The JSON `command` prints, failing the test if it outlives `HANG_GUARD`.
-fn json_within_hang_guard(mut command: std::process::Command) -> Value {
+/// Hang guard for the target statement-limit test: below the 90-second default,
+/// so a configured limit that is not applied shows as a hang (#429).
+const LIMIT_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The JSON `command` prints, failing the test if it outlives `guard`.
+fn json_within_hang_guard(mut command: std::process::Command, guard: std::time::Duration) -> Value {
     use std::io::Read;
     let mut child = command
         .stdout(std::process::Stdio::piped())
@@ -1408,10 +1412,10 @@ fn json_within_hang_guard(mut command: std::process::Command) -> Value {
     let stderr = drain(Box::new(child.stderr.take().unwrap()));
     let started = std::time::Instant::now();
     while child.try_wait().unwrap().is_none() {
-        if started.elapsed() > HANG_GUARD {
+        if started.elapsed() > guard {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("`ntnt db plan` still ran after HANG_GUARD ({HANG_GUARD:?}): the replay deadline never fired");
+            panic!("`ntnt db` still ran after its hang guard ({guard:?}): a deadline never fired");
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -1447,7 +1451,7 @@ fn sqlite_replay_timeout_is_not_masked_by_its_cleanup() {
              INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3, main.a AS a4, main.a AS a5, main.a AS a6;"
         ),
     );
-    let r = json_within_hang_guard(f.process("plan"));
+    let r = json_within_hang_guard(f.process("plan"), HANG_GUARD);
     assert_ne!(r["outcome"], "pass", "{r}");
     let codes: Vec<&str> = r["diagnostics"]
         .as_array()
@@ -1455,7 +1459,12 @@ fn sqlite_replay_timeout_is_not_masked_by_its_cleanup() {
         .iter()
         .map(|d| d["code"].as_str().unwrap())
         .collect();
-    assert_eq!(codes.first(), Some(&"DB_TIMEOUT"), "{r}");
+    assert_eq!(codes.first(), Some(&"DB_STATEMENT_LIMIT"), "{r}");
+    let message = r["diagnostics"][0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Statement 4 did not finish within the 5-second replay limit"),
+        "{message}"
+    );
     // Anything after the timeout is the failed cleanup of a discarded session.
     assert!(codes[1..].iter().all(|c| *c == "DB_CANCELLED"), "{r}");
     let cleanup = if codes.len() == 1 { "pass" } else { "unknown" };
@@ -1590,4 +1599,76 @@ fn sqlite_drops_that_run_no_on_delete_actions_stay_allowed() {
     let plan = f.plan("drop.json");
     let applied = f.apply("drop.json", plan["plan_digest"].as_str());
     assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
+/// #429: on a target, a SQLite migration runs under the plan's statement limit
+/// (`statement_seconds`, 90 seconds by default) instead of a fixed 5 seconds.
+/// The plan binds a declared limit; a statement past it fails with
+/// DB_STATEMENT_LIMIT naming it, nothing from that migration is committed, and
+/// a changed limit makes the plan stale. The statement is a cross join of
+/// 2.7 * 10^13 rows on the target's data (instant on the empty scratch), so it
+/// always reaches the limit.
+#[test]
+fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE a(x INTEGER); CREATE TABLE b(n INTEGER);",
+    );
+    let initial = f.plan("initial.json");
+    assert!(
+        initial["plan"]["execution"].get("limits").is_none(),
+        "{initial}"
+    );
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 30000) INSERT INTO a SELECT x FROM n;")
+        .unwrap();
+    let manifest = f.root.path().join("ntnt.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        format!("{text}\n[databases.app.limits]\nstatement_seconds = 2\n"),
+    )
+    .unwrap();
+    f.sql(
+        "0002_count.sql",
+        "INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3;",
+    );
+    let plan = f.plan("limit.json");
+    assert_eq!(
+        plan["plan"]["execution"]["limits"],
+        serde_json::json!({"statement_seconds": 2}),
+        "{plan}"
+    );
+    let mut migrate = f.process("migrate");
+    migrate
+        .args(["--plan", "limit.json"])
+        .env("DB_APPROVAL", plan["plan_digest"].as_str().unwrap());
+    let r = json_within_hang_guard(migrate, LIMIT_HANG_GUARD);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_STATEMENT_LIMIT");
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Statement 1 did not finish within the 2-second statement limit"),
+        "{message}"
+    );
+    assert_eq!(d["source"], "0002_count.sql", "{d}");
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM b", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    // The limit is part of the plan: a different declared limit makes it stale.
+    std::fs::write(
+        &manifest,
+        format!("{text}\n[databases.app.limits]\nstatement_seconds = 3\n"),
+    )
+    .unwrap();
+    let stale = f.apply("limit.json", plan["plan_digest"].as_str());
+    assert!(code(&stale, "DB_PLAN_STALE"), "{stale}");
 }

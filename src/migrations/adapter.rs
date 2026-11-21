@@ -227,8 +227,8 @@ impl Adapter {
             )),
         }
     }
-    /// `limit` is PostgreSQL's statement limit. SQLite keeps its fixed
-    /// per-operation deadline.
+    /// `limit` bounds the migration on a target: each PostgreSQL statement, or
+    /// the whole SQLite script. Scratch replay keeps SQLite's fixed bound.
     pub async fn execute_captured(
         &self,
         migration: &Migration,
@@ -237,7 +237,7 @@ impl Adapter {
     ) -> Result<()> {
         match self {
             Self::Postgres(pg) => pg.execute_captured(migration, schema, limit).await,
-            Self::Sqlite(db) => db.execute_captured(migration).await,
+            Self::Sqlite(db) => db.execute_captured(migration, limit).await,
         }
     }
     pub async fn check_purity(&self, schema: &str) -> Result<()> {

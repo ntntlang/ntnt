@@ -21,6 +21,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// How much longer than an operation's own deadline the session waits before
+/// it discards the session: an operation SQLite can interrupt always returns
+/// first, and only one stuck outside SQLite is discarded.
+const DISCARD_GRACE: Duration = Duration::from_secs(5);
 const LEDGER: &str = "_ntnt_schema_migrations_v2";
 const LEDGER_SQL: &str = "CREATE TABLE _ntnt_schema_migrations_v2 (position INTEGER NOT NULL PRIMARY KEY,id TEXT NOT NULL,name TEXT NOT NULL,checksum TEXT NOT NULL,state TEXT NOT NULL,logical_database TEXT NOT NULL,managed_schema TEXT NOT NULL) STRICT";
 
@@ -378,7 +382,7 @@ fn known_tables(conn: &Connection) -> Result<std::collections::HashSet<String>> 
 /// SQLite finds native statement boundaries (including trigger bodies and quoted
 /// semicolons). Refresh the resolved-relation allowlist after each statement, so
 /// a dropped name cannot fall through to an eponymous virtual table later.
-fn execute_script(state: &State, sql: &str) -> Result<()> {
+fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Result<()> {
     let conn = &state.conn;
     let mut batch = rusqlite::Batch::new(conn, sql);
     let mut statement = 0usize;
@@ -420,6 +424,8 @@ fn execute_script(state: &State, sql: &str) -> Result<()> {
                     ),
                     // This refusal already names its statement.
                     None if error.code == "DB_REBUILD_REQUIRED" => error,
+                    // SQLite interrupted the statement at its deadline.
+                    None if error.code == "DB_TIMEOUT" => statement_limit(statement, limit, replay),
                     None => {
                         error.message = format!("Statement {statement}: {}", error.message);
                         error
@@ -428,6 +434,17 @@ fn execute_script(state: &State, sql: &str) -> Result<()> {
             }
         }
     }
+}
+
+/// A statement SQLite interrupted at the migration's deadline (#429).
+fn statement_limit(statement: usize, limit: Duration, replay: bool) -> Diagnostic {
+    let seconds = limit.as_secs();
+    let message = if replay {
+        format!("Statement {statement} did not finish within the {seconds}-second replay limit; replay runs each migration on the empty scratch database within fixed bounds.")
+    } else {
+        format!("Statement {statement} did not finish within the {seconds}-second statement limit (statement_seconds); nothing from this migration was committed.")
+    };
+    Diagnostic::new("DB_STATEMENT_LIMIT", &message)
 }
 
 /// SQLite's DROP TABLE deletes every row first, which runs the ON DELETE
@@ -915,6 +932,9 @@ impl RebuildGuard {
 
 pub(super) struct Sqlite {
     state: Arc<Mutex<State>>,
+    /// Connected to execute on a target, where the plan's statement limit
+    /// bounds each migration; scratch replay keeps the fixed bound.
+    execute: bool,
     interrupted: Arc<AtomicBool>,
     interrupt: rusqlite::InterruptHandle,
 }
@@ -927,6 +947,7 @@ impl Drop for Sqlite {
 impl Sqlite {
     pub async fn connect(secret: &crate::interpreter::SecretValue, access: Access) -> Result<Self> {
         let path = std::path::PathBuf::from(secret.expose());
+        let execute = matches!(access, Access::Execute(_));
         let state=tokio::time::timeout(IO_TIMEOUT,tokio::task::spawn_blocking(move || {
             if rusqlite::version_number()/1000!=3054 {return Err(Diagnostic::new("DB_ENGINE_VERSION","SQLite adapter supports the bundled SQLite 3.54 series."));}
             let file=FileBinding::capture(&path)?;
@@ -954,12 +975,22 @@ impl Sqlite {
         let interrupt = state.conn.get_interrupt_handle();
         Ok(Self {
             state: Arc::new(Mutex::new(state)),
+            execute,
             interrupted: Arc::new(AtomicBool::new(false)),
             interrupt,
         })
     }
     async fn run<T: Send + 'static>(
         &self,
+        operation: impl FnOnce(&mut State) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        self.run_for(IO_TIMEOUT, operation).await
+    }
+    /// Run `operation` under `limit`: SQLite interrupts it at the limit, and the
+    /// session is discarded only if it has not returned `DISCARD_GRACE` later.
+    async fn run_for<T: Send + 'static>(
+        &self,
+        limit: Duration,
         operation: impl FnOnce(&mut State) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let state = self.state.clone();
@@ -977,7 +1008,7 @@ impl Sqlite {
                     "SQLite session was cancelled and discarded.",
                 ));
             }
-            let deadline = Instant::now() + IO_TIMEOUT;
+            let deadline = Instant::now() + limit;
             state
                 .conn
                 .progress_handler(
@@ -987,7 +1018,7 @@ impl Sqlite {
                 .map_err(sql_error)?;
             operation(&mut state)
         });
-        match tokio::time::timeout(IO_TIMEOUT, work).await {
+        match tokio::time::timeout(limit + DISCARD_GRACE, work).await {
             Ok(result) => result
                 .map_err(|_| Diagnostic::new("DB_RUNTIME", "SQLite operation worker failed."))?,
             Err(_) => {
@@ -1091,10 +1122,12 @@ impl Sqlite {
         })
         .await
     }
-    pub async fn execute_captured(&self, migration: &Migration) -> Result<()> {
+    pub async fn execute_captured(&self, migration: &Migration, limit: Duration) -> Result<()> {
         let source = migration.name.clone();
         let migration = migration.clone();
-        self.run(move |s| {
+        let replay = !self.execute;
+        let limit = if replay { IO_TIMEOUT } else { limit };
+        self.run_for(limit, move |s| {
             s.file.check_connection(&s.conn)?;
             if !s.writable || s.conn.is_autocommit() {
                 return Err(Diagnostic::new(
@@ -1131,7 +1164,7 @@ impl Sqlite {
                 }
             }
             let outcome = (|| {
-                execute_script(s, &migration.sql)?;
+                execute_script(s, &migration.sql, limit, replay)?;
                 s.history(None)?;
                 s.foreign_keys()?;
                 if let Some(guard) = guard {
