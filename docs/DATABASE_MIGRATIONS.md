@@ -871,7 +871,7 @@ Plans bind:
 - managed scope, observed base history/catalog, applied prefix and replayed expected base;
 - adapter/canonicalization version, exact pending migration identities and candidate fingerprint;
 - explicit `execution.format = "postgresql-transactional-v1"` or `"sqlite-transactional-v1"` and ordered engine-specific catalog fingerprints for every migration prefix, including the empty prefix. Old/incomplete artifacts cannot authorize execution;
-- for PostgreSQL, the [time limits](#time-limits) `migrate` will use (`execution.limits`).
+- the [time limits](#time-limits) `migrate` will use (`execution.limits`): PostgreSQL's effective limits, and SQLite's `statement_seconds` when the manifest declares a limits table.
 
 `plan_digest` hashes that descriptor. Observation time and display filters are not authority inputs. `--against` checks the saved descriptor's digest, pending descriptors and fresh source/target/base binding. It neither executes nor approves the plan. For `plan --out`, the file contains the compact plan descriptor and result metadata, not duplicate catalog/source display fields; stdout still contains the full report. `status`/`verify --out` save their report. All saved artifacts share the reader's 1 MiB bound: oversized output fails before creating a file rather than producing an unreadable plan. Files are new-only (`--out` cannot replace a source, existing plan or symlink); on Unix, new reports are mode 0600.
 
