@@ -77,6 +77,56 @@ impl Fixture {
             Self::Sqlite(_) => "main._ntnt_schema_migrations_v2",
         }
     }
+    /// A command's JSON report for `target` instead of the fixture's own,
+    /// with `approval` as the approval secret.
+    fn run(&self, command: &str, target: &str, args: &[&str], approval: Option<&str>) -> Value {
+        let template = match self {
+            Self::Postgres(f) => f.process(command),
+            Self::Sqlite(f) => f.process(command),
+        };
+        let mut process = std::process::Command::new(template.get_program());
+        let mut previous = None;
+        for arg in template.get_args() {
+            process.arg(if previous == Some("--target") {
+                std::ffi::OsStr::new(target)
+            } else {
+                arg
+            });
+            previous = arg.to_str();
+        }
+        for (key, value) in template.get_envs() {
+            match value {
+                Some(value) => process.env(key, value),
+                None => process.env_remove(key),
+            };
+        }
+        if let Some(approval) = approval {
+            process.env("DB_APPROVAL", approval);
+        }
+        let output = process
+            .current_dir(self.root())
+            .args(args)
+            .output()
+            .unwrap();
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    }
+    /// Declare a second target, `staging`, whose secret is never set.
+    fn declare_staging(&self) {
+        let endpoint = match self {
+            Self::Postgres(_) => {
+                "database = \"ntnt_staging_unused\"\nrole = \"ntnt_staging_unused\"\n"
+            }
+            Self::Sqlite(_) => "",
+        };
+        let manifest = self.root().join("ntnt.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            format!("{text}\n[databases.app.targets.staging]\nconnection_secret = \"DB_STAGING\"\n{endpoint}[secrets.DB_STAGING]\n"),
+        )
+        .unwrap();
+    }
     /// A command's human (non-JSON) output.
     fn human(&self, command: &str, args: &[&str]) -> String {
         let template = match self {
@@ -329,6 +379,127 @@ fn history_refusals_name_the_migration(f: Fixture) {
     .unwrap();
     assert_eq!(passes()["history"]["pending_count"], 1);
 }
+/// #423 (sq-12, cli-09): a stale plan names the binding that changed, for
+/// migrate and for --against; a plan for another target is refused before
+/// any I/O; a hand-edited or forged plan is invalid, not a changed target;
+/// and following the advice applies the plan.
+fn stale_plans_name_what_changed(f: Fixture) {
+    let s = f.schema();
+    f.declare_staging();
+    let sql = format!("CREATE TABLE {s}.items(id INTEGER PRIMARY KEY);\n");
+    f.sql("0001_initial.sql", &sql);
+    let plan = f.plan("review.json");
+    let digest = plan["plan_digest"].as_str();
+    let migrate = |target: &str, file: &str| f.run("migrate", target, &["--plan", file], digest);
+    let stale = |r: &Value| -> String {
+        assert_ne!(r["outcome"], "pass", "{r}");
+        diagnostic(r, "DB_PLAN_STALE")["message"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+
+    // Another target: refused before any I/O, though its secret is unset.
+    let r = migrate("staging", "review.json");
+    assert!(!code(&r, "DB_SECRET"), "{r}");
+    let wrong = "review.json was planned for database app, target test; this run selected database app, target staging.";
+    assert_eq!(stale(&r), wrong, "{r}");
+    let next_action = diagnostic(&r, "DB_PLAN_STALE")["next_action"]
+        .as_str()
+        .unwrap();
+    assert!(next_action.contains("--database app --target test"), "{r}");
+    let r = f.run("verify", "staging", &["--against", "review.json"], None);
+    assert_eq!(r["plan_validation"]["outcome"], "fail", "{r}");
+    assert_eq!(stale(&r), wrong, "{r}");
+
+    // Edited by hand, or with a forged digest: invalid, never another target.
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(f.root().join("review.json")).unwrap()).unwrap();
+    let mut edited = saved.clone();
+    edited["plan"]["binding"]["target_name"] = serde_json::json!("staging");
+    let mut forged = saved.clone();
+    forged["plan_digest"] = serde_json::json!("0".repeat(64));
+    for (file, artifact) in [("edited.json", &edited), ("forged.json", &forged)] {
+        std::fs::write(f.root().join(file), artifact.to_string()).unwrap();
+        for target in ["staging", "test"] {
+            let message = stale(&migrate(target, file));
+            assert!(message.starts_with("Saved plan is invalid"), "{message}");
+            assert!(
+                !message.contains("staging") && !message.contains("planned for"),
+                "{message}"
+            );
+        }
+    }
+
+    // A pending migration edited after the plan was made.
+    let checksum = plan["plan"]["pending"][0]["checksum"].as_str().unwrap();
+    f.sql("0001_initial.sql", &format!("{sql}-- reviewed later\n"));
+    let message = stale(&migrate("test", "review.json"));
+    assert!(
+        message.starts_with("0001_initial.sql changed after the plan was made: checksum: plan "),
+        "{message}"
+    );
+    assert!(message.contains(checksum), "{message}");
+    f.sql("0001_initial.sql", &sql);
+    // A migration added after the plan was made.
+    f.sql(
+        "0002_more.sql",
+        &format!("CREATE TABLE {s}.more(id INTEGER);\n"),
+    );
+    assert_eq!(
+        stale(&migrate("test", "review.json")),
+        "0002_more.sql was added to migrations/ after the plan was made."
+    );
+    std::fs::remove_file(f.root().join("migrations/0002_more.sql")).unwrap();
+    // The manifest's bytes, but not the database's configuration.
+    let manifest = f.root().join("ntnt.toml");
+    let declared = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{declared}# reviewed\n")).unwrap();
+    let message = stale(&migrate("test", "review.json"));
+    assert!(
+        message.starts_with("ntnt.toml changed after the plan was made"),
+        "{message}"
+    );
+    std::fs::write(&manifest, &declared).unwrap();
+    // The target's catalog, changed outside migrations.
+    f.execute(&format!("CREATE TABLE {s}.outside(id INTEGER)"));
+    let message = stale(&migrate("test", "review.json"));
+    assert!(
+        message.starts_with("The target's catalog changed after the plan was made"),
+        "{message}"
+    );
+    f.execute(&format!("DROP TABLE {s}.outside"));
+    assert_eq!(f.command("status", &[])["history"]["applied_count"], 0);
+
+    // Following the advice: the target the plan was reviewed for.
+    let applied = migrate("test", "review.json");
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    // Now the target's history differs from the plan's.
+    let r = f.command("verify", &["--against", "review.json"]);
+    assert_eq!(r["plan_validation"]["outcome"], "fail", "{r}");
+    assert!(stale(&r).starts_with("The target's history changed after the plan was made: the plan was made with 0 migration(s)"), "{r}");
+    // An unreadable --against file is named as such, not as a stale plan.
+    let r = f.command("verify", &["--against", "missing.json"]);
+    assert_eq!(r["plan_validation"]["outcome"], "fail", "{r}");
+    assert!(!code(&r, "DB_PLAN_STALE"), "{r}");
+    let d = diagnostic(&r, "DB_INPUT_IO");
+    assert_eq!(d["source"], "missing.json", "{d}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("--against file missing.json: not found"),
+        "{d}"
+    );
+    std::fs::write(f.root().join("truncated.json"), "{\"plan\":").unwrap();
+    let r = f.command("plan", &["--against", "truncated.json"]);
+    assert!(!code(&r, "DB_PLAN_STALE"), "{r}");
+    assert_eq!(
+        diagnostic(&r, "DB_PLAN_INVALID")["source"],
+        "truncated.json",
+        "{r}"
+    );
+}
 fn contract_failures(create: fn() -> Fixture) {
     for (phase, check) in [
         ("requires", "SELECT false"),
@@ -415,6 +586,51 @@ fn sqlite_history_refusals_name_the_migration() {
 #[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
 fn postgres_history_refusals_name_the_migration() {
     history_refusals_name_the_migration(Fixture::pg())
+}
+#[test]
+fn sqlite_stale_plans_name_what_changed() {
+    stale_plans_name_what_changed(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_stale_plans_name_what_changed() {
+    stale_plans_name_what_changed(Fixture::pg())
+}
+/// #423: a PostgreSQL target whose session settings changed after the plan
+/// names the setting with both values.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_a_changed_target_setting_is_named() {
+    let pg = pg_fixture::Fixture::new();
+    pg.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.items(id INTEGER PRIMARY KEY);",
+    );
+    let plan = pg.plan("review.json");
+    let before = plan["target"]["identity"]["settings"]["timezone"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let zone = if before == "Asia/Tokyo" {
+        "Europe/Paris"
+    } else {
+        "Asia/Tokyo"
+    };
+    // Both roles, as scratch must match the target's settings to replay.
+    for (url, role) in [(&pg.target_url, &pg.target), (&pg.scratch_url, &pg.scratch)] {
+        postgres::Client::connect(url, postgres::NoTls)
+            .unwrap()
+            .batch_execute(&format!("ALTER ROLE {role} SET timezone = '{zone}'"))
+            .unwrap();
+    }
+    let expected = format!("target setting timezone: plan {before}, now {zone}");
+    let r = pg.apply("review.json", plan["plan_digest"].as_str());
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert!(d["message"].as_str().unwrap().contains(&expected), "{d}");
+    let r = pg.command_args("plan", &["--against", "review.json"]);
+    assert_eq!(r["plan_validation"]["outcome"], "fail", "{r}");
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert!(d["message"].as_str().unwrap().contains(&expected), "{d}");
 }
 #[test]
 fn sqlite_contract_failures() {

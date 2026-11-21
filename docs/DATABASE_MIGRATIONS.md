@@ -140,7 +140,10 @@ ntnt db verify --target development
 
 The scratch can stay a `touch`ed empty file after your application has opened
 the target: `std/db/sqlite` `connect()` switches a database to WAL mode, and
-`ntnt db` gives an empty scratch the target's journal mode before replaying.
+`ntnt db` gives an empty scratch the target's journal mode before replaying. A
+plan binds the target's journal mode, so a plan made before the application first
+opened the file fails `migrate` with `DB_PLAN_STALE` naming `target setting
+journal_mode: plan delete, now wal`; plan and approve again.
 
 `migrate` without `APP_MIGRATION_APPROVAL` fails with `DB_APPROVAL_REQUIRED` and
 writes nothing. Rerunning the same plan reports `already_applied`. For the next
@@ -920,7 +923,31 @@ Plans bind:
 - explicit `execution.format = "postgresql-transactional-v1"` or `"sqlite-transactional-v1"` and ordered engine-specific catalog fingerprints for every migration prefix, including the empty prefix. Old/incomplete artifacts cannot authorize execution;
 - the [time limits](#time-limits) `migrate` will use (`execution.limits`): PostgreSQL's effective limits, and SQLite's `statement_seconds` when the manifest declares a limits table.
 
-`plan_digest` hashes that descriptor. Observation time and display filters are not authority inputs. `--against` checks the saved descriptor's digest, pending descriptors and fresh source/target/base binding. It neither executes nor approves the plan. For `plan --out`, the file contains the compact plan descriptor and result metadata, not duplicate catalog/source display fields; stdout still contains the full report. `status`/`verify --out` save their report. All saved artifacts share the reader's 1 MiB bound: oversized output fails before creating a file rather than producing an unreadable plan. Files are new-only (`--out` cannot replace a source, existing plan or symlink); on Unix, new reports are mode 0600.
+`plan_digest` hashes that descriptor. Observation time and display filters are not authority inputs. `--against` checks the saved descriptor's digest, pending descriptors and fresh source/target/base binding. It neither executes nor approves the plan.
+
+A plan that no longer matches fails with `DB_PLAN_STALE`, for `migrate`, `reconcile`
+and `--against` alike, and the message names the binding that changed:
+
+- the selection, checked before any I/O: `review.json was planned for database app,
+  target development; this run selected database app, target staging.`;
+- an input: the pending migration that changed (with both checksums), was added or
+  was removed, or the manifest itself;
+- the policy: `[databases.app.limits] in ntnt.toml changed after the plan was made:
+  statement_seconds: plan 90, now 600.`, the engine or schema, or another part of the
+  database's configuration;
+- the target: each identity field that differs, such as `target setting journal_mode:
+  plan delete, now wal` when the application opened a new SQLite file between `plan`
+  and `migrate`, or a PostgreSQL session setting or transport;
+- its history (the ledger covers other migrations than when the plan was made) or its
+  catalog (the schema changed outside migrations).
+
+Its `next_action` says how to get a plan that runs. A saved file that is not an
+intact plan (edited by hand, a forged digest) is refused as invalid instead, without
+naming a target, and a blocked plan says its outcome was not `pass`. An unreadable
+`--against` file is reported as `DB_INPUT_IO` naming the file and the cause, and one
+that is not JSON as `DB_PLAN_INVALID`.
+
+For `plan --out`, the file contains the compact plan descriptor and result metadata, not duplicate catalog/source display fields; stdout still contains the full report. `status`/`verify --out` save their report. All saved artifacts share the reader's 1 MiB bound: oversized output fails before creating a file rather than producing an unreadable plan. Files are new-only (`--out` cannot replace a source, existing plan or symlink); on Unix, new reports are mode 0600.
 
 Every saved plan has `authorized = false`, `executable = false`, `automatic_safe = false` (the artifact alone grants no capability), and a `requires_review` or `blocked` classification. Known drop/constraint-removal/cast/CASCADE/DML/authorization hazards are reported conservatively. Lock/scan labels are qualitative, not production duration estimates. Missing data checks and still-deployed application compatibility remain explicit. `migrate` validates the execution format and all prefix evidence under its own lock and requires independent provider authority; the digest alone is not an approval token.
 

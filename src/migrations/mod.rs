@@ -8,6 +8,7 @@ mod execution;
 mod input_file;
 mod inventory;
 mod model;
+mod plan_state;
 mod postgres;
 pub(crate) mod postgres_tls;
 mod report;
@@ -316,8 +317,15 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
     // Capture a review artifact before database I/O; never reopen it later.
     let prior = options.against.as_ref().map(|p| {
         inventory::file_bytes(inventory::Input::Plan(p, "--against")).and_then(|b| {
-            serde_json::from_slice::<serde_json::Value>(&b)
-                .map_err(|_| Diagnostic::new("DB_PLAN_INVALID", "Invalid saved plan JSON."))
+            serde_json::from_slice::<serde_json::Value>(&b).map_err(|_| {
+                let shown = inventory::shown_os(p.as_os_str());
+                let mut d = Diagnostic::new(
+                    "DB_PLAN_INVALID",
+                    &format!("--against file {shown}: not a saved plan (invalid JSON)."),
+                );
+                d.source = Some(shown);
+                d
+            })
         })
     });
     let inputs = inventory::CapturedInputs::load(
@@ -325,6 +333,20 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         &options.target,
         options.database.as_deref(),
     );
+    // How a stale plan's refusal names the files given (#423).
+    let shown_manifest = inventory::shown_os(options.manifest.as_os_str());
+    let shown_plan = execution_plan
+        .as_ref()
+        .or(options.against.as_ref())
+        .map(|path| inventory::shown_os(path.as_os_str()));
+    let files = plan_state::Files {
+        plan: shown_plan.as_deref(),
+        manifest: Some(&shown_manifest),
+    };
+    // A plan --against cannot match for a reason that needs no I/O: the
+    // database and target it was made for, its policy or its inputs. Known
+    // before the inspection runs, it is reported after it.
+    let mut stale_against = None;
     let mut report = if let Some(path) = execution_plan {
         let mut progress = serde_json::json!({"format_version":1,"command":command,
             "observed_at":chrono::Utc::now().to_rfc3339(),"outcome":"unknown","diagnostics":[],
@@ -340,6 +362,8 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             let saved = serde_json::from_slice(&bytes).map_err(|_| {
                 Diagnostic::new("DB_PLAN_INVALID", "Invalid saved execution plan JSON.")
             })?;
+            // Refuse a stale plan before any I/O, naming what changed (#423).
+            execution::validate_named(&inputs, &saved, files)?;
             let deadline = inputs.limits().total_deadline();
             if command == "reconcile" {
                 database_runtime(
@@ -375,8 +399,11 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     return Err(Diagnostic::new("DB_CONFIG","--adopt-through is only for an explicit plan, not status/verify/--against."));
                 }
                 let mut adopt_through=options.adopt_through;
-                if let Some(Ok(saved))=&prior {
-                    if saved["plan"].get("action").is_some() {
+                if let Some(prior)=&prior {
+                    // An unreadable --against file is reported as such (#422).
+                    let saved = prior.as_ref().map_err(Clone::clone)?;
+                    stale_against = execution::validate_named(&inputs, saved, files).err();
+                    if stale_against.is_none() && saved["plan"].get("action").is_some() {
                         // Reuse the pure descriptor validator, never approval or
                         // the writer path. The explicit CLI target still owns
                         // all connection selection and inspection stays readonly.
@@ -394,33 +421,24 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             .unwrap_or_else(|d| report::failure(command, d))
     };
     if let Some(prior) = prior {
-        let valid = prior.as_ref().is_ok_and(|p| {
-            p["format_version"] == 1
-                && p["outcome"] == "pass"
-                && p["plan"]["authorized"] == false
-                && p["plan"]["executable"] == false
-                && p["plan"]["candidate"]["outcome"] == "pass"
-                && p["plan_digest"] == inventory::json_digest(&p["plan"])
-                && !report["binding"].is_null()
-                && p["plan"]["binding"] == report["binding"]
-                && if p["plan"].get("action").is_some() {
-                    p["plan"]["action"] == report["adoption"]["action"]
-                        && p["plan"]["pending"] == serde_json::json!([])
-                } else {
-                    p["plan"]["pending"]
-                        == serde_json::json!(report["source"]["migrations"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .skip(report["history"]["covered_count"].as_u64().unwrap() as usize)
-                            .collect::<Vec<_>>())
-                }
-        });
-        report["plan_validation"] =
-            serde_json::json!({"outcome":if valid {"pass"} else {"fail"},"authorized":false});
-        if !valid {
+        // What makes the saved plan not match, naming the binding (#423): a
+        // capture error, a check that needed no I/O, or what was observed.
+        let problem = match &prior {
+            Err(capture) => Some(capture.clone()),
+            Ok(saved) => stale_against.or_else(|| plan_state::against(saved, &report)),
+        };
+        report["plan_validation"] = serde_json::json!({"outcome":if problem.is_none() {"pass"} else {"fail"},"authorized":false});
+        if let Some(problem) = problem {
             report["outcome"] = serde_json::json!("fail");
-            report["diagnostics"].as_array_mut().unwrap().push(serde_json::json!(Diagnostic::new("DB_PLAN_STALE","Saved plan is invalid, incomplete, or bound to different source, policy, target or base state. Generate a new plan.")));
+            let diagnostics = report["diagnostics"].as_array_mut().unwrap();
+            // Already the inspection's own failure, or a stale plan it reported.
+            let reported = diagnostics.iter().any(|d| {
+                d["code"] == problem.code
+                    && (d["message"] == problem.message || problem.code == "DB_PLAN_STALE")
+            });
+            if !reported {
+                diagnostics.push(serde_json::json!(problem));
+            }
         }
     }
     if let Some(filter) = &options.object {

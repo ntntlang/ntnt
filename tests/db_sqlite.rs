@@ -1316,6 +1316,39 @@ fn sqlite_empty_scratch_takes_the_target_journal_mode() {
     }
 }
 
+/// #423 (sq-12): starting the application between plan and migrate puts the
+/// target in WAL mode (std/db/sqlite connect() does), which makes the plan
+/// stale. migrate and plan --against name that setting with both values, and
+/// following the advice (plan, approve and migrate again) applies it.
+#[test]
+fn a_changed_target_setting_is_named_in_the_stale_plan() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE events(id INTEGER PRIMARY KEY, kind TEXT NOT NULL);",
+    );
+    let plan = f.plan("p1.json");
+    set_journal_mode(&f.target(), "wal");
+    let expected = "target setting journal_mode: plan delete, now wal";
+    let r = f.apply("p1.json", plan["plan_digest"].as_str());
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert!(d["message"].as_str().unwrap().contains(expected), "{d}");
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("Plan, review and approve again"),
+        "{d}"
+    );
+    let r = f.command("plan", &["--against", "p1.json"]);
+    assert_eq!(r["plan_validation"]["outcome"], "fail", "{r}");
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert!(d["message"].as_str().unwrap().contains(expected), "{d}");
+    let again = f.plan("p2.json");
+    let applied = f.apply("p2.json", again["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
 /// #413: a scratch that is not empty keeps its journal mode and is reported as
 /// not empty; nothing in it is changed.
 #[test]

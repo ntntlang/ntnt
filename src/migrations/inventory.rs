@@ -367,7 +367,7 @@ fn refuse_entry(code: &str, entry: &str, problem: &str, next_action: &str) -> Di
 /// A file name or path as diagnostics show it: as written, or quoted and
 /// escaped when it is not UTF-8 or holds a character a terminal could
 /// interpret.
-fn shown_os(text: &std::ffi::OsStr) -> String {
+pub(super) fn shown_os(text: &std::ffi::OsStr) -> String {
     match text.to_str() {
         Some(plain) if plain.escape_debug().eq(plain.chars()) => plain.to_owned(),
         _ => format!("{text:?}"),

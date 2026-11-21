@@ -4,6 +4,7 @@ use super::adapter::{self, Access, Adapter, Identity};
 use super::adoption::{self, Adoption};
 use super::inventory::{json_digest, CapturedInputs, CatalogDigests};
 use super::model::History;
+use super::plan_state;
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
@@ -39,6 +40,23 @@ fn reconcile_target_matches(observed: &Value, bound: &Value) -> bool {
 /// Validate the descriptor, ordered prefix evidence and exact captured source.
 /// This is pure: no I/O or approval lookup. Old inspection-only artifacts fail closed.
 pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
+    validate_named(inputs, saved, plan_state::Files::default())
+}
+
+/// `validate`, naming the user's `files` in a refusal. An artifact that is not
+/// an intact saved plan is refused as invalid; then a plan for another
+/// database or target, under another policy or with changed inputs is
+/// refused naming what changed (#423). Each of those checks is also one of
+/// the conditions below, so the same plans are accepted and refused.
+pub(super) fn validate_named(
+    inputs: &CapturedInputs,
+    saved: &Value,
+    files: plan_state::Files,
+) -> Result<usize> {
+    plan_state::intact(saved)?;
+    plan_state::selection(inputs, saved, files)?;
+    plan_state::policy(inputs, saved, files)?;
+    plan_state::inputs(inputs, saved, files)?;
     let plan = &saved["plan"];
     let action = Adoption::from_plan(inputs, saved).map_err(|_| stale())?;
     let end = action.as_ref().map_or(inputs.migrations.len(), |a| a.count);
@@ -175,8 +193,13 @@ async fn locked_prefix(
     let action = Adoption::from_plan(inputs, saved)?;
     db.begin_migration(&inputs.config.schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
-    if json!(&identity) != saved["plan"]["binding"]["target"] {
-        return Err(stale());
+    let planned = &saved["plan"]["binding"]["target"];
+    if json!(&identity) != *planned {
+        return Err(plan_state::target(
+            planned,
+            &json!(&identity),
+            &inputs.config.engine,
+        ));
     }
     let history = if action.is_some() {
         let history = db.history().await?;
@@ -199,30 +222,29 @@ async fn locked_prefix(
             digests,
         )
         .await?;
+    let fingerprints = &saved["plan"]["execution"]["prefix_fingerprints"];
+    let base_history = &saved["plan"]["binding"]["base_history_digest"];
     let adopted = if let Some(action) = &action {
-        if !uncovered.is_empty()
-            || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][action.count]
-        {
-            return Err(stale());
+        if !uncovered.is_empty() || fingerprint != fingerprints[action.count] {
+            return Err(plan_state::catalog(inputs, action.count, &uncovered));
         }
         if history == action.after(inputs)? {
             true
         } else {
             action.before(inputs, &history)?;
-            if json_digest(&history) != saved["plan"]["binding"]["base_history_digest"] {
-                return Err(stale());
+            if json_digest(&history) != *base_history {
+                return Err(plan_state::history(inputs, action.base_count(), applied));
             }
             false
         }
     } else {
-        // An index nobody recorded an attempt for is drift, not progress.
-        if !uncovered.is_empty()
-            || applied < base
-            || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][applied]
-            || (applied == base
-                && json_digest(&history) != saved["plan"]["binding"]["base_history_digest"])
-        {
-            return Err(stale());
+        // Name the binding that changed (#423). An index nobody recorded an
+        // attempt for is drift, not progress.
+        if applied < base || (applied == base && json_digest(&history) != *base_history) {
+            return Err(plan_state::history(inputs, base, applied));
+        }
+        if !uncovered.is_empty() || fingerprint != fingerprints[applied] {
+            return Err(plan_state::catalog(inputs, applied, &uncovered));
         }
         false
     };
@@ -554,7 +576,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
             if !uncovered.is_empty()
                 || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][reference]
             {
-                return Err(stale());
+                return Err(plan_state::catalog(inputs, reference, &uncovered));
             }
             if let Some(action) = &action {
                 if action.kind == "import_legacy_v1" {
@@ -708,11 +730,13 @@ async fn build_concurrent(
     }
     progress["phase"] = json!("record");
     let (position, catalog) = locked_attempt(db, inputs, saved).await?;
-    if position != applied + 1
-        || !catalog.uncovered.is_empty()
+    if position != applied + 1 {
+        return Err(plan_state::history(inputs, applied + 1, position));
+    }
+    if !catalog.uncovered.is_empty()
         || json_digest(&catalog) != saved["plan"]["execution"]["prefix_fingerprints"][applied + 1]
     {
-        return Err(stale());
+        return Err(plan_state::catalog(inputs, applied + 1, &catalog.uncovered));
     }
     db.resolve_attempt(position, true).await?;
     progress["phase"] = json!("commit");
@@ -734,8 +758,13 @@ async fn locked_attempt(
     let identity = db.identity(&inputs.endpoint).await?;
     // Reconcile accepts a 0.6.1 binding here too. Migrate gets here only after
     // locked_prefix compared the binding exactly on this same session.
-    if !reconcile_target_matches(&json!(&identity), &saved["plan"]["binding"]["target"]) {
-        return Err(stale());
+    let planned = &saved["plan"]["binding"]["target"];
+    if !reconcile_target_matches(&json!(&identity), planned) {
+        return Err(plan_state::target(
+            planned,
+            &json!(&identity),
+            &inputs.config.engine,
+        ));
     }
     let history = db
         .writable_history(&inputs.database_name, &inputs.config.schema)
@@ -748,7 +777,7 @@ async fn locked_attempt(
         )
     })?;
     if applied < base || applied + 1 != position {
-        return Err(stale());
+        return Err(plan_state::history(inputs, base, applied));
     }
     let catalog = db
         .catalog(
@@ -796,8 +825,13 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
     db.own_migrations(inputs.limits().migrator_wait()).await?;
     db.begin_migration(schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
-    if !reconcile_target_matches(&json!(&identity), &saved["plan"]["binding"]["target"]) {
-        return Err(stale());
+    let planned = &saved["plan"]["binding"]["target"];
+    if !reconcile_target_matches(&json!(&identity), planned) {
+        return Err(plan_state::target(
+            planned,
+            &json!(&identity),
+            &inputs.config.engine,
+        ));
     }
     report["target"]["identity"] = json!(identity);
     let history = db.writable_history(&inputs.database_name, schema).await?;
@@ -908,8 +942,9 @@ fn pending_write(report: &mut Value, write: &str) {
 
 /// The attempt must lie inside the plan's pending range.
 fn locked_attempt_scope(applied: usize, inputs: &CapturedInputs, saved: &Value) -> Result<()> {
-    if applied < validate(inputs, saved)? {
-        return Err(stale());
+    let base = validate(inputs, saved)?;
+    if applied < base {
+        return Err(plan_state::history(inputs, base, applied));
     }
     Ok(())
 }
@@ -1007,6 +1042,82 @@ role = "owner"
                 assert_eq!(result.unwrap_err().code, "DB_PLAN_STALE");
             }
         }
+    }
+
+    /// #423: a stale plan names the binding that changed, and an edited plan
+    /// is invalid rather than a plan for another target.
+    #[test]
+    fn stale_plans_name_the_binding_that_changed() {
+        let (_project, inputs) = captured("");
+        let plan = descriptor(&inputs);
+        let refusal = |inputs: &CapturedInputs, saved: &Value| validate(inputs, saved).unwrap_err();
+        // Limits are named field by field.
+        let mut limited = plan.clone();
+        limited["execution"]["limits"] = json!({"statement_seconds":91,"migrator_wait_seconds":5});
+        let d = refusal(&inputs, &saved(&limited));
+        assert_eq!(d.code, "DB_PLAN_STALE");
+        assert!(
+            d.message.contains("[databases.app.limits]")
+                && d.message.contains("statement_seconds: plan 91, now 90"),
+            "{}",
+            d.message
+        );
+        // Another target, named with the one selected.
+        let mut other = plan.clone();
+        other["binding"]["target_name"] = json!("staging");
+        let d = refusal(&inputs, &saved(&other));
+        assert_eq!(
+            d.message,
+            "The saved plan was planned for database app, target staging; this run selected database app, target test."
+        );
+        assert!(
+            d.next_action.contains("--database app --target staging"),
+            "{}",
+            d.next_action
+        );
+        // The same field changed by hand keeps the old digest: invalid.
+        let mut edited = saved(&plan);
+        edited["plan"]["binding"]["target_name"] = json!("staging");
+        let d = refusal(&inputs, &edited);
+        assert!(
+            d.message.starts_with("Saved plan is invalid"),
+            "{}",
+            d.message
+        );
+        assert!(!d.message.contains("staging"), "{}", d.message);
+        // A blocked plan says so.
+        let mut blocked = saved(&plan);
+        blocked["outcome"] = json!("unknown");
+        let d = refusal(&inputs, &blocked);
+        assert!(
+            d.message
+                .starts_with("Saved plan is blocked: its outcome is unknown"),
+            "{}",
+            d.message
+        );
+        // Another configuration for the database.
+        let (_changed, changed) =
+            captured("[databases.app.adoption_checks]\nok = \"SELECT true\"\n");
+        let d = refusal(&changed, &saved(&plan));
+        assert!(
+            d.message
+                .starts_with("[databases.app] in the manifest changed after the plan was made"),
+            "{}",
+            d.message
+        );
+        // A migration added after the plan.
+        let (project, _) = captured("");
+        std::fs::write(
+            project.path().join("migrations/0001_initial.sql"),
+            "CREATE TABLE app.t(id int);",
+        )
+        .unwrap();
+        let added = CapturedInputs::load(&project.path().join("ntnt.toml"), "test", None).unwrap();
+        let d = refusal(&added, &saved(&descriptor(&inputs)));
+        assert_eq!(
+            d.message,
+            "0001_initial.sql was added to migrations/ after the plan was made."
+        );
     }
 
     #[test]
