@@ -27,6 +27,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// The key of a name's group: SQLite compares names ASCII case-insensitively.
+/// A group whose programs must be compiled again: its root key, the dependency
+/// signature they will be cached under, and its programs (name, SQL).
+pub type PendingGroup = (String, [u8; 32], Vec<(String, String)>);
+
 pub(super) fn group_key(name: &str) -> String {
     name.to_ascii_lowercase()
 }
@@ -327,7 +331,7 @@ impl Cache {
         &self,
         signatures: &HashMap<String, [u8; 32]>,
         enforced: Option<bool>,
-    ) -> Vec<(String, [u8; 32], Vec<(String, String)>)> {
+    ) -> Vec<PendingGroup> {
         let mut pending = Vec::new();
         for (key, group) in &self.groups {
             let (Some(output), Some(&signature)) = (&group.output, signatures.get(key)) else {
@@ -431,8 +435,8 @@ impl Cache {
             }
         }
         self.groups
-            .iter()
-            .map(|(root, _)| {
+            .keys()
+            .map(|root| {
                 let mut hash = Sha256::new();
                 for key in dependencies(root, &graph) {
                     hash.update((key.len() as u64).to_be_bytes());

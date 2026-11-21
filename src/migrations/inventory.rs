@@ -1007,7 +1007,8 @@ role="target_role"
         // An empty catalog, then objects and uncovered keys added, changed and
         // removed, with keys and values that need escaping or are not ASCII.
         assert_eq!(digests.digest(&catalog), json_digest(&catalog));
-        let steps: Vec<Box<dyn Fn(&mut Catalog)>> = vec![
+        type Step = Box<dyn Fn(&mut Catalog)>;
+        let steps: Vec<Step> = vec![
             Box::new(|c| {
                 c.objects
                     .insert("schema:main".into(), json!({"engine":"sqlite"}));
