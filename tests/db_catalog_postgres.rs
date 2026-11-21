@@ -945,6 +945,54 @@ fn uncovered_objects_and_grants_in_a_created_schema_are_reported() {
     );
 }
 
+/// Managed objects may refer to a schema the history creates: such foreign
+/// keys, defaults, triggers and views are covered, a change in what they refer
+/// to is drift, and same-named objects in both schemas keep distinct keys.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn references_between_schemas_of_the_scope_are_covered() {
+    let f = Fixture::new();
+    f.seed_first(
+        "CREATE SCHEMA audit;
+CREATE TABLE audit.log (id int PRIMARY KEY);
+CREATE TABLE app.log (id int PRIMARY KEY);
+CREATE FUNCTION audit.stamp() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE FUNCTION audit.next_id() RETURNS int LANGUAGE sql AS 'SELECT 1';
+CREATE TABLE app.entries (id int DEFAULT audit.next_id(), log int REFERENCES audit.log (id));
+CREATE TRIGGER entries_stamp BEFORE INSERT ON app.entries FOR EACH ROW EXECUTE FUNCTION audit.stamp();
+CREATE VIEW app.logged AS SELECT e.id FROM app.entries e JOIN audit.log l ON l.id = e.log;",
+    );
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["catalog"]["uncovered"], serde_json::json!([]), "{r}");
+    let objects = r["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "relation:log",
+        "audit.relation:log",
+        "constraint:entries.entries_log_fkey",
+        "trigger:entries.entries_stamp",
+        "view:logged",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    f.target()
+        .batch_execute(
+            "CREATE OR REPLACE FUNCTION audit.next_id() RETURNS int LANGUAGE sql AS 'SELECT 2'",
+        )
+        .unwrap();
+    let d = f.command("verify");
+    assert_eq!(d["outcome"], "fail", "{d}");
+    assert!(
+        d["drift"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["object"] == "audit.routine:next_id()" && x["change"] == "changed"),
+        "{}",
+        d["drift"]
+    );
+}
+
 /// A migration that would create, change or drop objects outside the
 /// managed scope (in `public`, or in a schema the history did not create)
 /// is refused, and the diagnostic names the object and its schema.
@@ -974,7 +1022,10 @@ fn statements_outside_the_managed_scope_are_refused_and_named() {
             "SET LOCAL search_path = public; CREATE TABLE leak (id int);",
             "public.relation:leak",
         ),
-        ("GRANT CREATE ON SCHEMA public TO PUBLIC;", "public"),
+        (
+            "DO $$ BEGIN GRANT CREATE ON SCHEMA public TO PUBLIC; END $$;",
+            "schema:public",
+        ),
     ] {
         f.sql(
             "0001_initial.sql",
