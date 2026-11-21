@@ -90,7 +90,12 @@ pub(super) fn names(sql: &str, out: &mut HashSet<String>) {
     let identifier = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
     let mut i = 0;
     while i < bytes.len() {
-        if identifier(bytes[i]) {
+        // SQLite's tokenizer reads U+FEFF at the start of a token as a space
+        // (`CC_BOM`), so it does not start a run; inside a name it is part
+        // of the name. A run starts where a token can.
+        if bytes[i..].starts_with("\u{FEFF}".as_bytes()) {
+            i += 3;
+        } else if identifier(bytes[i]) {
             let start = i;
             while i < bytes.len() && identifier(bytes[i]) {
                 i += 1;
@@ -1118,5 +1123,11 @@ mod tests {
         assert!(all("SELECT [abc").contains("abc"));
         // String literals count too (table-valued functions take names).
         assert!(all("SELECT * FROM pragma_table_info('Accounts')").contains("accounts"));
+        // SQLite reads U+FEFF at the start of a token as a space; inside a
+        // name it is part of the name.
+        let found = all("SELECT * FROM \u{FEFF}\u{FEFF}t JOIN u\u{FEFF}x JOIN \"\u{FEFF}q\"");
+        for name in ["t", "u\u{feff}x", "\u{feff}q"] {
+            assert!(found.contains(name), "{name}: {found:?}");
+        }
     }
 }

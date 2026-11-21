@@ -1228,6 +1228,24 @@ mod tests {
             .collect()
     }
 
+    /// SQLite reads U+FEFF at the start of a token as a space, so a view
+    /// whose FROM has one right before its table's name reads that table:
+    /// once the table is dropped, the view is outside coverage in a session's
+    /// inspection as in a fresh one (review r4654895940).
+    #[test]
+    fn incremental_inspection_is_exact_for_a_byte_order_mark_before_a_name() {
+        let scripts: Vec<(String, Option<&str>)> = [
+            "CREATE TABLE t(id INTEGER); CREATE VIEW v AS SELECT id FROM \u{FEFF}t;",
+            "DROP TABLE t;",
+        ]
+        .into_iter()
+        .map(|sql| (sql.to_owned(), None))
+        .collect();
+        let (failed, states) = assert_incremental_inspection_is_exact(&scripts, usize::MAX, None);
+        assert_eq!(failed, Vec::<String>::new());
+        assert_eq!(uncovered_tables(&states), [vec![], vec!["view:\"v\""]]);
+    }
+
     /// #421: a table's programs are reused across changes below it in its
     /// foreign-key tree only where compiling them again could not change
     /// what they report. Each step here changes something below an unchanged
