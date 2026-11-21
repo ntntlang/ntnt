@@ -1413,8 +1413,13 @@ fn search_path_schemas(t: &[&sqlparser::tokenizer::Token]) -> Vec<String> {
             loop {
                 match t.get(i) {
                     Some(Token::Word(w)) => schemas.push(folded(&w.value, w.quote_style.is_some())),
-                    Some(Token::SingleQuotedString(s)) => schemas.push(s.clone()),
-                    _ => break,
+                    // PostgreSQL takes a number as a name too (`TO 42`).
+                    Some(Token::Number(n, _)) => schemas.push(n.clone()),
+                    Some(token) => match string_literal(token) {
+                        Some(s) => schemas.push(s),
+                        None => break,
+                    },
+                    None => break,
                 }
                 if !matches!(t.get(i + 1), Some(Token::Comma)) {
                     break;
@@ -1426,15 +1431,43 @@ fn search_path_schemas(t: &[&sqlparser::tokenizer::Token]) -> Vec<String> {
     for (i, token) in t.iter().enumerate() {
         if keyword(Some(token), "set_config")
             && matches!(t.get(i + 1), Some(Token::LParen))
-            && matches!(t.get(i + 2), Some(Token::SingleQuotedString(s)) if s.eq_ignore_ascii_case("search_path"))
+            && t.get(i + 2)
+                .and_then(|token| string_literal(token))
+                .is_some_and(|name| name.eq_ignore_ascii_case("search_path"))
             && matches!(t.get(i + 3), Some(Token::Comma))
         {
-            if let Some(Token::SingleQuotedString(list)) = t.get(i + 4) {
-                schemas.extend(setting_list(list));
+            // A value that is not a literal (an expression) names nothing
+            // NTNT can read.
+            if let Some(list) = t.get(i + 4).and_then(|token| string_literal(token)) {
+                schemas.extend(setting_list(&list));
             }
         }
     }
     schemas
+}
+
+/// The value of a string-literal token, whatever its spelling: `'...'`,
+/// `E'...'`, `N'...'`, `U&'...'`, `$$...$$` or `$tag$...$tag$`.
+fn string_literal(token: &sqlparser::tokenizer::Token) -> Option<String> {
+    use sqlparser::tokenizer::Token;
+    match token {
+        Token::SingleQuotedString(s)
+        | Token::EscapedStringLiteral(s)
+        | Token::NationalStringLiteral(s)
+        | Token::UnicodeStringLiteral(s) => Some(s.clone()),
+        Token::DollarQuotedString(d) => Some(d.value.clone()),
+        _ => None,
+    }
+}
+
+/// Whether the dotted name at `i` names a column: it follows
+/// `COMMENT ON COLUMN` or `OWNED BY`, where two parts are table.column.
+fn names_a_column(t: &[&sqlparser::tokenizer::Token], i: usize) -> bool {
+    (i >= 3
+        && keyword(t.get(i - 3), "COMMENT")
+        && keyword(t.get(i - 2), "ON")
+        && keyword(t.get(i - 1), "COLUMN"))
+        || (i >= 2 && keyword(t.get(i - 2), "OWNED") && keyword(t.get(i - 1), "BY"))
 }
 
 /// The name after `SCHEMA` at `i`, skipping `IF [NOT] EXISTS`, and any
@@ -1464,6 +1497,8 @@ fn names_after_schema(t: &[&sqlparser::tokenizer::Token], mut i: usize) -> Vec<(
 /// Schemas a statement names by token shape, as (folded, as written): the
 /// first part of each dotted name (`public.cleanup`, `"Audit".log.id`) and
 /// each name after the keyword `SCHEMA` (`IN SCHEMA public`, `SCHEMA public`).
+/// A column name after `COMMENT ON COLUMN` or `OWNED BY` names a schema only
+/// with three parts (`public.log.id`); two are table.column.
 fn token_schemas(t: &[&sqlparser::tokenizer::Token]) -> Vec<(String, String)> {
     use sqlparser::tokenizer::Token;
     let mut found = vec![];
@@ -1472,6 +1507,9 @@ fn token_schemas(t: &[&sqlparser::tokenizer::Token]) -> Vec<(String, String)> {
         if matches!(t.get(i + 1), Some(Token::Period))
             && matches!(t.get(i + 2), Some(Token::Word(_)))
             && !(i > 0 && matches!(t[i - 1], Token::Period))
+            && (!names_a_column(t, i)
+                || (matches!(t.get(i + 3), Some(Token::Period))
+                    && matches!(t.get(i + 4), Some(Token::Word(_)))))
         {
             found.push((
                 folded(&w.value, w.quote_style.is_some()),
@@ -2468,6 +2506,74 @@ mod tests {
             }
             // Input that does not tokenize is left to the other checks.
             assert!(!is_empty("'unterminated", engine));
+        }
+    }
+
+    /// After `COMMENT ON COLUMN` and `OWNED BY` a two-part name is
+    /// table.column and names no schema; a three-part name still names one
+    /// (#420, review r4654889033).
+    #[test]
+    fn column_names_name_a_schema_only_with_three_parts() {
+        let schemas = |sql: &str| {
+            outside_scope(sql, "app", &[])
+                .into_iter()
+                .map(|o| (o.statement, o.schema))
+                .collect::<Vec<_>>()
+        };
+        for sql in [
+            "COMMENT ON COLUMN accounts.id IS 'x'",
+            "COMMENT ON COLUMN app.accounts.id IS 'x'",
+            "COMMENT ON COLUMN \"Accounts\".\"Id\" IS 'x'",
+            "ALTER SEQUENCE s OWNED BY accounts.id",
+            "ALTER SEQUENCE app.s OWNED BY app.accounts.id",
+            "ALTER SEQUENCE s OWNED BY NONE",
+        ] {
+            assert_eq!(schemas(sql), vec![], "{sql}");
+        }
+        for sql in [
+            "COMMENT ON COLUMN public.audit_log.msg IS 'x'",
+            "ALTER SEQUENCE app.s OWNED BY public.audit_log.id",
+        ] {
+            assert_eq!(schemas(sql), vec![(1, "public".to_string())], "{sql}");
+        }
+    }
+
+    /// Every string-literal spelling of a search_path value is read
+    /// (`E'...'`, `$$...$$`, `$tag$...$tag$`, `N'...'`, `U&'...'`), as is a
+    /// number, and the ledger schema is refused however it is spelled (#420,
+    /// review r4654889040).
+    #[test]
+    fn every_spelling_of_a_search_path_value_is_read() {
+        let schemas = |sql: &str| {
+            outside_scope(sql, "app", &[])
+                .into_iter()
+                .map(|o| (o.statement, o.schema))
+                .collect::<Vec<_>>()
+        };
+        for sql in [
+            "SET LOCAL search_path TO E'public'",
+            "SET search_path TO $$public$$",
+            "SET search_path = $tag$public$tag$, app",
+            "SET search_path TO N'public'",
+            "SET search_path TO U&'public'",
+            "SELECT set_config(E'search_path', $$public$$, true)",
+        ] {
+            assert_eq!(schemas(sql), vec![(1, "public".to_string())], "{sql}");
+        }
+        assert_eq!(
+            schemas("SET search_path TO 42"),
+            vec![(1, "42".to_string())]
+        );
+        for sql in [
+            "SET LOCAL search_path TO E'_ntnt', app",
+            "SET search_path TO $$_ntnt$$",
+            "SELECT set_config('search_path', E'_ntnt', true)",
+        ] {
+            assert_eq!(
+                protected_targets(sql),
+                vec![(1, "_ntnt".to_string())],
+                "{sql}"
+            );
         }
     }
 }
