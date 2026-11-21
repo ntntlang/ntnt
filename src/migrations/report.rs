@@ -950,6 +950,10 @@ mod tests {
             "CREATE TABLE replacement(id INTEGER PRIMARY KEY, email TEXT NOT NULL); INSERT INTO replacement SELECT id, lower(email) FROM accounts; DROP TABLE accounts; ALTER TABLE replacement RENAME TO accounts; CREATE INDEX email_idx ON accounts(email); CREATE TRIGGER email_changed AFTER UPDATE OF email ON accounts BEGIN INSERT INTO audit(id) VALUES(new.id); END;".to_owned(),
             "CREATE TABLE Foo(x INTEGER); CREATE TRIGGER foo_t AFTER INSERT ON foo BEGIN SELECT 1; END;".to_owned(),
             "DROP TRIGGER foo_t;".to_owned(),
+            // What a trigger writes is written: tables referencing it count.
+            "CREATE TABLE tt(id INTEGER PRIMARY KEY); CREATE TABLE uu(id INTEGER PRIMARY KEY); CREATE TRIGGER tt_uu AFTER DELETE ON tt BEGIN DELETE FROM uu WHERE id = old.id; END;".to_owned(),
+            format!("CREATE TABLE cc(id INTEGER PRIMARY KEY, uu_id INTEGER REFERENCES uu(id) ON DELETE CASCADE); CREATE TRIGGER cc_gone AFTER DELETE ON cc BEGIN DELETE FROM {ledger}; END;"),
+            "DROP TRIGGER cc_gone;".to_owned(),
         ]
         .into_iter()
         .enumerate()
