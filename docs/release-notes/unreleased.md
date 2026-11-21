@@ -9,10 +9,14 @@ reports a runtime error in an imported module against that module's file.
   `DEFAULT CURRENT_TIMESTAMP`, `DEFAULT (datetime('now'))` and an `updated_at`
   trigger plan, migrate and verify. They used to fail `plan` with
   `DB_SQLITE` "code -1" (#414).
-- **Refusals name what was refused.** A statement that uses a function, table or
-  PRAGMA outside the supported set fails with `DB_SQL_UNSUPPORTED`, naming the
-  statement number and what it used, for example ``Statement 2 uses SQLite
-  function `randomblob` ``. Other failing statements are numbered too (#414).
+- **Refusals name what was refused.** A migration statement that calls a
+  function outside the supported set, itself or through a trigger it fires or a
+  view it reads, fails with `DB_SQL_UNSUPPORTED`, naming the statement number
+  and the function, for example ``Statement 2 uses SQLite function
+  `randomblob` ``. Other failing statements are numbered too. A trigger or view
+  body that nothing in the migration uses is checked only during inspection and
+  reported as `DB_COVERAGE_INCOMPLETE`, and an authored PRAGMA is refused before
+  replay with `DB_REPLAY_UNSUPPORTED` (#414).
 - **Scratch journal mode.** An empty scratch takes the target's journal mode, so
   a scratch made with `touch` still works after the application has opened the
   target, which `std/db/sqlite` `connect()` switches to WAL. Any other setting

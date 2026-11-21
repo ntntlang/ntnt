@@ -16,6 +16,13 @@ fn replay_outcome(work: Result<()>, cleanup: Result<()>) -> (Result<()>, Option<
         (Err(cause), Err(cleanup)) => (Err(cause), Some(cleanup)),
     }
 }
+/// Add a scratch replay's failures to `report`: the replay's own error first,
+/// then a cleanup that also failed.
+fn record_replay(report: &mut Value, replay: Result<()>, cleanup_failure: Option<Diagnostic>) {
+    for d in replay.err().into_iter().chain(cleanup_failure) {
+        diagnostic(report, d);
+    }
+}
 fn diagnostic(report: &mut Value, d: Diagnostic) {
     report["diagnostics"].as_array_mut().unwrap().push(json!(d));
 }
@@ -392,12 +399,7 @@ async fn inspect_observed(
             outcome
         }
         .await;
-        if let Err(d) = replay {
-            diagnostic(&mut report, d);
-        }
-        if let Some(d) = cleanup_failure {
-            diagnostic(&mut report, d);
-        }
+        record_replay(&mut report, replay, cleanup_failure);
     } else {
         diagnostic(&mut report,Diagnostic::new("DB_REFERENCE_UNAVAILABLE","No explicitly disposable matching scratch database/file is configured; expected state is unverified."));
     }
@@ -487,5 +489,26 @@ mod tests {
         assert!(cleanup.is_none());
         let (outcome, cleanup) = replay_outcome(Ok(()), Ok(()));
         assert!(outcome.is_ok() && cleanup.is_none());
+    }
+
+    #[test]
+    fn a_failed_cleanup_is_reported_after_the_replay_failure() {
+        let codes = |report: &Value| -> Vec<String> {
+            report["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["code"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let mut report = json!({ "diagnostics": [] });
+        let (outcome, cleanup) =
+            replay_outcome(Err(failure("DB_TIMEOUT")), Err(failure("DB_CANCELLED")));
+        record_replay(&mut report, outcome, cleanup);
+        assert_eq!(codes(&report), ["DB_TIMEOUT", "DB_CANCELLED"]);
+        let mut report = json!({ "diagnostics": [] });
+        let (outcome, cleanup) = replay_outcome(Ok(()), Ok(()));
+        record_replay(&mut report, outcome, cleanup);
+        assert!(codes(&report).is_empty());
     }
 }

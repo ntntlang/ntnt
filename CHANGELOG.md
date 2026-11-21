@@ -7,8 +7,8 @@ See [unreleased notes](docs/release-notes/unreleased.md).
 ### Fixed
 
 - `ntnt db` (SQLite): migrations can use the date and time functions, so timestamp
-  defaults plan and migrate; a refused statement names its number and the
-  function, table or PRAGMA it used (#414).
+  defaults plan and migrate; a statement SQLite refuses names its number and the
+  function or table it used (#414).
 - `ntnt db` (SQLite): an empty scratch takes the target's journal mode, and a
   scratch settings mismatch names each setting with both values (#413).
 - `ntnt db` (SQLite): partial and expression indexes plan, migrate and verify; a

@@ -1423,14 +1423,18 @@ fn json_within_hang_guard(mut command: std::process::Command) -> Value {
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&stderr)))
 }
 
-/// A replay that runs out of time is reported as DB_TIMEOUT. Its session is
-/// discarded, so the cleanup rollback fails as well; that failure is listed
-/// after the timeout instead of replacing it. The statement is a cross join of
-/// 10^12 rows that never writes, so it always reaches the replay deadline. The
-/// tables are qualified because SQLite gives a read that names no column no
-/// database, which the migration authorizer refuses.
+/// A replay that runs out of time is reported as DB_TIMEOUT, not as its
+/// cleanup's error. SQLite rolls back the transaction of an INSERT it
+/// interrupts, so the cleanup finds none open; before 0.6.4 its failing
+/// ROLLBACK replaced the timeout with DB_SQLITE code 1 (#413). When the
+/// session's outer deadline fires first, the session is discarded and the
+/// cleanup fails with DB_CANCELLED, listed after the timeout (that order is
+/// unit-tested in `report.rs`; which deadline fires first is not fixed). The
+/// statement is a cross join of 10^12 rows that never writes, so it always
+/// reaches a deadline. The tables are qualified because SQLite gives a read
+/// that names no column no database, which the migration authorizer refuses.
 #[test]
-fn sqlite_replay_timeout_is_reported_before_its_failed_cleanup() {
+fn sqlite_replay_timeout_is_not_masked_by_its_cleanup() {
     let f = Fixture::new();
     let rows = (1..=100)
         .map(|i| format!("({i})"))
@@ -1451,11 +1455,11 @@ fn sqlite_replay_timeout_is_reported_before_its_failed_cleanup() {
         .iter()
         .map(|d| d["code"].as_str().unwrap())
         .collect();
-    let timeout = codes.iter().position(|c| *c == "DB_TIMEOUT");
-    assert!(timeout.is_some(), "{r}");
-    if let Some(cancelled) = codes.iter().position(|c| *c == "DB_CANCELLED") {
-        assert!(cancelled > timeout.unwrap(), "{r}");
-    }
+    assert_eq!(codes.first(), Some(&"DB_TIMEOUT"), "{r}");
+    // Anything after the timeout is the failed cleanup of a discarded session.
+    assert!(codes[1..].iter().all(|c| *c == "DB_CANCELLED"), "{r}");
+    let cleanup = if codes.len() == 1 { "pass" } else { "unknown" };
+    assert_eq!(r["scratch"]["cleanup"], cleanup, "{r}");
     assert_eq!(
         f.target()
             .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
@@ -1463,4 +1467,50 @@ fn sqlite_replay_timeout_is_reported_before_its_failed_cleanup() {
             .unwrap(),
         0
     );
+}
+
+/// #414: where a function outside the allowed set is reported depends on when
+/// SQLite compiles the code that calls it. A statement compiles its own calls
+/// and those of a trigger it fires or a view it reads, so those are refused and
+/// named. A trigger or view body nothing in the migration uses is compiled only
+/// during inspection, where it is uncovered. Authored PRAGMAs never reach
+/// SQLite. docs/DATABASE_MIGRATIONS.md states each case.
+#[test]
+fn sqlite_refusals_are_named_where_the_statement_compiles_them() {
+    let trigger = "CREATE TABLE t(id INTEGER PRIMARY KEY, token TEXT); \
+        CREATE TRIGGER t_token AFTER INSERT ON t BEGIN \
+        UPDATE t SET token = hex(randomblob(8)) WHERE id = new.id; END;";
+    let view = "CREATE TABLE t(id INTEGER PRIMARY KEY); \
+        CREATE VIEW v AS SELECT id, random() AS r FROM t;";
+    let cases = [
+        (format!("{trigger} INSERT INTO t(id) VALUES (1);"), "DB_SQL_UNSUPPORTED", Some("Statement 3 uses SQLite function `hex`"), None),
+        (trigger.to_owned(), "DB_COVERAGE_INCOMPLETE", None, Some(r#"table:"t""#)),
+        (format!("{view} CREATE TABLE copy(id INTEGER, r INTEGER); INSERT INTO copy SELECT id, r FROM main.v;"), "DB_SQL_UNSUPPORTED", Some("Statement 4 uses SQLite function `random`"), None),
+        (view.to_owned(), "DB_COVERAGE_INCOMPLETE", None, Some(r#"view:"v""#)),
+        ("CREATE TABLE t(id INTEGER PRIMARY KEY); PRAGMA foreign_keys = ON;".to_owned(), "DB_REPLAY_UNSUPPORTED", None, None),
+    ];
+    for (sql, expected, message, object) in cases {
+        let f = Fixture::new();
+        f.sql("0001_initial.sql", &sql);
+        let r = f.command("plan", &[]);
+        assert_ne!(r["outcome"], "pass", "{sql}: {r}");
+        let d = diagnostic(&r, expected);
+        assert_eq!(d["source"], "0001_initial.sql", "{sql}: {d}");
+        if let Some(message) = message {
+            assert!(
+                d["message"].as_str().unwrap().starts_with(message),
+                "{sql}: {d}"
+            );
+        }
+        if let Some(object) = object {
+            assert_eq!(d["objects"], serde_json::json!([object]), "{sql}: {d}");
+        }
+        assert_eq!(
+            f.target()
+                .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
 }
