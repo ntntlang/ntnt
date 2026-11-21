@@ -77,6 +77,40 @@ impl Fixture {
             Self::Sqlite(_) => "main._ntnt_schema_migrations_v2",
         }
     }
+    /// A command's human (non-JSON) output.
+    fn human(&self, command: &str, args: &[&str]) -> String {
+        let template = match self {
+            Self::Postgres(f) => f.process(command),
+            Self::Sqlite(f) => f.process(command),
+        };
+        let mut process = std::process::Command::new(template.get_program());
+        process.args(
+            template
+                .get_args()
+                .filter(|arg| *arg != std::ffi::OsStr::new("--json")),
+        );
+        for (key, value) in template.get_envs() {
+            match value {
+                Some(value) => process.env(key, value),
+                None => process.env_remove(key),
+            };
+        }
+        let output = process
+            .current_dir(self.root())
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    }
+}
+/// The diagnostic with `code` in `report`.
+fn diagnostic<'a>(report: &'a Value, code: &str) -> &'a Value {
+    report["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == code)
+        .unwrap_or_else(|| panic!("no {code} in {report}"))
 }
 fn code(report: &Value, code: &str) -> bool {
     report["diagnostics"]
@@ -204,6 +238,97 @@ fn history_and_drift(f: Fixture) {
     f.execute(&format!("UPDATE {} SET state='running'", f.ledger()));
     assert!(code(&f.command("status", &[]), "DB_HISTORY_DIRTY"));
 }
+/// #423 (sq-13, pg-07, cli-15): history refusals name the migration, show
+/// checksums but never SQL, and following each one's advice restores a
+/// history that passes.
+fn history_refusals_name_the_migration(f: Fixture) {
+    let s = f.schema();
+    let a = format!("CREATE TABLE {s}.a(id INTEGER PRIMARY KEY);\n");
+    let b = format!("CREATE TABLE {s}.b(id INTEGER PRIMARY KEY);\n");
+    let c = format!("CREATE TABLE {s}.c(id INTEGER PRIMARY KEY);\n");
+    f.sql("0010_a.sql", &a);
+    f.sql("0020_b.sql", &b);
+    f.sql("0030_c.sql", &c);
+    let plan = f.plan("initial.json");
+    let applied = f.apply("initial.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let passes = || {
+        let r = f.command("status", &[]);
+        assert_eq!(r["outcome"], "pass", "{r}");
+        r
+    };
+    let no_sql = |d: &Value| assert!(!d.to_string().contains("CREATE TABLE"), "{d}");
+
+    // An editor or git core.autocrlf rewrote one applied file's line endings.
+    f.sql("0020_b.sql", &b.replace('\n', "\r\n"));
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_EDITED");
+    assert_eq!(d["source"], "0020_b.sql", "{d}");
+    let message = d["message"].as_str().unwrap();
+    let applied_checksum = plan["source"]["migrations"][1]["checksum"]
+        .as_str()
+        .unwrap();
+    let checksum_now = r["source"]["migrations"][1]["checksum"].as_str().unwrap();
+    assert_ne!(applied_checksum, checksum_now);
+    for shown in ["0020_b.sql", applied_checksum, checksum_now] {
+        assert!(message.contains(shown), "{shown}: {d}");
+    }
+    no_sql(d);
+    // Following the advice: the applied bytes are restored.
+    f.sql("0020_b.sql", &b);
+    passes();
+
+    // An applied file was deleted.
+    std::fs::remove_file(f.root().join("migrations/0030_c.sql")).unwrap();
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_MISSING");
+    assert_eq!(d["source"], "0030_c.sql", "{d}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("0030_c.sql is missing from migrations/"),
+        "{d}"
+    );
+    no_sql(d);
+    f.sql("0030_c.sql", &c);
+    passes();
+
+    // A teammate's branch merged a migration numbered below the last applied one.
+    f.sql(
+        "0015_merged.sql",
+        &format!("CREATE TABLE {s}.merged(id INTEGER PRIMARY KEY);\n"),
+    );
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(d["source"], "0015_merged.sql", "{d}");
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.contains("position 2") && message.contains("0020_b.sql"),
+        "{d}"
+    );
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.contains("above 30") && next_action.contains("0031_merged.sql"),
+        "{d}"
+    );
+    no_sql(d);
+    // The human report says what is known about the history, never null counts.
+    let human = f.human("status", &[]);
+    assert!(human.contains("DB_HISTORY_DIVERGENT"), "{human}");
+    let history = human
+        .lines()
+        .find(|line| line.starts_with("History: "))
+        .unwrap_or_else(|| panic!("no History line: {human}"));
+    assert!(!history.contains("null"), "{history}");
+    // Following the advice: the merged migration is renumbered above 30.
+    std::fs::rename(
+        f.root().join("migrations/0015_merged.sql"),
+        f.root().join("migrations/0031_merged.sql"),
+    )
+    .unwrap();
+    assert_eq!(passes()["history"]["pending_count"], 1);
+}
 fn contract_failures(create: fn() -> Fixture) {
     for (phase, check) in [
         ("requires", "SELECT false"),
@@ -281,6 +406,15 @@ fn sqlite_prefix_recovery() {
 #[test]
 fn sqlite_history_and_drift() {
     history_and_drift(Fixture::sqlite())
+}
+#[test]
+fn sqlite_history_refusals_name_the_migration() {
+    history_refusals_name_the_migration(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_history_refusals_name_the_migration() {
+    history_refusals_name_the_migration(Fixture::pg())
 }
 #[test]
 fn sqlite_contract_failures() {

@@ -459,14 +459,28 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             }
         }
         if let Some(h) = report.get("history") {
-            println!(
-                "History: {} applied, {} adopted, {} imported, {} pending; drift: {}",
-                h["applied_count"],
-                h["adopted_count"],
-                h["imported_count"],
-                h["pending_count"],
-                report["drift"]["outcome"]
-            );
+            if h["applied_count"].is_null() {
+                // Unknown or refused history has no counts (#423).
+                let entries = match h["observed_entry_count"].as_u64() {
+                    Some(1) => "; its ledger has 1 entry".to_owned(),
+                    Some(n) => format!("; its ledger has {n} entries"),
+                    None => String::new(),
+                };
+                println!(
+                    "History: {}{entries}, see the diagnostics below; drift: {}",
+                    h["outcome"].as_str().unwrap_or("unknown"),
+                    report["drift"]["outcome"]
+                );
+            } else {
+                println!(
+                    "History: {} applied, {} adopted, {} imported, {} pending; drift: {}",
+                    h["applied_count"],
+                    h["adopted_count"],
+                    h["imported_count"],
+                    h["pending_count"],
+                    report["drift"]["outcome"]
+                );
+            }
         }
         if let Some(action) = report.get("adoption").and_then(|a| a.get("action")) {
             println!(

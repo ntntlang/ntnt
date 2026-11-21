@@ -1,8 +1,8 @@
 //! Shared report construction: authored history, observed target, expected prefix.
 use super::adapter::{self, Access, Adapter, Identity};
 use super::analysis::analyze_for;
-use super::inventory::{json_digest, CapturedInputs, CatalogDigests};
-use super::model::{Catalog, History};
+use super::inventory::{json_digest, CapturedInputs, CatalogDigests, Migration};
+use super::model::{Catalog, History, HistoryEntry};
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
@@ -119,6 +119,193 @@ pub(super) fn prefix(history: &History, inputs: &CapturedInputs) -> Result<usize
     }
     Ok(covered)
 }
+/// A history refusal about migration `source`, with advice for it (#423).
+fn history_refusal(code: &str, source: &str, message: String, next_action: String) -> Diagnostic {
+    let mut d = Diagnostic::new(code, &message);
+    d.source = Some(source.to_owned());
+    d.next_action = next_action;
+    d
+}
+/// The migration file name a ledger entry records, when it has the shape
+/// ntnt writes there (`<digits>_<name>.sql`). Reports never echo other ledger
+/// text: a tampered ledger could hold anything.
+fn ledger_name(entry: &HistoryEntry) -> Option<&str> {
+    let name = entry.name.as_str();
+    let (digits, rest) = name.strip_suffix(".sql")?.split_once('_')?;
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+    (name.len() <= 255
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && !rest.is_empty()
+        && rest.bytes().all(word))
+    .then_some(name)
+}
+/// The ID a ledger entry records, when it is a decimal number.
+fn ledger_id(entry: &HistoryEntry) -> Option<&str> {
+    let id = entry.id.as_str();
+    (!id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())).then_some(id)
+}
+/// The checksum a ledger entry records, when it is a SHA-256 hex digest.
+fn ledger_checksum(entry: &HistoryEntry) -> String {
+    let checksum = entry.checksum.as_str();
+    if checksum.len() == 64
+        && checksum
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        format!("checksum {checksum}")
+    } else {
+        "a checksum that is not a SHA-256 digest".to_owned()
+    }
+}
+/// A ledger entry as history diagnostics name it: `0020_b.sql (ID 20)`.
+fn recorded(entry: &HistoryEntry) -> String {
+    match (ledger_name(entry), ledger_id(entry)) {
+        (Some(name), Some(id)) => format!("{name} (ID {id})"),
+        (Some(name), None) => format!("{name} (with an ID that is not a decimal number)"),
+        (None, _) => "an entry whose name is not a migration file name".to_owned(),
+    }
+}
+/// `DB_HISTORY_MISSING` for the applied (or adopted) migration `entry`, which
+/// is not in the migrations directory `dir`; `others` later entries are not
+/// either.
+fn missing_migration(dir: &str, entry: &HistoryEntry, others: usize) -> Diagnostic {
+    let position = entry.position;
+    let Some(name) = ledger_name(entry) else {
+        return Diagnostic::new(
+            "DB_HISTORY_MISSING",
+            &format!("The ledger entry at position {position} is not a migration in {dir}/: its recorded name is not a migration file name."),
+        );
+    };
+    let id = ledger_id(entry).map_or_else(String::new, |id| format!("ID {id}, "));
+    let (what, at, adopted) = if entry.state == "adopted" {
+        (
+            "Adopted migration",
+            format!("the adopted checkpoint ends with it ({id}ledger position {position})"),
+            " and every migration the checkpoint covers",
+        )
+    } else {
+        (
+            "Applied migration",
+            format!("{id}ledger position {position}"),
+            "",
+        )
+    };
+    let more = match others {
+        0 => String::new(),
+        1 => " One more applied migration is missing too.".to_owned(),
+        n => format!(" {n} more applied migrations are missing too."),
+    };
+    history_refusal(
+        "DB_HISTORY_MISSING",
+        name,
+        format!("{what} {name} is missing from {dir}/ ({at}).{more}"),
+        format!("Restore {dir}/{name}{adopted}, with a .toml sidecar where it had one, to the exact bytes that were applied, for example from version control. Applied migrations stay in {dir}/ under their applied names; never delete or rewrite ledger rows to match."),
+    )
+}
+/// The ID the ledger records last, the highest applied or adopted ID.
+fn last_recorded_id(history: &History) -> Option<u64> {
+    history
+        .entries
+        .iter()
+        .filter_map(|e| ledger_id(e)?.parse().ok())
+        .max()
+}
+/// The first ID above `last` that no captured migration uses, written as wide
+/// as `name`'s ID, with `name`'s description: what an unapplied migration
+/// numbered below `last` can be renamed to.
+fn renumbered(inputs: &CapturedInputs, name: &str, last: u64) -> Option<String> {
+    let (digits, rest) = name.split_once('_')?;
+    let mut id = last.checked_add(1)?;
+    while inputs.migrations.iter().any(|m| m.id == id) {
+        id = id.checked_add(1)?;
+    }
+    Some(format!("{id:0width$}_{rest}", width = digits.len()))
+}
+/// Advice for an unapplied migration `name` numbered below `last`, the ID
+/// the ledger records last, as `DB_DUPLICATE_ID` advises (#423).
+fn renumber_advice(inputs: &CapturedInputs, name: &str, last: u64) -> String {
+    let dir = &inputs.config.migrations_dir;
+    let example = renumbered(inputs, name, last)
+        .map(|new| format!(", such as {dir}/{new}"))
+        .unwrap_or_default();
+    format!("This target has not applied {name}, but it is numbered below {last}, the last ID in the target's ledger, and migrations run in ID order. Rename {dir}/{name} to an unused ID above {last}{example}, as for DB_DUPLICATE_ID, if no other target has applied it yet; never renumber a migration that has been applied anywhere.")
+}
+/// `DB_HISTORY_DIVERGENT` at ledger position `position`, where the ledger
+/// records `entry` and the captured history has `migration` (#423).
+fn divergent(
+    history: &History,
+    inputs: &CapturedInputs,
+    entry: &HistoryEntry,
+    migration: &Migration,
+    position: usize,
+) -> Diagnostic {
+    let dir = &inputs.config.migrations_dir;
+    let message = format!(
+        "Applied history diverges at ledger position {position}: the ledger records {} there, but position {position} in {dir}/ is now {} (ID {}).",
+        recorded(entry), migration.name, migration.id
+    );
+    let applied = |name: &str| history.entries.iter().any(|e| e.name == name);
+    let last = last_recorded_id(history);
+    if let Some(last) = last.filter(|last| migration.id < *last && !applied(&migration.name)) {
+        let advice = renumber_advice(inputs, &migration.name, last);
+        return history_refusal("DB_HISTORY_DIVERGENT", &migration.name, message, advice);
+    }
+    match ledger_name(entry) {
+        Some(name) if !inputs.migrations.iter().any(|m| m.name == name) => {
+            let advice = format!("{name} was applied under that name and is no longer in {dir}/. If {} is that migration renamed, rename it back to {name}; otherwise restore {dir}/{name} with its exact applied bytes, for example from version control. Applied migrations are never renamed or renumbered.", migration.name);
+            history_refusal("DB_HISTORY_DIVERGENT", name, message, advice)
+        }
+        _ => {
+            let mut d = Diagnostic::new("DB_HISTORY_DIVERGENT", &message);
+            d.source = Some(migration.name.clone());
+            d
+        }
+    }
+}
+/// The checkpoint `entry` covers the first `count` captured migrations, but
+/// the `count`-th is no longer the one it ends with (#423).
+fn divergent_checkpoint(
+    history: &History,
+    inputs: &CapturedInputs,
+    entry: &HistoryEntry,
+    count: usize,
+) -> Diagnostic {
+    let dir = &inputs.config.migrations_dir;
+    let now = &inputs.migrations[count - 1];
+    let mut message = format!(
+        "The adopted checkpoint covers the first {count} migrations, through {}, but position {count} in {dir}/ is now {} (ID {}).",
+        recorded(entry), now.name, now.id
+    );
+    let name = ledger_name(entry);
+    let moved = name.and_then(|name| inputs.migrations.iter().position(|m| m.name == name));
+    let (Some(name), Some(id)) = (name, ledger_id(entry)) else {
+        let mut d = Diagnostic::new("DB_HISTORY_DIVERGENT", &message);
+        d.source = Some(now.name.clone());
+        return d;
+    };
+    match (moved, last_recorded_id(history)) {
+        (Some(index), Some(last)) if index >= count => {
+            message.push_str(&format!(
+                " {name} is now at position {}: {} migration(s) numbered below {id} were added after the adoption.",
+                index + 1,
+                index + 1 - count,
+            ));
+            let advice = renumber_advice(inputs, &now.name, last);
+            let advice = format!("{advice} Rename every migration numbered below {id} that was added after the adoption the same way.");
+            history_refusal("DB_HISTORY_DIVERGENT", &now.name, message, advice)
+        }
+        (None, _) => {
+            let advice = format!("Restore {dir}/{name} and every migration before it that the checkpoint covers, with their exact adopted bytes, for example from version control; adopted migrations are never removed, renamed or renumbered.");
+            history_refusal("DB_HISTORY_DIVERGENT", name, message, advice)
+        }
+        _ => {
+            let mut d = Diagnostic::new("DB_HISTORY_DIVERGENT", &message);
+            d.source = Some(name.to_owned());
+            d
+        }
+    }
+}
 /// Applied prefix plus the position of a trailing `running` attempt, which is
 /// only valid as the last scoped entry for the next captured migration.
 pub(super) fn prefix_with_attempt(
@@ -133,11 +320,18 @@ pub(super) fn prefix_with_attempt(
             "History belongs to a different logical database or managed schema.",
         ));
     }
+    let dir = &inputs.config.migrations_dir;
     if history.entries.len() > inputs.migrations.len() {
-        return Err(Diagnostic::new(
-            "DB_HISTORY_MISSING",
-            "Applied history contains migrations missing from the captured inventory.",
-        ));
+        // Name the first recorded migration that is not captured (#423).
+        let captured = |e: &&HistoryEntry| inputs.migrations.iter().any(|m| m.name == e.name);
+        let mut missing = history.entries.iter().filter(|e| !captured(e));
+        return Err(match missing.next() {
+            Some(entry) => missing_migration(dir, entry, missing.count()),
+            None => Diagnostic::new(
+                "DB_HISTORY_MISSING",
+                "Applied history contains migrations missing from the captured inventory.",
+            ),
+        });
     }
     let mut covered = 0;
     let mut applied_started = false;
@@ -164,32 +358,46 @@ pub(super) fn prefix_with_attempt(
                 .ok()
                 .filter(|n| *n > 0 && *n <= inputs.migrations.len())
                 .ok_or_else(|| {
-                    Diagnostic::new(
+                    // A checkpoint beyond the captured migrations: name the
+                    // one it ends with when that is gone (#423).
+                    if entry.position > 0 && !inputs.migrations.iter().any(|m| m.name == entry.name) {
+                        return missing_migration(dir, entry, 0);
+                    }
+                    let mut d = Diagnostic::new(
                         "DB_HISTORY_MISSING",
-                        "The adopted source prefix is missing or invalid.",
-                    )
+                        &format!(
+                            "The adopted checkpoint covers {} migrations, through {}, but {dir}/ holds {}.",
+                            entry.position,
+                            recorded(entry),
+                            inputs.migrations.len()
+                        ),
+                    );
+                    d.source = ledger_name(entry).map(str::to_owned);
+                    d
                 })?;
             let expected = inputs.checkpoint(count)?;
             if entry.id != expected.id || entry.name != expected.name {
-                return Err(Diagnostic::new(
-                    "DB_HISTORY_DIVERGENT",
-                    "Adopted checkpoint does not identify this ordered source prefix.",
-                ));
+                return Err(divergent_checkpoint(history, inputs, entry, count));
             }
             if entry.checksum != expected.checksum {
-                return Err(Diagnostic::new(
+                // The ledger keeps one checksum for the whole covered prefix.
+                let first = &inputs.migrations[0].name;
+                return Err(history_refusal(
                     "DB_HISTORY_EDITED",
-                    "Source bytes covered by the adopted checkpoint have changed.",
+                    &expected.name,
+                    format!(
+                        "A migration the adopted checkpoint covers has changed since the adoption: the checkpoint covers {count} migrations, {first} through {}, and records {} for them, but they now hash to checksum {}. The checkpoint has one checksum for all of them, so it cannot say which file changed.",
+                        expected.name, ledger_checksum(entry), expected.checksum
+                    ),
+                    format!("Restore the migrations from {dir}/{first} through {dir}/{}, with their .toml sidecars, to the exact bytes they had when the target was adopted, for example by comparing each with the version control revision that was adopted; line endings and whitespace count. Put any further change in a new migration (`ntnt db new <name>`).", expected.name),
                 ));
             }
             covered = count;
             continue;
         }
         let migration = inputs.migrations.get(covered).ok_or_else(|| {
-            Diagnostic::new(
-                "DB_HISTORY_MISSING",
-                "Applied history exceeds the captured source prefix.",
-            )
+            let others = history.entries.len() - i - 1;
+            missing_migration(dir, entry, others)
         })?;
         if entry.state == "imported" {
             if history.scope.is_none() || has_checkpoint || applied_started {
@@ -210,16 +418,24 @@ pub(super) fn prefix_with_attempt(
                 "Ledger contains non-applied work; explicit reconciliation is required.",
             ));
         }
-        if entry.position != covered as i64 + 1
-            || entry.id != migration.id.to_string()
-            || entry.name != migration.name
-        {
-            return Err(Diagnostic::new("DB_HISTORY_DIVERGENT","Applied ledger is not the exact ordered prefix of this inventory (including inserted historical files)."));
+        if entry.position != covered as i64 + 1 {
+            let mut d = Diagnostic::new("DB_HISTORY_DIVERGENT",&format!("Applied ledger is not the exact ordered prefix of this inventory: the ledger records {} at position {} where position {} is expected.", recorded(entry), entry.position, covered + 1));
+            d.source = ledger_name(entry).map(str::to_owned);
+            return Err(d);
+        }
+        if entry.id != migration.id.to_string() || entry.name != migration.name {
+            return Err(divergent(history, inputs, entry, migration, covered + 1));
         }
         if entry.checksum != migration.checksum {
-            return Err(Diagnostic::new(
+            let name = &migration.name;
+            return Err(history_refusal(
                 "DB_HISTORY_EDITED",
-                "Applied SQL or metadata bytes have changed.",
+                name,
+                format!(
+                    "Applied migration {name} has changed since it was applied: the ledger records {}, but its SQL and sidecar bytes now hash to checksum {}.",
+                    ledger_checksum(entry), migration.checksum
+                ),
+                format!("Restore {dir}/{name}, with its .toml sidecar if it has one, to the exact bytes that were applied, for example from version control; line endings and whitespace count, so check what an editor or git core.autocrlf changed. Put any further change in a new migration (`ntnt db new <name>`); never rewrite the ledger's checksum."),
             ));
         }
         if attempt.is_none() {
@@ -1046,6 +1262,238 @@ mod tests {
             failed.len() <= 60 && (24..=216).contains(&uncovered),
             "{failed:?} {uncovered}"
         );
+    }
+
+    /// Captured inputs of a SQLite project whose migrations are `files`
+    /// (name, SQL), for checking history without a database.
+    fn named_inputs(files: &[(&str, &str)]) -> (tempfile::TempDir, CapturedInputs) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("migrations")).unwrap();
+        std::fs::write(
+            root.join("ntnt.toml"),
+            "[databases.app]\nengine = \"sqlite\"\nschema = \"main\"\nmigrations_dir = \"migrations\"\n\
+             [databases.app.targets.test]\nconnection_secret = \"DB_TARGET\"\n[secrets.DB_TARGET]\n",
+        )
+        .unwrap();
+        for (name, sql) in files {
+            std::fs::write(root.join("migrations").join(name), sql).unwrap();
+        }
+        let inputs = CapturedInputs::load(&root.join("ntnt.toml"), "test", None).unwrap();
+        (dir, inputs)
+    }
+    fn entry(
+        position: usize,
+        m: &super::super::inventory::Migration,
+    ) -> super::super::model::HistoryEntry {
+        super::super::model::HistoryEntry {
+            position: position as i64,
+            id: m.id.to_string(),
+            name: m.name.clone(),
+            checksum: m.checksum.clone(),
+            state: "applied".into(),
+        }
+    }
+    /// The ledger of a target that adopted the first `adopted` of `inputs`'
+    /// migrations (none: no checkpoint) and then applied the rest up to `through`.
+    fn ledger(inputs: &CapturedInputs, adopted: usize, through: usize) -> History {
+        let mut entries: Vec<_> = (adopted > 0)
+            .then(|| inputs.checkpoint(adopted).unwrap())
+            .into_iter()
+            .collect();
+        entries.extend(
+            inputs.migrations[adopted..through]
+                .iter()
+                .enumerate()
+                .map(|(i, m)| entry(adopted + i + 1, m)),
+        );
+        History {
+            present: true,
+            entries,
+            scope: Some(json!({"database":"app","schema":"main"})),
+        }
+    }
+    fn refusal(history: &History, inputs: &CapturedInputs) -> Diagnostic {
+        prefix_with_attempt(history, inputs).unwrap_err()
+    }
+    const A: (&str, &str) = ("0010_a.sql", "CREATE TABLE a(id INTEGER);\n");
+    const B: (&str, &str) = ("0020_b.sql", "CREATE TABLE b(id INTEGER);\n");
+    const C: (&str, &str) = ("0030_c.sql", "CREATE TABLE c(id INTEGER);\n");
+    const D: (&str, &str) = ("0040_d.sql", "CREATE TABLE d(id INTEGER);\n");
+    /// Nothing a migration holds appears in a history diagnostic.
+    fn shows_no_sql(d: &Diagnostic) {
+        let text = format!("{} {}", d.message, d.next_action);
+        assert!(!text.contains("CREATE TABLE"), "{text}");
+    }
+
+    /// #423 (sq-13, pg-07, cli-15): an applied migration whose bytes changed
+    /// is named, with the checksum it was applied with and its checksum now.
+    #[test]
+    fn an_edited_applied_migration_is_named_with_both_checksums() {
+        let (_before, applied) = named_inputs(&[A, B, C]);
+        let history = ledger(&applied, 0, 3);
+        // An editor or git core.autocrlf rewrote its line endings.
+        let (_after, now) =
+            named_inputs(&[A, ("0020_b.sql", "CREATE TABLE b(id INTEGER);\r\n"), C]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_EDITED");
+        assert_eq!(d.source.as_deref(), Some("0020_b.sql"), "{d:?}");
+        for shown in [
+            "0020_b.sql",
+            &applied.migrations[1].checksum,
+            &now.migrations[1].checksum,
+        ] {
+            assert!(d.message.contains(shown), "{shown}: {}", d.message);
+        }
+        assert!(
+            d.next_action.contains("migrations/0020_b.sql"),
+            "{}",
+            d.next_action
+        );
+        assert!(d.next_action.contains("new migration"), "{}", d.next_action);
+        shows_no_sql(&d);
+    }
+
+    /// #423: an applied migration missing from migrations/ is named, wherever
+    /// it was in the history.
+    #[test]
+    fn a_missing_applied_migration_is_named() {
+        let (_before, applied) = named_inputs(&[A, B, C]);
+        let history = ledger(&applied, 0, 3);
+        for (files, missing) in [(vec![A, B], "0030_c.sql"), (vec![A, C], "0020_b.sql")] {
+            let (_after, now) = named_inputs(&files);
+            let d = refusal(&history, &now);
+            assert_eq!(d.code, "DB_HISTORY_MISSING");
+            assert_eq!(d.source.as_deref(), Some(missing), "{d:?}");
+            assert!(
+                d.message
+                    .contains(&format!("{missing} is missing from migrations/")),
+                "{}",
+                d.message
+            );
+            assert!(
+                d.next_action.contains(&format!("migrations/{missing}")),
+                "{}",
+                d.next_action
+            );
+            shows_no_sql(&d);
+        }
+        // After a checkpoint, an applied migration past the end of migrations/.
+        let (_before, applied) = named_inputs(&[A, B, C, D]);
+        let history = ledger(&applied, 2, 4);
+        let (_after, now) = named_inputs(&[A, B, C]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_MISSING");
+        assert_eq!(d.source.as_deref(), Some("0040_d.sql"), "{d:?}");
+    }
+
+    /// #423 (sq-13): a migration numbered below the last applied one, such as
+    /// one merged from another branch, is named at the first ledger position
+    /// that differs, and the advice is to renumber it above that ID, as for
+    /// DB_DUPLICATE_ID. The suggested name is free.
+    #[test]
+    fn an_unapplied_migration_below_the_last_applied_id_is_renumbered_above_it() {
+        let (_before, applied) = named_inputs(&[A, C, D]);
+        let history = ledger(&applied, 0, 2);
+        let inserted = ("0020_b.sql", "CREATE TABLE b(id INTEGER);\n");
+        let (_after, now) = named_inputs(&[A, inserted, C, D]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+        assert_eq!(d.source.as_deref(), Some("0020_b.sql"), "{d:?}");
+        for shown in ["position 2", "0030_c.sql", "0020_b.sql"] {
+            assert!(d.message.contains(shown), "{shown}: {}", d.message);
+        }
+        // 31 is the first free ID above 30, the last applied ID (40 is pending).
+        assert!(d.next_action.contains("above 30"), "{}", d.next_action);
+        assert!(d.next_action.contains("0031_b.sql"), "{}", d.next_action);
+        shows_no_sql(&d);
+        // Following the advice gives a valid history with two pending.
+        let (_fixed, fixed) =
+            named_inputs(&[A, C, ("0031_b.sql", "CREATE TABLE b(id INTEGER);\n"), D]);
+        assert_eq!(prefix_with_attempt(&history, &fixed).unwrap(), (2, None));
+    }
+
+    /// #423: an applied migration renamed in migrations/ is named under the
+    /// name it was applied with.
+    #[test]
+    fn a_renamed_applied_migration_is_named_as_applied() {
+        let (_before, applied) = named_inputs(&[A, B]);
+        let history = ledger(&applied, 0, 2);
+        let (_after, now) = named_inputs(&[A, ("0020_bee.sql", B.1)]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+        assert_eq!(d.source.as_deref(), Some("0020_b.sql"), "{d:?}");
+        for shown in ["position 2", "0020_b.sql", "0020_bee.sql"] {
+            assert!(d.message.contains(shown), "{shown}: {}", d.message);
+        }
+        assert!(d.next_action.contains("0020_b.sql"), "{}", d.next_action);
+    }
+
+    /// #423: the adopted-checkpoint variants name the checkpoint's migrations.
+    #[test]
+    fn adopted_checkpoint_refusals_name_the_covered_migrations() {
+        let (_before, adopted) = named_inputs(&[A, B, C]);
+        let history = ledger(&adopted, 2, 3);
+        // A covered migration changed.
+        let (_after, now) = named_inputs(&[("0010_a.sql", "CREATE TABLE a(id INTEGER); \n"), B, C]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_EDITED");
+        assert_eq!(d.source.as_deref(), Some("0020_b.sql"), "{d:?}");
+        for shown in [
+            "adopted checkpoint",
+            "0010_a.sql",
+            "0020_b.sql",
+            &history.entries[0].checksum,
+        ] {
+            assert!(d.message.contains(shown), "{shown}: {}", d.message);
+        }
+        shows_no_sql(&d);
+        // A migration numbered below the checkpoint's last ID.
+        let (_after, now) =
+            named_inputs(&[A, ("0015_x.sql", "CREATE TABLE x(id INTEGER);\n"), B, C]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+        assert_eq!(d.source.as_deref(), Some("0015_x.sql"), "{d:?}");
+        for shown in [
+            "adopted checkpoint",
+            "0020_b.sql",
+            "0015_x.sql",
+            "position 2",
+        ] {
+            assert!(d.message.contains(shown), "{shown}: {}", d.message);
+        }
+        assert!(d.next_action.contains("above 30"), "{}", d.next_action);
+        // The checkpoint's last migration is missing.
+        let (_after, now) = named_inputs(&[A]);
+        let d = refusal(&ledger(&adopted, 2, 2), &now);
+        assert_eq!(d.code, "DB_HISTORY_MISSING");
+        assert_eq!(d.source.as_deref(), Some("0020_b.sql"), "{d:?}");
+        assert!(
+            d.message.contains("0020_b.sql is missing from migrations/"),
+            "{}",
+            d.message
+        );
+    }
+
+    /// #423: ledger values are shown only in the shape ntnt writes there, so
+    /// a tampered ledger cannot put its text into a report.
+    #[test]
+    fn tampered_ledger_values_are_never_shown() {
+        let (_dir, inputs) = named_inputs(&[A, B]);
+        let mut history = ledger(&inputs, 0, 2);
+        history.entries[1].checksum = "ntnt_private_checksum".into();
+        let d = refusal(&history, &inputs);
+        assert_eq!(d.code, "DB_HISTORY_EDITED");
+        assert!(!format!("{d:?}").contains("ntnt_private"), "{d:?}");
+        history.entries[1].name = "ntnt_private_name".into();
+        history.entries[1].id = "ntnt_private_id".into();
+        let d = refusal(&history, &inputs);
+        assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+        assert!(!format!("{d:?}").contains("ntnt_private"), "{d:?}");
+        let (_dir, fewer) = named_inputs(&[A]);
+        let d = refusal(&history, &fewer);
+        assert_eq!(d.code, "DB_HISTORY_MISSING");
+        assert!(!format!("{d:?}").contains("ntnt_private"), "{d:?}");
     }
 
     #[test]

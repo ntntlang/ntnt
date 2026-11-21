@@ -65,7 +65,9 @@ saved just before `init` replaces the file can be lost, so do not run `init` whi
 `ntnt.toml` is being edited. No local lock helps across branches: two branches
 that each add the next migration still produce two files with the same ID.
 `status` and `plan` reject that history with `DB_DUPLICATE_ID`, naming both files;
-renumbering the migration that has not been applied anywhere fixes it.
+renumbering the migration that has not been applied anywhere fixes it. A merged
+migration numbered below one a target already applied is refused for that target
+with `DB_HISTORY_DIVERGENT`, which names it and the ID to renumber it above.
 
 `new` never changes `ntnt.toml`, but like `init` it opens the file for writing to
 lock it, because NFS grants the lock only through such a handle. A `ntnt.toml` that
@@ -473,6 +475,23 @@ Checksum v1 is lowercase SHA-256 over length-framed byte parts. Each part is pre
 5. exact metadata bytes, or empty bytes when absent
 
 Whitespace, comments, filenames, metadata comments, and even absent versus empty metadata matter. No newline or SQL normalization occurs. Applied ledger entries must be the exact ordered inventory prefix: missing/edited files, inserted historical migrations, reordered IDs and dirty attempts fail before any replay can be mistaken for valid history.
+
+Each of these refusals names the migration in its message and `source`, and its
+`next_action` says how to restore a valid history. `DB_HISTORY_EDITED` names the
+applied migration whose bytes changed, with the checksum the ledger records and the
+checksum its file and sidecar have now (an editor or git `core.autocrlf` that
+changes line endings is a common cause); restore the applied bytes and put the
+change in a new migration. `DB_HISTORY_MISSING` names the applied migration that is
+missing from the migrations directory. `DB_HISTORY_DIVERGENT` names the first
+ledger position whose ID or name differs, with both names. A migration this target
+has not applied that is numbered below the last ID in its ledger, such as one merged
+from another branch, is named with advice to rename it to an unused ID above that
+ID, as for `DB_DUPLICATE_ID`, if no other target has applied it. An adopted
+checkpoint records one checksum for the whole prefix it covers, so its
+`DB_HISTORY_EDITED` names that range of migrations rather than one file. Checksums
+are shown, file contents never; a value read from the ledger is shown only when it
+has the shape NTNT writes there (a migration file name, a decimal ID, a SHA-256
+digest).
 
 Capture is bounded to 1 MiB per input (including a saved review artifact), 16 MiB of migration files, and 1,024 migrations. On PostgreSQL, each replayed step still inspects the whole scratch catalog (#421), so a history that adds a table per migration stays within `plan`'s 120-second deadline up to about 900 migrations, and its first `migrate` from an empty database within the work deadline up to about 600. A history that changes a stable set of tables goes further. For PostgreSQL, a script may have up to 262,144 tokens; each statement is parsed separately, up to 4,096 tokens and recursion depth 64. A larger statement is reported as `SQL_NOT_PARSED` but still replays. SQLite scripts are parsed whole, up to 4,096 tokens (including whitespace tokens) and recursion depth 64; oversized SQLite SQL is unknown, not automatically safe. Source files and manifest policy are captured once, then replay consumes those captured bytes even if their paths are subsequently replaced. A new command recaptures current inputs and invalidates an old binding if they changed.
 
