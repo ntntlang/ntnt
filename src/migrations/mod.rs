@@ -30,6 +30,15 @@ pub struct Diagnostic {
     pub next_action: String,
 }
 
+/// A migration with no statements yet (#428): only comments, whitespace or
+/// semicolons, such as the file `ntnt db new` creates.
+pub(super) fn empty_migration() -> Diagnostic {
+    Diagnostic::new(
+        "DB_MIGRATION_EMPTY",
+        "Migration has no SQL statements yet; it holds only comments or whitespace.",
+    )
+}
+
 impl Diagnostic {
     pub(crate) fn new(code: &str, message: &str) -> Self {
         let next_action = match code {
@@ -54,6 +63,7 @@ impl Diagnostic {
             "DB_RECONCILE_INCOMPLETE" => "The planned invalid index was dropped, so the database has changed, but the result did not match the plan's state before the migration and the attempt was kept. Inspect drift with an operator, then reconcile again.",
             "DB_RECONCILE_MISMATCH" => "The database does not match either outcome the plan predicts for this attempt. Nothing was changed. Inspect the named object with an operator; never edit the ledger to force a state.",
             "DB_REBUILD_REQUIRED" => "Rebuild the named table with a `sqlite_rebuild = \"<table>\"` sidecar (docs/DATABASE_MIGRATIONS.md, SQLite table rebuilds), which runs the migration with foreign-key actions off and checks the rebuilt table, or remove those foreign keys in an earlier migration. Nothing ran.",
+            "DB_MIGRATION_EMPTY" => "Write the migration's SQL below its header comment, or delete the file if it is not needed yet. Nothing was run.",
             "DB_LOCK_CONFLICT" => "Another session held a conflicting lock; nothing was committed for this migration. Retry the same reviewed plan when application or migrator load allows.",
             "DB_TIMEOUT" => "Check endpoint availability and conflicting locks. Preserve committed progress; reconcile unknown migration outcomes with the same reviewed plan before any further SQL.",
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",

@@ -832,6 +832,11 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         let script = concurrent
             .as_ref()
             .map_or(migration.sql.as_str(), |c| c.replay_sql.as_str());
+        if super::analysis::is_empty(&migration.sql, "postgresql") {
+            let mut d = super::empty_migration();
+            d.source = Some(migration.name.clone());
+            return Err(d);
+        }
         if !super::analysis::analyze(&migration.sql, schema).replay_supported {
             let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.");
             d.source = Some(migration.name.clone());

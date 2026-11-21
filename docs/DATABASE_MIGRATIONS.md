@@ -106,7 +106,7 @@ disposable = true
 [secrets.APP_MIGRATION_APPROVAL]
 ```
 
-Write the first migration below the comment header of the file `ntnt db new initial` created:
+Write the first migration below the comment header of the file `ntnt db new initial` created. Until it holds a statement, `plan` refuses the file with `DB_MIGRATION_EMPTY`:
 
 ```sql
 -- migrations/0001_initial.sql

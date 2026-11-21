@@ -242,6 +242,38 @@ fn wrong_target(create: fn() -> Fixture) {
     assert_eq!(b.command("status", &[])["history"]["applied_count"], 0);
 }
 
+/// #428: a migration with no statements, such as the header `ntnt db new`
+/// writes or a file of comments and semicolons, is refused as empty and named,
+/// instead of as SQL outside the supported subset.
+fn empty_migration(f: Fixture) {
+    for sql in [
+        "-- 0001_initial.sql: database \"app\" (sqlite).\n-- Write the SQL below. Once this migration has been applied anywhere,\n-- never edit or renumber it; add a new migration instead.\n",
+        "/* nothing yet; */ ;\n\n-- SELECT 1;\n;",
+    ] {
+        f.sql("0001_initial.sql", sql);
+        let r = f.command("plan", &[]);
+        assert_ne!(r["outcome"], "pass", "{r}");
+        assert!(!code(&r, "DB_REPLAY_UNSUPPORTED"), "{r}");
+        let d = r["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["code"] == "DB_MIGRATION_EMPTY")
+            .unwrap_or_else(|| panic!("no DB_MIGRATION_EMPTY in {r}"));
+        assert_eq!(d["source"], "0001_initial.sql", "{d}");
+    }
+}
+
+#[test]
+fn sqlite_empty_migration() {
+    empty_migration(Fixture::sqlite());
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_empty_migration() {
+    empty_migration(Fixture::pg());
+}
+
 #[test]
 fn sqlite_prefix_recovery() {
     prefix_recovery(Fixture::sqlite())

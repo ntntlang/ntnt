@@ -1102,6 +1102,9 @@ impl Sqlite {
                     "SQLite execution requires an owned write transaction.",
                 ));
             }
+            if super::analysis::is_empty(&migration.sql, "sqlite") {
+                return Err(super::empty_migration());
+            }
             if !super::analysis::analyze_for("sqlite", &migration.sql, "main").replay_supported {
                 return Err(Diagnostic::new(
                     "DB_REPLAY_UNSUPPORTED",

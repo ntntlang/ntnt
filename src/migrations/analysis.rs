@@ -72,6 +72,23 @@ pub(crate) struct LockWarning {
     pub code: &'static str,
     pub message: &'static str,
 }
+/// Whether `sql` holds no statement at all: only whitespace, comments and
+/// semicolons, such as the header `ntnt db new` writes (#428). Input that does
+/// not tokenize is not empty; the other checks report it.
+pub(crate) fn is_empty(sql: &str, engine: &str) -> bool {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let tokens = if engine == "sqlite" {
+        Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql).tokenize()
+    } else {
+        Tokenizer::new(&PostgreSqlDialect {}, sql).tokenize()
+    };
+    tokens.is_ok_and(|tokens| {
+        tokens
+            .iter()
+            .all(|token| matches!(token, Token::Whitespace(_) | Token::SemiColon | Token::EOF))
+    })
+}
+
 /// Parse PostgreSQL syntax within fixed token and recursion bounds.
 /// Invalid, empty or unsupported input is not evidence that replay would be safe.
 fn parse(sql: &str) -> Option<Vec<Statement>> {
@@ -1553,5 +1570,30 @@ mod tests {
             assert!(!analyze(sql, "app").replay_supported, "{sql}");
         }
         assert!(!analyze("CREATE INDEX t_id ON app.t(id)", "app").non_transactional);
+    }
+
+    #[test]
+    fn a_migration_of_comments_and_semicolons_is_empty() {
+        for engine in ["sqlite", "postgresql"] {
+            for sql in [
+                "",
+                "  \n\t",
+                "-- only a comment\n",
+                "/* block */ ; ;",
+                "-- a\n/* b; c */\n;",
+            ] {
+                assert!(is_empty(sql, engine), "{engine}: {sql:?}");
+            }
+            for sql in [
+                "SELECT 1",
+                "-- comment\nCREATE TABLE t(id integer);",
+                "SELECT '--';",
+                "x",
+            ] {
+                assert!(!is_empty(sql, engine), "{engine}: {sql:?}");
+            }
+            // Input that does not tokenize is left to the other checks.
+            assert!(!is_empty("'unterminated", engine));
+        }
     }
 }
