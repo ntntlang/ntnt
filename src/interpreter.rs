@@ -22,6 +22,7 @@ use std::rc::Rc;
 
 mod cycles;
 pub use cycles::Closure;
+mod error_trace;
 #[cfg(test)]
 mod worker_failure_tests;
 
@@ -421,6 +422,10 @@ pub struct Environment {
     values: HashMap<String, Value>,
     mutable_vars: std::collections::HashSet<String>,
     parent: Option<Rc<RefCell<Environment>>>,
+    /// Source file of a module scope, set once by the file loader that
+    /// creates it (`module_scope`); `None` for every other scope. Read only
+    /// to name the file of a runtime error's line (#412).
+    origin: Option<error_trace::SourceOrigin>,
 }
 
 impl Environment {
@@ -434,6 +439,16 @@ impl Environment {
             values: HashMap::new(),
             mutable_vars: std::collections::HashSet::new(),
             parent: None,
+            origin: None,
+        }
+    }
+
+    /// The top-level scope of one source file, evaluated on its own: the
+    /// functions defined in it report runtime errors against `file`.
+    pub(crate) fn module_scope(file: &std::path::Path) -> Self {
+        Environment {
+            origin: Some(Rc::new(file.to_path_buf())),
+            ..Environment::new()
         }
     }
 
@@ -442,6 +457,7 @@ impl Environment {
             values: HashMap::new(),
             mutable_vars: std::collections::HashSet::new(),
             parent: Some(parent),
+            origin: None,
         }
     }
 
@@ -453,6 +469,23 @@ impl Environment {
             values,
             mutable_vars: std::collections::HashSet::new(),
             parent: Some(parent),
+            origin: None,
+        }
+    }
+
+    /// Source file of the module scope `env` belongs to: the nearest
+    /// enclosing scope created by `module_scope`. Only error paths walk this.
+    fn source_origin(env: &Rc<RefCell<Environment>>) -> Option<error_trace::SourceOrigin> {
+        let mut scope = Rc::clone(env);
+        loop {
+            let parent = {
+                let borrowed = scope.try_borrow().ok()?;
+                if let Some(origin) = &borrowed.origin {
+                    return Some(Rc::clone(origin));
+                }
+                borrowed.parent.clone()?
+            };
+            scope = parent;
         }
     }
 
@@ -1284,6 +1317,9 @@ pub struct Interpreter {
     current_line: usize,
     /// Last known source column being executed (for runtime error reporting)
     current_col: usize,
+    /// Files and call sites of the runtime error that is unwinding. Written
+    /// on error paths only, and separate from `current_file` (#412).
+    error_trace: error_trace::ErrorTrace,
     /// Current function call depth (for recursion limit)
     call_depth: usize,
     /// Maximum allowed recursion depth
@@ -1568,6 +1604,7 @@ impl Interpreter {
             external_template_cache: HashMap::new(),
             current_line: 0,
             current_col: 0,
+            error_trace: error_trace::ErrorTrace::default(),
             call_depth: 0,
             suppress_index_warn: std::cell::Cell::new(false),
             worker_count_override: None,
@@ -5477,12 +5514,14 @@ impl Interpreter {
                 ))
             })?;
 
-        let parsed_source = source_file.parse()?;
+        let parsed_source = source_file
+            .parse()
+            .inspect_err(|error| self.trace_parse_error(error, source_file.path()))?;
         // Create a new environment for the module
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
 
-        self.environment = Environment::shared(Environment::new());
+        self.environment = Environment::shared(Environment::module_scope(source_file.path()));
         self.current_file = Some(source_key.clone());
 
         // Define builtins and types in the module environment
@@ -5741,12 +5780,14 @@ impl Interpreter {
                 ))
             })?;
 
-        let parsed_source = source_file.parse()?;
+        let parsed_source = source_file
+            .parse()
+            .inspect_err(|error| self.trace_parse_error(error, source_file.path()))?;
         // Create a fresh environment for the module
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
 
-        self.environment = Environment::shared(Environment::new());
+        self.environment = Environment::shared(Environment::module_scope(source_file.path()));
         self.current_file = Some(canonical_path.to_string_lossy().to_string());
 
         // Re-define builtins, types, and stdlib in the new environment
@@ -5862,7 +5903,9 @@ impl Interpreter {
             IntentError::runtime_error(format!("Failed to read '{}': {}", file_path.display(), e))
         })?;
 
-        let parsed_source = source_file.parse()?;
+        let parsed_source = source_file
+            .parse()
+            .inspect_err(|error| self.trace_parse_error(error, source_file.path()))?;
         let ast = parsed_source.program();
 
         // Create a fresh environment for the route module
@@ -5870,7 +5913,7 @@ impl Interpreter {
         let previous_file = self.current_file.clone();
         let previous_imports = std::mem::take(&mut self.imported_files);
 
-        self.environment = Environment::shared(Environment::new());
+        self.environment = Environment::shared(Environment::module_scope(source_file.path()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
         self.define_route_globals();
@@ -5959,7 +6002,9 @@ impl Interpreter {
             IntentError::runtime_error(format!("Failed to read '{}': {}", file_path, e))
         })?;
 
-        let parsed_source = source_file.parse()?;
+        let parsed_source = source_file
+            .parse()
+            .inspect_err(|error| self.trace_parse_error(error, source_file.path()))?;
         let ast = parsed_source.program();
 
         // Create a fresh environment and save import state
@@ -5967,7 +6012,7 @@ impl Interpreter {
         let previous_file = self.current_file.clone();
         let previous_imports = std::mem::take(&mut self.imported_files);
 
-        self.environment = Environment::shared(Environment::new());
+        self.environment = Environment::shared(Environment::module_scope(source_file.path()));
         self.current_file = Some(file_path.to_string());
 
         // The same globals as the first load, prelude included (#357).
@@ -6118,6 +6163,68 @@ impl Interpreter {
     fn eval_file_source(&mut self, source: &crate::source::ParsedSource<'_>) -> Result<Value> {
         self.loaded_sources.record(source);
         self.eval_program(source.program())
+            .inspect_err(|error| self.trace_file_exit(error, source.file().path()))
+    }
+
+    /// Where `error` was raised and the call sites that led there, across
+    /// files, as recorded while it unwound out of this interpreter. `None`
+    /// when no record matches `error` (for example an error that never
+    /// reached a source line). Diagnostic only: hosts use it to show the
+    /// right file and source line for an error raised in an imported module.
+    pub fn error_origin(&self, error: &IntentError) -> Option<crate::error::ErrorOrigin> {
+        self.error_trace.origin(error)
+    }
+
+    /// Error path of a `Located` statement on `line`: a line-less error takes
+    /// this line (unchanged behaviour) and starts its trace; a located one
+    /// may be leaving the call site of the frame it came from.
+    fn error_left_statement(&mut self, error: IntentError, line: usize) -> IntentError {
+        if error.line().is_some() {
+            self.error_trace.left_statement(&error, line);
+            error
+        } else {
+            let error = error.at_line(line);
+            self.error_trace.located(&error);
+            error
+        }
+    }
+
+    /// Error path of a user-function call, before the caller's scope is put
+    /// back: the callee's lines belong to the module scope it was defined in.
+    fn trace_function_exit(&mut self, error: &IntentError) {
+        if error.line().is_some() {
+            let file = Environment::source_origin(&self.environment);
+            self.error_trace
+                .left_frame(error, crate::error::OriginStep::Call, file);
+        }
+    }
+
+    /// Error path of evaluating (or parsing) the source file `path`.
+    fn trace_file_exit(&mut self, error: &IntentError, path: &std::path::Path) {
+        if error.line().is_some() {
+            self.error_trace.left_frame(
+                error,
+                crate::error::OriginStep::Import,
+                Some(Rc::new(path.to_path_buf())),
+            );
+        }
+    }
+
+    /// A file failed to parse: its error is new and its line is in `path`.
+    fn trace_parse_error(&mut self, error: &IntentError, path: &std::path::Path) {
+        self.error_trace.clear();
+        self.trace_file_exit(error, path);
+    }
+
+    /// Run deferred expressions newest first, ignoring their results. They
+    /// may run while an error unwinds; an error one of them raises is
+    /// dropped and must not replace the unwinding error's trace.
+    fn run_deferred_expressions(&mut self, pending: Vec<Expression>) {
+        let unwinding = std::mem::take(&mut self.error_trace);
+        for deferred_expr in pending.into_iter().rev() {
+            let _ = self.eval_expression(&deferred_expr);
+        }
+        self.error_trace = unwinding;
     }
 
     /// Evaluate a source-less AST. Setting a filename independently does not
@@ -6148,14 +6255,9 @@ impl Interpreter {
             Statement::Located { line, col, stmt } => {
                 self.current_line = *line;
                 self.current_col = *col;
-                self.eval_statement(stmt).map_err(|e| {
-                    // Annotate errors with line info if they don't already have it
-                    if e.line().is_none() {
-                        e.at_line(*line)
-                    } else {
-                        e
-                    }
-                })
+                // Annotate errors with line info if they don't already have it
+                self.eval_statement(stmt)
+                    .map_err(|e| self.error_left_statement(e, *line))
             }
             Statement::Let {
                 name,
@@ -6838,13 +6940,8 @@ impl Interpreter {
             Statement::Located { line, col, stmt } => {
                 self.current_line = *line;
                 self.current_col = *col;
-                self.eval_statement_for_control(stmt).map_err(|e| {
-                    if e.line().is_none() {
-                        e.at_line(*line)
-                    } else {
-                        e
-                    }
-                })
+                self.eval_statement_for_control(stmt)
+                    .map_err(|e| self.error_left_statement(e, *line))
             }
             Statement::Expression(expr) => {
                 if self.try_eval_array_self_append_statement(expr)?
@@ -7132,8 +7229,8 @@ impl Interpreter {
             .deferred_statements
             .drain(deferred_count_before..)
             .collect();
-        for deferred_expr in deferred_to_run.into_iter().rev() {
-            let _ = self.eval_expression(&deferred_expr);
+        if !deferred_to_run.is_empty() {
+            self.run_deferred_expressions(deferred_to_run);
         }
 
         cycles::retire(std::mem::replace(&mut self.environment, previous));
@@ -7184,6 +7281,7 @@ impl Interpreter {
                 let condition_str = Self::format_expression(&clause.expression);
                 let check = self.eval_expression(&clause.expression)?;
                 if !check.is_truthy() {
+                    self.error_trace.clear();
                     return Err(IntentError::ContractViolation {
                         message: format!(
                             "Precondition failed in '{}': {}",
@@ -7227,8 +7325,8 @@ impl Interpreter {
             .deferred_statements
             .drain(deferred_count_before..)
             .collect();
-        for deferred_expr in deferred_to_run.into_iter().rev() {
-            let _ = self.eval_expression(&deferred_expr);
+        if !deferred_to_run.is_empty() {
+            self.run_deferred_expressions(deferred_to_run);
         }
 
         if let Some(e) = body_error {
@@ -7247,6 +7345,7 @@ impl Interpreter {
                 let condition_str = Self::format_expression(&clause.expression);
                 let check = self.eval_expression(&clause.expression)?;
                 if !check.is_truthy() {
+                    self.error_trace.clear();
                     return Err(IntentError::ContractViolation {
                         message: format!(
                             "Postcondition failed in '{}': {}",
@@ -8242,11 +8341,13 @@ impl Interpreter {
                         ),
                     };
 
+                    // Line 0: the enclosing statement supplies it. `current_line`
+                    // can still be the last line a call just ran in another file.
                     Err(IntentError::UndefinedFunction {
                         name: method.clone(),
                         suggestion,
                         hint: Some(hint),
-                        line: self.current_line,
+                        line: 0,
                     })
                 }
             }
@@ -10005,6 +10106,9 @@ impl Interpreter {
             args,
             deferred_base,
         );
+        if let Err(error) = &outcome {
+            self.trace_function_exit(error);
+        }
 
         // Final cleanup: anything registered after the body cleanup (for
         // example by a failing ensures clause), still in the callee frame.
@@ -10067,6 +10171,8 @@ impl Interpreter {
                     // Read parameter values while the callee scope is still
                     // installed; the caller's scope comes back afterwards.
                     let values = self.collect_clause_values(&clause.expression);
+                    // Raised with its line set: no older error's trace may match it.
+                    self.error_trace.clear();
                     return Err(IntentError::ContractViolation {
                         message: format!("Precondition failed in '{}': {}", name, condition_str),
                         line: clause.line,
@@ -10120,6 +10226,7 @@ impl Interpreter {
                     // `result` and the parameters live in the callee scope,
                     // which is still installed here.
                     let values = self.collect_clause_values(&clause.expression);
+                    self.error_trace.clear();
                     return Err(IntentError::ContractViolation {
                         message: format!("Postcondition failed in '{}': {}", name, condition_str),
                         line: clause.line,
@@ -10145,9 +10252,7 @@ impl Interpreter {
             return;
         }
         let pending = self.deferred_statements.split_off(base);
-        for deferred_expr in pending.into_iter().rev() {
-            let _ = self.eval_expression(&deferred_expr);
-        }
+        self.run_deferred_expressions(pending);
     }
 
     /// Run the HTTP server on the specified port
