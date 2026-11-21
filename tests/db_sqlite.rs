@@ -1605,9 +1605,10 @@ fn sqlite_drops_that_run_no_on_delete_actions_stay_allowed() {
 /// (`statement_seconds`, 90 seconds by default) instead of a fixed 5 seconds.
 /// The plan binds a declared limit; a statement past it fails with
 /// DB_STATEMENT_LIMIT naming it, nothing from that migration is committed, and
-/// a changed limit makes the plan stale. The statement is a cross join of
-/// 2.7 * 10^13 rows on the target's data (instant on the empty scratch), so it
-/// always reaches the limit.
+/// a changed limit makes the plan stale. The migration's second statement is a
+/// cross join of 2.7 * 10^13 rows on the target's data (instant on the empty
+/// scratch), so it always reaches the limit; the row its first statement
+/// wrote is rolled back with it.
 #[test]
 fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
     let f = Fixture::new();
@@ -1636,7 +1637,7 @@ fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
     .unwrap();
     f.sql(
         "0002_count.sql",
-        "INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3;",
+        "INSERT INTO b VALUES (0); INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3;",
     );
     let plan = f.plan("limit.json");
     assert_eq!(
@@ -1653,7 +1654,7 @@ fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
     let d = diagnostic(&r, "DB_STATEMENT_LIMIT");
     let message = d["message"].as_str().unwrap();
     assert!(
-        message.starts_with("Statement 1 did not finish within the 2-second statement limit"),
+        message.starts_with("Statement 2 did not finish within the 2-second statement limit"),
         "{message}"
     );
     assert_eq!(d["source"], "0002_count.sql", "{d}");
