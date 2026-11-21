@@ -874,7 +874,15 @@ fn new_locks_a_read_only_manifest() {
     read_only.set_readonly(true);
     std::fs::set_permissions(&path, read_only).unwrap();
     let before = std::fs::read(&path).unwrap();
-    let holder = std::fs::File::open(&path).unwrap();
+    // Opened the way `new` opens it (input_file::open_replaceable): for writing
+    // when the process may (root may, despite the mode), read-only otherwise.
+    // The lock the holder gets is then the one `new` would get.
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .or_else(|_| std::fs::File::open(&path))
+        .unwrap();
     match holder.try_lock() {
         Ok(()) => {}
         // NFS refuses an exclusive lock on a read-only handle. `new` cannot
