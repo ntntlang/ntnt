@@ -808,7 +808,9 @@ mod tests {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("deep.sqlite");
+        // SQLite targets must not sit under a symlink; macOS temp dirs do
+        // (/var is a link to /private/var).
+        let path = dir.path().canonicalize().unwrap().join("deep.sqlite");
         let mut sql = String::from("BEGIN; CREATE TABLE t1(v INTEGER);");
         for i in 2..=1002 {
             let p = i - 1;
