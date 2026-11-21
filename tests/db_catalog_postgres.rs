@@ -1160,3 +1160,35 @@ fn single_schema_catalog_fingerprints_are_unchanged() {
         r["target"]
     );
 }
+
+/// #434: a policy whose expression calls a routine outside pg_catalog and the
+/// managed scope depends on code `ntnt db` does not inspect, so it is
+/// uncovered. The coverage query compared the policy's dependency with the
+/// routine's own OID (the inner alias shadowed the policy's), so every policy
+/// read as covered.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_policy_calling_a_routine_outside_the_scope_is_uncovered() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_rls.sql",
+        "CREATE TABLE app.t(id int PRIMARY KEY); ALTER TABLE app.t ENABLE ROW LEVEL SECURITY; \
+         CREATE POLICY t_read ON app.t USING (information_schema._pg_numeric_precision(23, -1) IS NOT NULL);",
+    );
+    let r = f.command("plan");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_COVERAGE_INCOMPLETE")
+        .unwrap_or_else(|| panic!("no DB_COVERAGE_INCOMPLETE in {r}"));
+    assert!(
+        d["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o.as_str().unwrap().contains("t_read")),
+        "{d}"
+    );
+}

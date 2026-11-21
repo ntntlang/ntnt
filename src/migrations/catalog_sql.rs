@@ -143,11 +143,11 @@ JOIN pg_catalog.pg_proc tp ON tp.oid=t.tgfoid JOIN pg_catalog.pg_namespace pn ON
     (
         "policy",
         r#"
-SELECT quote_ident(c.relname)||'.'||quote_ident(p.polname),jsonb_build_object('command',p.polcmd,'permissive',p.polpermissive,'using',pg_get_expr(p.polqual,p.polrelid),'check',pg_get_expr(p.polwithcheck,p.polrelid),
- 'roles',(SELECT jsonb_agg(CASE WHEN x=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x) END ORDER BY x) FROM unnest(p.polroles) x)),
- NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend dep JOIN pg_catalog.pg_proc p ON p.oid=dep.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace WHERE dep.classid='pg_catalog.pg_policy'::regclass AND dep.objid=p.oid AND dep.refclassid='pg_catalog.pg_proc'::regclass AND pn.nspname<>'pg_catalog' AND pn.nspname<>ALL($2)),
+SELECT quote_ident(c.relname)||'.'||quote_ident(pol.polname),jsonb_build_object('command',pol.polcmd,'permissive',pol.polpermissive,'using',pg_get_expr(pol.polqual,pol.polrelid),'check',pg_get_expr(pol.polwithcheck,pol.polrelid),
+ 'roles',(SELECT jsonb_agg(CASE WHEN x=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x) END ORDER BY x) FROM unnest(pol.polroles) x)),
+ NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend dep JOIN pg_catalog.pg_proc p ON p.oid=dep.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace WHERE dep.classid='pg_catalog.pg_policy'::regclass AND dep.objid=pol.oid AND dep.refclassid='pg_catalog.pg_proc'::regclass AND pn.nspname<>'pg_catalog' AND pn.nspname<>ALL($2)),
  CASE WHEN n.nspname<>$1 THEN quote_ident(n.nspname) END
-FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid=p.polrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY($2) ORDER BY c.relname,p.polname LIMIT 10001
+FROM pg_catalog.pg_policy pol JOIN pg_catalog.pg_class c ON c.oid=pol.polrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY($2) ORDER BY c.relname,pol.polname LIMIT 10001
 "#,
     ),
     (
