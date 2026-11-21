@@ -289,7 +289,7 @@ async fn inspect_observed(
         return Ok(report);
     }
     if !catalog.uncovered.is_empty() {
-        diagnostic(&mut report,Diagnostic::new("DB_COVERAGE_INCOMPLETE","Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted."));
+        diagnostic(&mut report,Diagnostic::new("DB_COVERAGE_INCOMPLETE","Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted.").with_objects(&catalog.uncovered));
     }
     let mut expected = None;
     let mut candidate = None;
@@ -352,10 +352,15 @@ async fn inspect_observed(
                         .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
                         .await?;
                     if !step.uncovered.is_empty() {
-                        return Err(Diagnostic::new(
+                        // The target's catalog.uncovered cannot name these:
+                        // they exist only in the replayed intermediate catalog.
+                        let mut d = Diagnostic::new(
                             "DB_COVERAGE_INCOMPLETE",
                             "Intermediate catalog exceeds execution coverage.",
-                        ));
+                        )
+                        .with_objects(&step.uncovered);
+                        d.source = Some(migration.name.clone());
+                        return Err(d);
                     }
                     fingerprints.push(json_digest(&step));
                     if index + 1 == reference {

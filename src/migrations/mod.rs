@@ -23,6 +23,10 @@ pub struct Diagnostic {
     pub code: String,
     pub message: String,
     pub source: Option<String>,
+    /// Catalog keys of the objects this diagnostic is about, such as the
+    /// uncovered objects of `DB_COVERAGE_INCOMPLETE`. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<String>,
     pub next_action: String,
 }
 
@@ -35,7 +39,8 @@ impl Diagnostic {
             "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is required by every command except init and new.",
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and other non-transactional statements from migration files. The one supported non-transactional migration is a lone named CREATE INDEX CONCURRENTLY without checks.",
-            "DB_COVERAGE_INCOMPLETE" | "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
+            "DB_COVERAGE_INCOMPLETE" => "Its objects field lists each catalog object outside supported inspection; when replaying a migration produced them, its source field names that migration (the target's own uncovered objects are also in catalog.uncovered). Change or remove those objects to stay within the coverage in docs/DATABASE_MIGRATIONS.md, or obtain manual evidence; do not interpret this result as no drift.",
+            "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
@@ -64,8 +69,14 @@ impl Diagnostic {
             code: code.into(),
             message: message.into(),
             source: None,
+            objects: Vec::new(),
             next_action: next_action.into(),
         }
+    }
+    /// Name the catalog objects (their keys) this diagnostic is about.
+    pub(crate) fn with_objects(mut self, objects: &[String]) -> Self {
+        self.objects = objects.to_vec();
+        self
     }
 }
 impl std::fmt::Display for Diagnostic {
@@ -500,10 +511,14 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             }
         }
         for d in report["diagnostics"].as_array().into_iter().flatten() {
-            println!(
-                "{}: {}\n  Next: {}",
-                d["code"], d["message"], d["next_action"]
-            );
+            println!("{}: {}", d["code"], d["message"]);
+            if !d["source"].is_null() {
+                println!("  Source: {}", d["source"]);
+            }
+            if let Some(objects) = d.get("objects") {
+                println!("  Objects: {objects}");
+            }
+            println!("  Next: {}", d["next_action"]);
         }
         if let Some(r) = report
             .get("reconciliation")
@@ -628,6 +643,16 @@ mod tests {
                 ["left unchanged", "Rerun `ntnt db new`"].as_slice(),
             ),
             ("DB_SCAFFOLD_IO", ["writable", "never truncated"].as_slice()),
+            (
+                "DB_COVERAGE_INCOMPLETE",
+                [
+                    "objects field",
+                    "source field names that migration",
+                    "catalog.uncovered",
+                    "no drift",
+                ]
+                .as_slice(),
+            ),
         ] {
             let action = super::Diagnostic::new(code, "x").next_action;
             assert_ne!(action, generic, "{code} uses the generic next action");

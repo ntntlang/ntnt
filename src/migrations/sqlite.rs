@@ -570,16 +570,24 @@ impl State {
                         .all(|fk| fk[2].as_str().is_some_and(|n| !reserved(n) && !internal(n)));
                 }
                 "index" => {
+                    // A key column is a table column (cid >= 0), the rowid
+                    // (-1) or an expression (-2). Expressions and a partial
+                    // index's WHERE predicate are in the definition hash.
+                    // SQLite resolves them when it loads the schema, without
+                    // the authorizer, so the function allowlist applies when
+                    // a migration's CREATE INDEX compiles; a target index
+                    // that differs from the replayed one is drift. The
+                    // table's DML programs below still compile them.
                     let columns=rows(&self.conn,"SELECT seqno,cid,name,\"desc\",coll,key FROM pragma_index_xinfo(?1,'main') ORDER BY seqno",&[&name])?;
                     supported &= columns.iter().all(|r| {
-                        r[1].as_i64().is_some_and(|v| v >= -1)
+                        r[1].as_i64().is_some_and(|v| v >= -2)
                             && r[4]
                                 .as_str()
                                 .is_none_or(|v| matches!(v, "BINARY" | "NOCASE" | "RTRIM"))
                     });
                     item["columns"] = json!(columns);
                     item["properties"]=json!(rows(&self.conn,"SELECT \"unique\",origin,partial FROM pragma_index_list(?1,'main') WHERE name=?2",&[&table,&name])?);
-                    supported &= item["properties"][0][2] == 0;
+                    supported &= item["properties"].as_array().is_some_and(|p| p.len() == 1);
                 }
                 "view" => programs.push((
                     key.clone(),
@@ -764,7 +772,8 @@ impl RebuildGuard {
             return Err(Diagnostic::new(
                 "DB_COVERAGE_INCOMPLETE",
                 "SQLite rebuild requires complete supported catalog coverage.",
-            ));
+            )
+            .with_objects(&catalog.uncovered));
         }
         let counts = Self::counts(state)?;
         let selected = counts
