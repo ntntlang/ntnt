@@ -527,6 +527,50 @@ fn single_file_error_inside_nested_calls_has_no_call_site_notes() {
 }
 
 #[test]
+fn error_origin_names_the_module_line_and_each_call_site_for_embedders() {
+    use ntnt::error::{IntentError, OriginFrame, OriginStep};
+    let (_root, app) = app();
+    write(&app, "lib/checks.tnt", CHECKS);
+    write(
+        &app,
+        "main.tnt",
+        "import { refuse_startup } from \"./lib/checks\"\nfn start() {\n    refuse_startup()\n}\nstart()\n",
+    );
+    let source = ntnt::source::SourceFile::read(app.join("main.tnt")).unwrap();
+    let parsed = source.parse().unwrap();
+    let mut interpreter = ntnt::interpreter::Interpreter::new();
+    let error = interpreter.eval_source(&parsed).unwrap_err();
+    assert_eq!(error.line(), Some(9));
+    let lib = app.join("lib").join("checks.tnt").canonicalize().unwrap();
+    let main = app.join("main.tnt").canonicalize().unwrap();
+    assert_eq!(
+        interpreter.error_origin(&error).unwrap().frames,
+        vec![
+            OriginFrame {
+                file: Some(lib),
+                line: 9,
+                step: None,
+            },
+            // `start` is defined in the entry file's own scope, which records
+            // no file; its call site is still named.
+            OriginFrame {
+                file: None,
+                line: 3,
+                step: Some(OriginStep::Call),
+            },
+            OriginFrame {
+                file: Some(main),
+                line: 5,
+                step: Some(OriginStep::Call),
+            },
+        ]
+    );
+    // An error with another line is not the one that was recorded.
+    let other = IntentError::runtime_error("startup refused").at_line(5);
+    assert!(interpreter.error_origin(&other).is_none());
+}
+
+#[test]
 fn module_path_follows_the_entry_path_as_typed_from_another_directory() {
     // `./` imports resolve from the importing file, so this runs from a
     // sibling directory with a relative entry path.

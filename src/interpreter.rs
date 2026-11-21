@@ -6167,10 +6167,11 @@ impl Interpreter {
     }
 
     /// Where `error` was raised and the call sites that led there, across
-    /// files, as recorded while it unwound out of this interpreter. `None`
-    /// when no record matches `error` (for example an error that never
-    /// reached a source line). Diagnostic only: hosts use it to show the
-    /// right file and source line for an error raised in an imported module.
+    /// files, as recorded while it unwound out of this interpreter. Only the
+    /// most recent error is kept, matched by its code and line; `None` when
+    /// it does not match `error` or `error` never reached a source line.
+    /// Diagnostic only: hosts use it to show the right file and source line
+    /// for an error raised in an imported module.
     pub fn error_origin(&self, error: &IntentError) -> Option<crate::error::ErrorOrigin> {
         self.error_trace.origin(error)
     }

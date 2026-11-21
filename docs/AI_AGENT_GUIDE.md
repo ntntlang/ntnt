@@ -4065,6 +4065,25 @@ ntnt completions bash|zsh|fish  # Shell completions
 
 NTNT error messages include error codes (E001-E012), source snippets, line numbers, and "did you mean?" suggestions for typos.
 
+An error raised inside an imported module (a function, a closure it returned,
+or its top-level code while it is imported) names that module's file and line
+and shows its source. `note:` lines then list the call sites back to the entry
+file, outermost last:
+
+```text
+error[E005]
+  --> lib/checks.tnt:9
+  = Runtime error: Called unwrap() on Err(startup refused)
+  --> Source context
+   |
+   8 | fn refuse_startup() {
+   9 |     return unwrap(Err("startup refused"))
+     | ^ approximate failing statement (expression span unavailable)
+  10 | }
+   |
+  note: called from main.tnt:3
+```
+
 ### Common Parse Errors
 
 | Error | Cause | Fix |
