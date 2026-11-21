@@ -276,9 +276,12 @@ fn sqlite_expression_indexes_plan_migrate_verify_and_drift() {
 #[test]
 fn sqlite_index_predicates_and_expressions_keep_the_function_allowlist() {
     let f = Fixture::new();
-    for index in [
-        "CREATE INDEX t_marked ON t(x) WHERE instr(x, '@') > 0;",
-        "CREATE INDEX t_hex ON t(hex(x));",
+    for (index, function) in [
+        (
+            "CREATE INDEX t_marked ON t(x) WHERE instr(x, '@') > 0;",
+            "instr",
+        ),
+        ("CREATE INDEX t_hex ON t(hex(x));", "hex"),
     ] {
         f.sql(
             "0001_initial.sql",
@@ -296,9 +299,13 @@ fn sqlite_index_predicates_and_expressions_keep_the_function_allowlist() {
         let diagnostics = r["diagnostics"].as_array().unwrap();
         assert_eq!(diagnostics.len(), 1, "{r}");
         assert_eq!(diagnostics[0]["source"], "0001_initial.sql", "{r}");
-        for code in ["DB_REPLAY_UNSUPPORTED", "DB_COVERAGE_INCOMPLETE"] {
-            assert_ne!(diagnostics[0]["code"], code, "{r}");
-        }
+        // The refusal names the statement and the function (#414).
+        assert_eq!(diagnostics[0]["code"], "DB_SQL_UNSUPPORTED", "{r}");
+        let message = diagnostics[0]["message"].as_str().unwrap();
+        assert!(
+            message.starts_with(&format!("Statement 2 uses SQLite function `{function}`")),
+            "{message}"
+        );
         assert_eq!(schema_objects(&f.target()), 0);
     }
     f.sql("0001_initial.sql", "CREATE TABLE t(id INTEGER PRIMARY KEY, x TEXT); CREATE INDEX t_marked ON t(x) WHERE length(x) > 0; CREATE INDEX t_lower ON t(lower(x));");
