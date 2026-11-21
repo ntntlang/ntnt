@@ -300,16 +300,11 @@ async fn reconcile(
 }
 
 async fn connect(inputs: &CapturedInputs, saved: &Value) -> Result<Adapter> {
-    let secret = crate::stdlib::secrets::require_from_manifest(
-        &inputs.endpoint.connection_secret,
-        &inputs.document,
-    )
-    .map_err(|_| {
-        Diagnostic::new(
-            "DB_SECRET",
-            "Cannot resolve target connection secret; provider details suppressed.",
-        )
-    })?;
+    let name = &inputs.endpoint.connection_secret;
+    let secret =
+        crate::stdlib::secrets::require_from_manifest(name, &inputs.document).map_err(|error| {
+            super::report::unresolved_secret("target", name, &inputs.config.engine, error)
+        })?;
     Adapter::connect(
         &secret,
         &inputs.endpoint,

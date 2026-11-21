@@ -26,6 +26,80 @@ fn record_replay(report: &mut Value, replay: Result<()>, cleanup_failure: Option
 fn diagnostic(report: &mut Value, d: Diagnostic) {
     report["diagnostics"].as_array_mut().unwrap().push(json!(d));
 }
+/// `DB_SECRET` for a connection secret `name` of `role` (target or scratch)
+/// that could not be resolved: names the secret and the cause, never a
+/// value, with advice for that cause (#422).
+pub(super) fn unresolved_secret(
+    role: &str,
+    name: &str,
+    engine: &str,
+    error: crate::stdlib::secrets::ManifestSecretError,
+) -> Diagnostic {
+    use crate::stdlib::secrets::ManifestSecretError::*;
+    let subject = match role {
+        "scratch" => format!("Scratch connection secret {name}"),
+        _ => format!("Target connection secret {name}"),
+    };
+    let value = match (engine, role) {
+        ("sqlite", "scratch") => "the absolute path of a separate, empty scratch file (`touch` one: an empty file is a valid SQLite database)",
+        ("sqlite", _) => "the absolute path of the existing target file, for example \"$(pwd -P)/data/app.sqlite\"",
+        (_, "scratch") => "the scratch database's libpq connection string",
+        _ => "the target database's libpq connection string",
+    };
+    let (message, next_action) = match error {
+        UnsetInEnvironment => (
+            format!("{subject} is unset or empty in the environment (provider env)."),
+            format!("Set the environment variable {name} to {value}, then rerun; the env provider reads exactly that name. See docs/DATABASE_MIGRATIONS.md#quick-start."),
+        ),
+        UnsetInProvider => (
+            format!("{subject} is not set in the unix-socket secrets provider."),
+            format!("Add {name}, holding {value}, to the secrets agent behind NTNT_SECRETS_SOCKET_ENDPOINTS for this deployment's authorization scope, then rerun."),
+        ),
+        Undeclared => (
+            format!("{subject} is not declared under [secrets] in the manifest."),
+            format!("Add a [secrets.{name}] table to the manifest (the name only, never its value), then rerun."),
+        ),
+        InvalidDeclarations => (
+            format!("{subject} cannot be resolved: the manifest's [secrets] declarations are invalid."),
+            "Correct the manifest's [secrets] tables: each [secrets.<NAME>] may hold only label and description (strings), required (true or false) and environments (an array of strings).".to_owned(),
+        ),
+        EnvProviderDisabled => (
+            format!("{subject} cannot be read: the env secrets provider is disabled when NTNT_ENV is production."),
+            "For local development, unset NTNT_ENV or set NTNT_ENV=development. In production, set NTNT_SECRETS_PROVIDER=unix-socket with NTNT_SECRETS_SOCKET_ENDPOINTS and NTNT_SECRETS_AUTHORIZATION_SCOPE.".to_owned(),
+        ),
+        UnsupportedProvider => (
+            format!("{subject} cannot be read: NTNT_SECRETS_PROVIDER names an unsupported provider (supported: env, and unix-socket on Unix)."),
+            "Set NTNT_SECRETS_PROVIDER to env for local development or to unix-socket (on Unix, with NTNT_SECRETS_SOCKET_ENDPOINTS and NTNT_SECRETS_AUTHORIZATION_SCOPE), or unset it to use env.".to_owned(),
+        ),
+        ProviderConfiguration => (
+            format!("{subject} cannot be read: the unix-socket secrets provider's configuration is invalid."),
+            "Correct NTNT_SECRETS_SOCKET_ENDPOINTS (absolute socket paths, beneath /run/ntnt-secrets in production), NTNT_SECRETS_AUTHORIZATION_SCOPE and NTNT_SECRETS_TIMEOUT_MS (10-10000), as std/secrets documents in docs/STDLIB_REFERENCE.md, then rerun.".to_owned(),
+        ),
+        NotUnicode => (
+            format!("{subject} is set in the environment but is not valid Unicode."),
+            format!("Set the environment variable {name} to {value}, as valid Unicode text, then rerun."),
+        ),
+        ProviderUnavailable => (
+            format!("{subject} cannot be read: the secrets provider is unavailable."),
+            "Check that the secrets agent is running and listening on NTNT_SECRETS_SOCKET_ENDPOINTS, then rerun.".to_owned(),
+        ),
+        AccessDenied => (
+            format!("{subject} cannot be read: the secrets provider denied access to it."),
+            format!("Allow this deployment's authorization scope (NTNT_SECRETS_AUTHORIZATION_SCOPE) to read {name} in the secrets agent, then rerun."),
+        ),
+        ProviderRejected => (
+            format!("{subject} cannot be read: the secrets provider rejected the request."),
+            "Check the secrets agent's configuration and its log for the rejected request, then rerun.".to_owned(),
+        ),
+        InvalidName => (
+            format!("{subject} is not a valid secret name."),
+            "Use a secret name matching [A-Za-z_][A-Za-z0-9_.-]* of at most 128 characters.".to_owned(),
+        ),
+    };
+    let mut d = Diagnostic::new("DB_SECRET", &message);
+    d.next_action = next_action;
+    d
+}
 pub(super) fn failure(command: &str, d: Diagnostic) -> Value {
     json!({"format_version":1,"command":command,"observed_at":chrono::Utc::now().to_rfc3339(),
         "outcome":"unknown","diagnostics":[d],"assertions":{"outcome":"not_run","executed":0}})
@@ -264,16 +338,9 @@ pub(super) async fn inspect(
     if let Some(id) = adopt_through {
         super::adoption::Adoption::selected(&inputs, id)?;
     }
-    let secret = crate::stdlib::secrets::require_from_manifest(
-        &inputs.endpoint.connection_secret,
-        &inputs.document,
-    )
-    .map_err(|_| {
-        Diagnostic::new(
-            "DB_SECRET",
-            "Cannot resolve declared target connection secret; provider details suppressed.",
-        )
-    })?;
+    let name = &inputs.endpoint.connection_secret;
+    let secret = crate::stdlib::secrets::require_from_manifest(name, &inputs.document)
+        .map_err(|error| unresolved_secret("target", name, &inputs.config.engine, error))?;
     let target = Adapter::connect(
         &secret,
         &inputs.endpoint,
@@ -388,16 +455,11 @@ async fn inspect_observed(
     if let Some(scratch_config) = &inputs.config.scratch {
         let mut cleanup_failure = None;
         let replay = async {
-            let secret = crate::stdlib::secrets::require_from_manifest(
-                &scratch_config.endpoint.connection_secret,
-                &inputs.document,
-            )
-            .map_err(|_| {
-                Diagnostic::new(
-                    "DB_SECRET",
-                    "Cannot resolve separately declared scratch connection secret.",
-                )
-            })?;
+            let name = &scratch_config.endpoint.connection_secret;
+            let secret = crate::stdlib::secrets::require_from_manifest(name, &inputs.document)
+                .map_err(|error| {
+                    unresolved_secret("scratch", name, &inputs.config.engine, error)
+                })?;
             let scratch = Adapter::connect(
                 &secret,
                 &scratch_config.endpoint,

@@ -225,8 +225,12 @@ ntnt db verify --target development
 ```
 
 A secret without an explicit `sslmode` (or with `sslmode=prefer`, a different user or
-database, or several hosts) fails with `DB_CONNECTION_CONFIG`. An unset or undeclared secret fails with
-`DB_SECRET`. A refused login fails with `DB_POSTGRES` and SQLSTATE `28P01` (wrong
+database, or several hosts) fails with `DB_CONNECTION_CONFIG`. A secret that cannot be resolved fails with
+`DB_SECRET`, which names the secret and whether it is the target's or the scratch's,
+never its value, and says which cause applies, each with its own `next_action`: unset
+or empty in the environment, not declared under `[secrets]`, the env provider disabled
+because `NTNT_ENV` is `production`, an unsupported `NTNT_SECRETS_PROVIDER`, or a
+unix-socket provider that is misconfigured, unavailable or refuses it. A refused login fails with `DB_POSTGRES` and SQLSTATE `28P01` (wrong
 password) or `28000` (for example `peer`): check `pg_hba.conf` and the secret.
 Add `--json` to any command for the machine-readable report. If the
 manifest declares only one database, `--database` is optional; `--target` is

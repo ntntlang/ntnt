@@ -282,6 +282,15 @@ impl ProviderGroup {
     }
 
     fn lookup(&self, name: &str) -> Result<Option<SecretValue>> {
+        self.lookup_classified(name)
+            .map_err(|failure| failure.into_error(name))
+    }
+
+    /// `lookup`, keeping the class of a failure for native consumers.
+    fn lookup_classified(
+        &self,
+        name: &str,
+    ) -> std::result::Result<Option<SecretValue>, LookupFailure> {
         let mut unavailable = Vec::new();
         let mut attempts = 0;
 
@@ -290,7 +299,9 @@ impl ProviderGroup {
                 attempts += 1;
                 match provider.lookup(name) {
                     Ok(ProviderLookup::Found(value)) => {
-                        return SecretValue::new_zeroizing(name, value).map(Some)
+                        return SecretValue::new_zeroizing(name, value)
+                            .map(Some)
+                            .map_err(LookupFailure::Value)
                     }
                     Ok(ProviderLookup::Missing) => return Ok(None),
                     Err(error) => match error.kind {
@@ -303,38 +314,63 @@ impl ProviderGroup {
                             unavailable.push(error.endpoint);
                             break;
                         }
-                        ProviderErrorKind::AccessDenied => {
-                            return Err(IntentError::runtime_error(format!(
-                                "Secret provider access denied for '{name}' at endpoint '{}'",
-                                error.endpoint
-                            )))
-                        }
-                        ProviderErrorKind::InvalidRequest => {
-                            return Err(IntentError::runtime_error(format!(
-                                "Secret provider rejected the request for '{name}' at endpoint '{}'",
-                                error.endpoint
-                            )))
-                        }
-                        ProviderErrorKind::InvalidConfiguration => {
-                            return Err(IntentError::runtime_error(format!(
-                                "Secret provider configuration is invalid for endpoint '{}'",
-                                error.endpoint
-                            )))
-                        }
+                        kind => return Err(LookupFailure::Provider(kind, error.endpoint)),
                     },
                 }
             }
         }
 
-        Err(IntentError::runtime_error(format!(
-            "Secret provider unavailable after {attempts} bounded attempt(s) across {} endpoint(s): {}",
-            unavailable.len(),
-            unavailable
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )))
+        Err(LookupFailure::Unavailable {
+            attempts,
+            endpoints: unavailable,
+        })
+    }
+}
+
+/// Why a provider group returned no value and no `Missing` answer.
+enum LookupFailure {
+    /// A terminal provider error: access denied, invalid request or invalid
+    /// configuration, at that endpoint.
+    Provider(ProviderErrorKind, ProviderEndpointLabel),
+    /// Every endpoint stayed unavailable through its bounded attempts.
+    Unavailable {
+        attempts: usize,
+        endpoints: Vec<ProviderEndpointLabel>,
+    },
+    /// The found value could not become a secret.
+    Value(IntentError),
+}
+
+impl LookupFailure {
+    fn into_error(self, name: &str) -> IntentError {
+        match self {
+            Self::Provider(ProviderErrorKind::AccessDenied, endpoint) => {
+                IntentError::runtime_error(format!(
+                    "Secret provider access denied for '{name}' at endpoint '{endpoint}'"
+                ))
+            }
+            Self::Provider(ProviderErrorKind::InvalidRequest, endpoint) => {
+                IntentError::runtime_error(format!(
+                    "Secret provider rejected the request for '{name}' at endpoint '{endpoint}'"
+                ))
+            }
+            Self::Provider(_, endpoint) => IntentError::runtime_error(format!(
+                "Secret provider configuration is invalid for endpoint '{endpoint}'"
+            )),
+            Self::Unavailable {
+                attempts,
+                endpoints,
+            } => IntentError::runtime_error(format!(
+                "Secret provider unavailable after {attempts} bounded attempt(s) across {} endpoint(s): {}",
+                endpoints.len(),
+                endpoints
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Self::Value(error) => error,
+        }
     }
 }
 
@@ -500,26 +536,62 @@ fn is_production_mode() -> bool {
         .unwrap_or(false)
 }
 
+/// Why the configured secrets provider could not be set up. Displays as the
+/// runtime error `std/secrets` reports; native consumers use the class.
+#[derive(Debug)]
+enum ProviderSetup {
+    /// `env` is selected while `NTNT_ENV` is production.
+    EnvDisabledInProduction,
+    /// `NTNT_SECRETS_PROVIDER` names no provider this platform supports.
+    Unsupported(IntentError),
+    /// The selected provider's own configuration is invalid.
+    Configuration(IntentError),
+}
+
+// An explicit conversion, not `From`: a second `From` impl for IntentError
+// would leave `?` in closures elsewhere without an inferable error type.
+impl ProviderSetup {
+    fn into_error(self) -> IntentError {
+        match self {
+            Self::EnvDisabledInProduction => IntentError::runtime_error(
+                "The environment secrets provider is development-only and is disabled in production"
+                    .to_string(),
+            ),
+            Self::Unsupported(error) | Self::Configuration(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for ProviderSetup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EnvDisabledInProduction => {
+                Self::EnvDisabledInProduction.into_error().fmt(formatter)
+            }
+            Self::Unsupported(error) | Self::Configuration(error) => error.fmt(formatter),
+        }
+    }
+}
+
 fn configured_provider_group_from_values(
     provider: &str,
     socket_endpoints: Option<&str>,
     authorization_scope: Option<&str>,
     timeout_ms: Option<&str>,
     production: bool,
-) -> Result<ProviderGroup> {
+) -> std::result::Result<ProviderGroup, ProviderSetup> {
     match provider {
-        "env" if production => Err(IntentError::runtime_error(
-            "The environment secrets provider is development-only and is disabled in production"
-                .to_string(),
-        )),
-        "env" => ProviderGroup::new(vec![Arc::new(EnvSecretProvider)]),
+        "env" if production => Err(ProviderSetup::EnvDisabledInProduction),
+        "env" => ProviderGroup::new(vec![Arc::new(EnvSecretProvider)])
+            .map_err(ProviderSetup::Configuration),
         "unix-socket" => {
             let config = parse_socket_provider_config(
                 socket_endpoints,
                 authorization_scope,
                 timeout_ms,
                 production,
-            )?;
+            )
+            .map_err(ProviderSetup::Configuration)?;
             #[cfg(unix)]
             {
                 let providers = config
@@ -547,26 +619,31 @@ fn configured_provider_group_from_values(
                         Arc::new(provider) as Arc<dyn SecretProvider>
                     })
                     .collect();
-                ProviderGroup::new(providers)
+                ProviderGroup::new(providers).map_err(ProviderSetup::Configuration)
             }
             #[cfg(not(unix))]
             {
                 let _ = config;
-                Err(IntentError::runtime_error(
+                Err(ProviderSetup::Unsupported(IntentError::runtime_error(
                     "The Unix-socket secrets provider is supported only on Unix platforms"
                         .to_string(),
-                ))
+                )))
             }
         }
-        _ => Err(IntentError::runtime_error(
+        _ => Err(ProviderSetup::Unsupported(IntentError::runtime_error(
             "Unsupported secrets provider; supported providers are 'env' and 'unix-socket'"
                 .to_string(),
-        )),
+        ))),
     }
 }
 
-fn configured_provider_group() -> Result<ProviderGroup> {
-    let provider = std::env::var(PROVIDER_ENV).unwrap_or_else(|_| "env".to_string());
+/// The selected provider: `NTNT_SECRETS_PROVIDER`, `env` when it is unset.
+fn configured_provider_name() -> String {
+    std::env::var(PROVIDER_ENV).unwrap_or_else(|_| "env".to_string())
+}
+
+fn configured_provider_group() -> std::result::Result<ProviderGroup, ProviderSetup> {
+    let provider = configured_provider_name();
     let socket_endpoints = std::env::var(SOCKET_ENDPOINTS_ENV).ok();
     let authorization_scope = std::env::var(SOCKET_SCOPE_ENV).ok();
     let timeout_ms = std::env::var(SOCKET_TIMEOUT_ENV).ok();
@@ -579,21 +656,68 @@ fn configured_provider_group() -> Result<ProviderGroup> {
     )
 }
 
+/// Why `require_from_manifest` could not resolve a secret. No class carries
+/// a value, so a native consumer can report it with the secret's name (#422).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManifestSecretError {
+    /// The name is not a valid secret name.
+    InvalidName,
+    /// The captured manifest does not declare the name under `[secrets]`.
+    Undeclared,
+    /// The captured manifest's `[secrets]` declarations are invalid.
+    InvalidDeclarations,
+    /// `env` is selected while `NTNT_ENV` is production.
+    EnvProviderDisabled,
+    /// `NTNT_SECRETS_PROVIDER` names no provider this platform supports.
+    UnsupportedProvider,
+    /// The unix-socket provider's configuration is invalid.
+    ProviderConfiguration,
+    /// The env provider has no value: the variable is unset or empty.
+    UnsetInEnvironment,
+    /// The variable is set but is not valid Unicode.
+    NotUnicode,
+    /// The unix-socket provider has no value for the name.
+    UnsetInProvider,
+    /// The provider stayed unavailable through its bounded attempts.
+    ProviderUnavailable,
+    /// The provider denied access to the name.
+    AccessDenied,
+    /// The provider rejected the request or reported invalid configuration.
+    ProviderRejected,
+}
+
 /// Native consumers with a captured manifest must not reopen source policy or
-/// reconfigure the interpreter's process-global application identity.
-pub(crate) fn require_from_manifest(name: &str, document: &toml::Value) -> Result<SecretValue> {
-    validate_secret_name(name)?;
+/// reconfigure the interpreter's process-global application identity. A
+/// failure is classified without any value.
+pub(crate) fn require_from_manifest(
+    name: &str,
+    document: &toml::Value,
+) -> std::result::Result<SecretValue, ManifestSecretError> {
+    use ManifestSecretError::*;
+    validate_secret_name(name).map_err(|_| InvalidName)?;
     match declarations_from_document(document) {
         SecretDeclarations::Loaded(names) if names.contains(name) => (),
-        _ => {
-            return Err(IntentError::runtime_error(
-                "Secret is not declared in the captured manifest".to_string(),
-            ))
-        }
+        SecretDeclarations::Loaded(_) => return Err(Undeclared),
+        _ => return Err(InvalidDeclarations),
     }
-    configured_provider_group()?
-        .lookup(name)?
-        .ok_or_else(|| IntentError::runtime_error("Required secret is not configured".to_string()))
+    let env = configured_provider_name() == "env";
+    let group = configured_provider_group().map_err(|setup| match setup {
+        ProviderSetup::EnvDisabledInProduction => EnvProviderDisabled,
+        ProviderSetup::Unsupported(_) => UnsupportedProvider,
+        ProviderSetup::Configuration(_) => ProviderConfiguration,
+    })?;
+    match group.lookup_classified(name) {
+        Ok(Some(secret)) => Ok(secret),
+        Ok(None) if env => Err(UnsetInEnvironment),
+        Ok(None) => Err(UnsetInProvider),
+        Err(LookupFailure::Provider(ProviderErrorKind::AccessDenied, _)) => Err(AccessDenied),
+        // The env provider reports a value that is not Unicode this way.
+        Err(LookupFailure::Provider(ProviderErrorKind::InvalidConfiguration, _)) if env => {
+            Err(NotUnicode)
+        }
+        Err(LookupFailure::Provider(..) | LookupFailure::Value(_)) => Err(ProviderRejected),
+        Err(LookupFailure::Unavailable { .. }) => Err(ProviderUnavailable),
+    }
 }
 
 fn lookup_secret(name: &str) -> Result<Option<SecretValue>> {
@@ -601,7 +725,9 @@ fn lookup_secret(name: &str) -> Result<Option<SecretValue>> {
     // SecretValue validates again only to preserve its own construction invariant.
     validate_secret_name(name)?;
     enforce_declared(name)?;
-    configured_provider_group()?.lookup(name)
+    configured_provider_group()
+        .map_err(ProviderSetup::into_error)?
+        .lookup(name)
 }
 
 fn secret_name_arg(args: &[Value], function: &str) -> Result<String> {

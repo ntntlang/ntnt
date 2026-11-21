@@ -1672,3 +1672,126 @@ fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
     let stale = f.apply("limit.json", plan["plan_digest"].as_str());
     assert!(code(&stale, "DB_PLAN_STALE"), "{stale}");
 }
+
+/// A fixture command's report, after `configure` changes its environment.
+fn report_with(
+    f: &Fixture,
+    command: &str,
+    configure: &dyn Fn(&mut std::process::Command),
+) -> Value {
+    let mut process = f.process(command);
+    configure(&mut process);
+    let out = process.output().unwrap();
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)))
+}
+
+/// #422 (cli-12): DB_SECRET names the connection secret it could not
+/// resolve and its role, never its value, and says which cause applies;
+/// each cause has its own advice, and following it resolves the refusal.
+#[test]
+fn unresolved_connection_secrets_name_the_secret_role_and_cause() {
+    type Configure = Box<dyn Fn(&mut std::process::Command)>;
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE main.t(id INTEGER);");
+    let target = f.target_path.to_str().unwrap().to_owned();
+    let scratch = f.scratch_path.to_str().unwrap().to_owned();
+    let mut cases: Vec<(Configure, &str, &str)> = vec![
+        (
+            Box::new(|c| {
+                c.env_remove("DB_TARGET");
+            }),
+            "Target connection secret DB_TARGET is unset or empty in the environment (provider env).",
+            "Set the environment variable DB_TARGET",
+        ),
+        (
+            Box::new(|c| {
+                c.env("DB_TARGET", "");
+            }),
+            "Target connection secret DB_TARGET is unset or empty in the environment (provider env).",
+            "Set the environment variable DB_TARGET",
+        ),
+        (
+            Box::new(|c| {
+                c.env_remove("DB_SCRATCH");
+            }),
+            "Scratch connection secret DB_SCRATCH is unset or empty in the environment (provider env).",
+            "Set the environment variable DB_SCRATCH",
+        ),
+        (
+            Box::new(|c| {
+                c.env("NTNT_ENV", "production");
+            }),
+            "Target connection secret DB_TARGET cannot be read: the env secrets provider is disabled when NTNT_ENV is production.",
+            "set NTNT_ENV=development",
+        ),
+        (
+            Box::new(|c| {
+                c.env("NTNT_SECRETS_PROVIDER", "evn");
+            }),
+            "Target connection secret DB_TARGET cannot be read: NTNT_SECRETS_PROVIDER names an unsupported provider (supported: env, and unix-socket on Unix).",
+            "Set NTNT_SECRETS_PROVIDER to env",
+        ),
+    ];
+    #[cfg(unix)]
+    cases.push((
+        Box::new(|c| {
+            c.env("NTNT_SECRETS_PROVIDER", "unix-socket")
+                .env_remove("NTNT_SECRETS_SOCKET_ENDPOINTS");
+        }),
+        "Target connection secret DB_TARGET cannot be read: the unix-socket secrets provider's configuration is invalid.",
+        "NTNT_SECRETS_SOCKET_ENDPOINTS",
+    ));
+    let mut advice = std::collections::BTreeSet::new();
+    for (configure, message, next_action) in &cases {
+        let r = report_with(&f, "status", &**configure);
+        let d = diagnostic(&r, "DB_SECRET");
+        assert_eq!(d["message"], *message, "{d}");
+        let action = d["next_action"].as_str().unwrap();
+        assert!(action.contains(next_action), "{d}");
+        advice.insert(action.to_owned());
+        // Names only: neither file path is ever shown.
+        let text = r.to_string();
+        assert!(!text.contains(&target) && !text.contains(&scratch), "{r}");
+    }
+    // Each cause has its own advice (the two unset targets share theirs).
+    assert_eq!(advice.len(), cases.len() - 1, "{advice:?}");
+    // Following the advice, with the fixture's environment, inspection passes.
+    assert_eq!(report_with(&f, "status", &|_| {})["outcome"], "pass");
+
+    // A secret the manifest does not declare.
+    let manifest = f.root.path().join("ntnt.toml");
+    let declared = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, declared.replace("[secrets.DB_SCRATCH]\n", "")).unwrap();
+    let r = report_with(&f, "status", &|_| {});
+    let d = diagnostic(&r, "DB_SECRET");
+    assert_eq!(
+        d["message"],
+        "Scratch connection secret DB_SCRATCH is not declared under [secrets] in the manifest.",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("[secrets.DB_SCRATCH]"),
+        "{d}"
+    );
+    std::fs::write(&manifest, &declared).unwrap();
+    assert_eq!(report_with(&f, "status", &|_| {})["outcome"], "pass");
+
+    // migrate names the target secret the same way.
+    let plan = f.plan("plan.json");
+    let digest = plan["plan_digest"].as_str().unwrap().to_owned();
+    let r = report_with(&f, "migrate", &move |c| {
+        c.args(["--plan", "plan.json"])
+            .env("DB_APPROVAL", &digest)
+            .env_remove("DB_TARGET");
+    });
+    let d = diagnostic(&r, "DB_SECRET");
+    assert_eq!(
+        d["message"],
+        "Target connection secret DB_TARGET is unset or empty in the environment (provider env).",
+        "{d}"
+    );
+}
