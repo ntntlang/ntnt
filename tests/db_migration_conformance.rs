@@ -871,6 +871,22 @@ fn postgres_legacy_adoption_rejects_edited_dirty_and_ambiguous_history() {
         f.execute(sql);
         let rejected = f.command("plan", &["--adopt-through", "1"]);
         assert!(code(&rejected, expected), "{rejected}");
+        if expected == "DB_ADOPTION_INPUT" {
+            // #422: the refusal says what makes the ledger ineligible.
+            let d = rejected["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["code"] == expected)
+                .unwrap();
+            assert!(
+                d["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("legacy v1 ledger is empty"),
+                "{d}"
+            );
+        }
         assert_eq!(
             f.text("SELECT value FROM app.items WHERE id=17"),
             "retained"

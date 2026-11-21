@@ -693,6 +693,13 @@ replay within the adapter's supported grammar in the same isolated scratch used
 for ordinary planning. Only that prefix is replayed; future pending SQL is not
 included in this adoption action. No old migration SQL executes on the target.
 
+A refusal (`DB_ADOPTION_INPUT`) says which requirement failed, with advice for it:
+no `[databases.<name>.adoption_checks]` declared; an `--adopt-through` ID that is
+not in the migrations directory (`Migration ID 7 is not in migrations; the highest
+ID there is 1.`); a target that already has an ntnt ledger, whose history needs
+ordinary `plan` and `migrate`; or a legacy v1 ledger that is empty, records
+migrations that are not applied, or ends at a different ID than the one requested.
+
 Declare **at least one named adoption check** in the selected database's manifest:
 
 ```toml

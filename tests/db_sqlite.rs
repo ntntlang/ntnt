@@ -1901,3 +1901,73 @@ fn file_identity_refusals_name_the_secret_and_the_rule() {
         passes("plan");
     }
 }
+
+/// #422 (cli-04): DB_ADOPTION_INPUT says which adoption requirement failed,
+/// with advice for it, and following the advice gets the adoption planned.
+#[test]
+fn adoption_refusals_say_which_requirement_failed() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    // An existing database that matches the migration but has no ledger.
+    f.target()
+        .execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY);")
+        .unwrap();
+    let plan = |args: &[&str]| f.command("plan", args);
+    let refusal = |r: &Value| diagnostic(r, "DB_ADOPTION_INPUT").clone();
+
+    // No adoption checks declared.
+    let d = refusal(&plan(&["--adopt-through", "1"]));
+    assert_eq!(
+        d["message"],
+        "Adoption needs at least one named check, and [databases.app.adoption_checks] declares none. No history is inferred or repaired.",
+        "{d}"
+    );
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.contains("[databases.app.adoption_checks]") && next_action.contains("main."),
+        "{d}"
+    );
+    let manifest = f.root.path().join("ntnt.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("[databases.app.adoption_checks]\nids_present = \"SELECT NOT EXISTS (SELECT 1 FROM main.t WHERE id IS NULL)\"\n");
+    std::fs::write(&manifest, text).unwrap();
+
+    // An ID that is not in the migrations directory.
+    let d = refusal(&plan(&["--adopt-through", "7"]));
+    assert_eq!(
+        d["message"], "Migration ID 7 is not in migrations; the highest ID there is 1.",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("--adopt-through 1"),
+        "{d}"
+    );
+
+    // Following both pieces of advice, adoption is planned.
+    let adoption = f.command("plan", &["--adopt-through", "1", "--out", "adoption.json"]);
+    assert_eq!(adoption["outcome"], "pass", "{adoption}");
+    let adopted = f.apply("adoption.json", adoption["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{adopted}");
+
+    // A database whose history is already recorded is not eligible.
+    let d = refusal(&plan(&["--adopt-through", "1"]));
+    assert_eq!(
+        d["message"],
+        "The target already has an ntnt migration ledger (1 entry), so it is not eligible for adoption, which only records a baseline for a database without one.",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("without --adopt-through"),
+        "{d}"
+    );
+    assert_eq!(plan(&[])["outcome"], "pass");
+}
