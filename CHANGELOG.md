@@ -15,6 +15,12 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   changed predicate or expression is drift (#411).
 - `ntnt db`: `DB_COVERAGE_INCOMPLETE` names the uncovered objects (`objects`) and
   the migration whose replay produced them (`source`) (#411).
+- `ntnt db new` holds the `ntnt.toml` lock while it numbers a migration, so
+  concurrent runs cannot take the same ID; a run that finds the lock held fails
+  with the new `DB_NEW_CONFLICT` and creates nothing (#388).
+- `ntnt run`: a runtime error raised in an imported module names that module's
+  file and line, shows its source, and lists the call sites that led there
+  (#412).
 
 ## 0.6.3
 
