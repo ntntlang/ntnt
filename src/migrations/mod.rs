@@ -49,7 +49,6 @@ impl Diagnostic {
             "DB_ADOPTION_INPUT" => "Select an exact source-prefix ID with plan --adopt-through and declare named adoption_checks. Only absent history or matching recognized legacy history is eligible; never reset or rewrite a ledger to force adoption.",
             "DB_SQLITE_RECOVERY_REQUIRED" => "If a writer is active, wait for it to finish and retry inspection. Otherwise rerun migrate with the same approved plan to recover and reconcile under ownership; do not delete the journal or make inspection writable.",
             "DB_REFERENCE_UNAVAILABLE" => "Configure [databases.<name>.scratch] for the selected database with a distinct disposable database and secret, then rerun inspection.",
-            "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is required by every command except init and new.",
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and other non-transactional statements from migration files. The one supported non-transactional migration is a lone named CREATE INDEX CONCURRENTLY without checks.",
             "DB_COVERAGE_INCOMPLETE" => "Its objects field lists each catalog object outside supported inspection; when replaying a migration produced them, its source field names that migration (the target's own uncovered objects are also in catalog.uncovered). Change or remove those objects to stay within the coverage in docs/DATABASE_MIGRATIONS.md, or obtain manual evidence; do not interpret this result as no drift.",
@@ -60,7 +59,6 @@ impl Diagnostic {
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
-            "DB_SECRET" => "Declare the named connection secret under [secrets.<NAME>] in ntnt.toml and make it resolvable through the configured std/secrets provider (development: an environment variable with that exact name; production: NTNT_SECRETS_PROVIDER=unix-socket). Never pass a connection URL on the command line.",
             "DB_CONNECTION_CONFIG" => "Make the failing PostgreSQL connection secret (target or scratch) name exactly one explicit host, the user and dbname declared as that endpoint's role and database, and an explicit sslmode, with no startup options. Use sslmode=verify-full for any network path (host CA store by default, or sslrootcert=/absolute/path/ca.pem for a private CA); verify-ca only when the host name cannot match the certificate, and only with sslrootcert=/absolute/path/ca.pem naming the CA that issued it (never the host CA store); require only to accept an unverified server; disable only on a trusted local transport such as loopback, a Unix socket or a private container network.",
             "DB_TLS" => "Check the server certificate against the configured trust. verify-full checks the chain and the host name against the host CA store, or only against the CAs in sslrootcert=/absolute/path/ca.pem (put a managed provider's CA bundle there). Use verify-ca, with sslrootcert naming the CA that issued the server certificate, only when the host name cannot match. A server without TLS is never used in plaintext: enable TLS on the server, or choose sslmode=disable explicitly for a trusted local transport.",
             "DB_CONFIG" => "Fix ntnt.toml or the command line as the message describes: declare [databases.<name>] with engine, schema, a confined relative migrations_dir and named targets, use logical secret references (a separate disposable scratch secret and a separate approval_secret), give a [databases.<name>.limits] table only whole seconds (statement_seconds 2-86400; migrator_wait_seconds 1-300, PostgreSQL only), and pass --adopt-through only to plan. See docs/DATABASE_MIGRATIONS.md#quick-start.",
@@ -965,10 +963,6 @@ mod tests {
                     wait_range.as_str(),
                 ]
                 .as_slice(),
-            ),
-            (
-                "DB_SECRET",
-                ["[secrets.<NAME>]", "std/secrets provider", "exact name"].as_slice(),
             ),
             (
                 "DB_INIT_CONFLICT",
