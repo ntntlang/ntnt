@@ -24,7 +24,8 @@ pub struct Diagnostic {
     pub message: String,
     pub source: Option<String>,
     /// Catalog keys of the objects this diagnostic is about, such as the
-    /// uncovered objects of `DB_COVERAGE_INCOMPLETE`. Omitted when empty.
+    /// uncovered objects of `DB_COVERAGE_INCOMPLETE`, or the names a statement
+    /// refused before it ran uses (`DB_OUTSIDE_SCOPE`). Omitted when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<String>,
     pub next_action: String,

@@ -70,7 +70,7 @@ pub(crate) struct Postgres {
     transport: Value,
     /// Set once `prepare_scratch` validated this session as scratch: the
     /// managed scope it replays and what lay outside that scope then.
-    scratch: std::sync::OnceLock<ScratchScope>,
+    scratch: std::sync::OnceLock<Box<ScratchScope>>,
 }
 /// A prepared scratch database's managed scope and its `OUTSIDE_SCOPE` rows.
 struct ScratchScope {
@@ -768,7 +768,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         let scope = scope(schema, extra);
         let outside = self.outside(&scope).await?;
         self.scratch
-            .set(ScratchScope { scope, outside })
+            .set(Box::new(ScratchScope { scope, outside }))
             .map_err(|_| {
                 Diagnostic::new("DB_SCRATCH_NOT_EMPTY", "Scratch was already prepared.")
             })?;
