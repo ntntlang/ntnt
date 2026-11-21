@@ -61,10 +61,11 @@ pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> 
         })
         .map(|m| {
             let mut s = m.summary();
-            s["analysis"] = json!(super::analysis::analyze_for(
+            s["analysis"] = json!(super::analysis::analyze_in_scope(
                 &inputs.config.engine,
                 &m.sql,
-                &inputs.config.schema
+                &inputs.config.schema,
+                &inputs.history_schemas
             ));
             s
         })

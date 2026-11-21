@@ -2588,3 +2588,92 @@ fn an_applied_history_that_revokes_create_on_public_keeps_verifying() {
     assert_eq!(verified["history"]["applied_count"], 1, "{verified}");
     assert_eq!(verified["diagnostics"], serde_json::json!([]), "{verified}");
 }
+
+/// A pending statement that may act outside the managed scope is flagged in
+/// the plan the way a destructive change is: a hazard on the migration, and
+/// an `outside_scope` entry naming the statement and the schema for each
+/// qualified name or IN SCHEMA list, each search_path that names another
+/// schema, and each schema-qualified name in SQL NTNT cannot analyze. Nothing
+/// is refused: the plan stays reviewable, is approved and migrates, and once
+/// applied the migration is not flagged again.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn pending_statements_outside_the_managed_scope_are_flagged_for_review() {
+    let f = Fixture::new();
+    f.target()
+        .batch_execute("CREATE TABLE public.legacy (id int)")
+        .unwrap();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t (id int);");
+    migrate_all(&f, "first.json");
+    f.sql(
+        "0002_outside.sql",
+        "REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+SET LOCAL search_path TO public;
+DROP TABLE IF EXISTS legacy;
+SELECT pg_catalog.set_config('search_path', 'app', true);
+ALTER SEQUENCE IF EXISTS public.s RESTART WITH 5;
+GRANT EXECUTE ON ALL ROUTINES IN SCHEMA public TO PUBLIC;
+ALTER TABLE app.t ADD COLUMN note text;",
+    );
+    let plan = f.plan("second.json");
+    assert_eq!(plan["plan"]["classification"], "requires_review", "{plan}");
+    let pending = plan["plan"]["pending"].as_array().unwrap();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["source"], "0002_outside.sql");
+    let analysis = &pending[0]["analysis"];
+    assert!(
+        names_in(&analysis["hazards"]).contains(&"OUTSIDE_MANAGED_SCOPE"),
+        "{analysis}"
+    );
+    assert_eq!(
+        analysis["outside_scope"],
+        serde_json::json!([
+            {"statement": 1, "schema": "public", "via": "name"},
+            {"statement": 2, "schema": "public", "via": "search_path"},
+            {"statement": 5, "schema": "public", "via": "token"},
+            {"statement": 6, "schema": "public", "via": "token"}
+        ]),
+        "{analysis}"
+    );
+    // The human plan names each one under its migration.
+    let human = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["db", "plan", "--target", "test"])
+        .env("DB_TARGET", &f.target_url)
+        .env("DB_SCRATCH", &f.scratch_url)
+        .env_remove("DB_APPROVAL")
+        .env("NTNT_SECRETS_PROVIDER", "env")
+        .env("NTNT_ENV", "development")
+        .current_dir(f.root.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&human.stdout);
+    for line in [
+        "Pending \"0002_outside.sql\"",
+        "  Outside the managed scope: statement 1 names schema \"public\"",
+        "  Outside the managed scope: statement 2 puts schema \"public\" on the search path",
+        "  Outside the managed scope: statement 5 names schema \"public\" in SQL NTNT does not analyze",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    let applied = f.apply("second.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    // The statements ran as written: statement 3 dropped public.legacy.
+    assert!(f
+        .target()
+        .query_one("SELECT to_regclass('public.legacy') IS NULL", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+    let verified = f.command("verify");
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["diagnostics"], serde_json::json!([]), "{verified}");
+    let again = f.command("plan");
+    assert_eq!(again["plan"]["pending"], serde_json::json!([]), "{again}");
+}
+
+fn names_in(list: &Value) -> Vec<&str> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}

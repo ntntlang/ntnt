@@ -500,6 +500,17 @@ For PostgreSQL, `analysis.locks` predicts the table locks each statement takes (
 
 Warnings are review prompts and do not block a plan. The safer forms are `ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT` in a later migration, and a `CHECK (column IS NOT NULL) NOT VALID` validated before `SET NOT NULL`.
 
+For PostgreSQL, `analysis.outside_scope` lists the statements that may create, change, drop, grant or revoke objects in a schema outside the [managed scope](#managed-scope), and the migration gets the hazard `OUTSIDE_MANAGED_SCOPE`. Each entry gives the `statement` number, the `schema`, and `via`: `name` for a schema-qualified name, an `IN SCHEMA` list or an `ALTER ... SET SCHEMA` in a statement NTNT parses; `search_path` for a `SET search_path`, `SET SCHEMA` or `set_config('search_path', ...)` that names the schema, so that later unqualified names in the migration may resolve there; `token` for a schema-qualified name, or a name after `SCHEMA`, in SQL NTNT does not parse or does not read names from (such a name may also be a column of a table alias). The human plan prints each one under its pending migration:
+
+```text
+Pending "0002_outside.sql" (...): hazards ["AUTHORIZATION_CHANGE",...,"OUTSIDE_MANAGED_SCOPE"]; unknowns [...]
+  Outside the managed scope: statement 1 names schema "public"
+  Outside the managed scope: statement 2 puts schema "public" on the search path
+  Outside the managed scope: statement 5 names schema "public" in SQL NTNT does not analyze
+```
+
+These are review prompts like the other hazards: the plan stays `requires_review`, `migrate` runs the statements as written, and an applied migration is not flagged again. Statements that only read or write rows, unqualified names and text inside `DO` or function bodies are not flagged; statements on `_ntnt` and system schemas are refused instead. A plan saved by an earlier build whose pending migrations are flagged no longer matches its migrations' analysis; plan it again.
+
 ### Concurrent index builds
 
 A migration whose entire script is one named `CREATE [UNIQUE] INDEX CONCURRENTLY` on a managed table runs outside a transaction (`analysis.non_transactional`). It takes only `SHARE UPDATE EXCLUSIVE` on the table, so reads and writes continue while the index builds. The build waits for transactions already running on the table rather than failing on the 1-second lock timeout. The statement limit (`statement_seconds`, 90 seconds by default) covers the whole build, waits and table scan included; a build that exceeds it fails and its invalid index is dropped. For a large table, raise the limit in [`[databases.<name>.limits]`](#time-limits), then plan and approve again. Comments around the statement are allowed; any other statement, an unnamed index or a table outside the managed schema is rejected as before. Such a migration cannot have `requires` or `ensures` checks, because no transaction surrounds the change. Custom implicit/assignment casts block the build as they block other DDL, and the build uses replay's storage settings (`default_tablespace=''`).
@@ -602,6 +613,8 @@ elsewhere, for example `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, `DROP TABLE
 EXISTS public.legacy` or `GRANT USAGE ON SCHEMA public` while the managed schema is
 `app`, whether it names them, reaches them through `SET search_path`, a `DO` block or
 a function, or uses SQL NTNT does not parse. NTNT does not inspect those schemas.
+A plan flags each pending statement that it can tell may act there
+([`analysis.outside_scope`](#what-postgresql-replay-runs)), and stays reviewable.
 Replay runs the statements in scratch, which holds nothing but an empty `public`: a
 statement that needs a schema or object the history does not create there (`CREATE
 TABLE shared.t` while only the target has `shared`) fails in replay, and an `IF

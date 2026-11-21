@@ -1,6 +1,6 @@
 //! Shared report construction: authored history, observed target, expected prefix.
 use super::adapter::{self, Access, Adapter, Identity};
-use super::analysis::analyze_for;
+use super::analysis::analyze_in_scope;
 use super::inventory::{json_digest, CapturedInputs, CatalogDigests};
 use super::model::{Catalog, History};
 use super::{Diagnostic, Result};
@@ -321,10 +321,11 @@ async fn inspect_observed(
         .iter()
         .map(|m| {
             let mut v = m.summary();
-            v["analysis"] = json!(analyze_for(
+            v["analysis"] = json!(analyze_in_scope(
                 &inputs.config.engine,
                 &m.sql,
-                &inputs.config.schema
+                &inputs.config.schema,
+                &inputs.history_schemas
             ));
             v
         })
@@ -473,10 +474,11 @@ async fn inspect_observed(
         })
         .map(|m| {
             let mut v = m.summary();
-            v["analysis"] = json!(analyze_for(
+            v["analysis"] = json!(analyze_in_scope(
                 &inputs.config.engine,
                 &m.sql,
-                &inputs.config.schema
+                &inputs.config.schema,
+                &inputs.history_schemas
             ));
             v
         })

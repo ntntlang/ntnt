@@ -525,6 +525,20 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     warning["code"], warning["relation"], warning["statement"], warning["message"]
                 );
             }
+            // Never refused, and NTNT does not inspect those schemas: for the
+            // reviewer, like a destructive change.
+            for note in migration["analysis"]["outside_scope"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let (statement, schema) = (&note["statement"], &note["schema"]);
+                match note["via"].as_str() {
+                    Some("search_path") => println!("  Outside the managed scope: statement {statement} puts schema {schema} on the search path"),
+                    Some("token") => println!("  Outside the managed scope: statement {statement} names schema {schema} in SQL NTNT does not analyze"),
+                    _ => println!("  Outside the managed scope: statement {statement} names schema {schema}"),
+                }
+            }
         }
         for d in report["diagnostics"].as_array().into_iter().flatten() {
             println!("{}: {}", d["code"], d["message"]);

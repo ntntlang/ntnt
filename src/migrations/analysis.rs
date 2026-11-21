@@ -18,6 +18,21 @@ pub(crate) struct Analysis {
     /// which `migrate` runs outside a transaction.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub non_transactional: bool,
+    /// PostgreSQL only: statements that may create, change, drop, grant or
+    /// revoke objects in a schema outside the managed scope, which NTNT does
+    /// not inspect (`analyze_in_scope`). Never a refusal.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outside_scope: Vec<OutsideScope>,
+}
+/// A statement that may act in a schema outside the managed scope.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct OutsideScope {
+    /// 1-based statement number within the migration script.
+    pub statement: usize,
+    /// The schema, folded like PostgreSQL.
+    pub schema: String,
+    /// How the statement names it.
+    pub via: Via,
 }
 /// A migration whose whole script is one named `CREATE INDEX CONCURRENTLY` on
 /// a managed table. Replay builds the same index without CONCURRENTLY, inside
@@ -332,6 +347,7 @@ pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
         locks: vec![],
         lock_warnings: vec![],
         non_transactional: false,
+        outside_scope: vec![],
     };
     if engine == "sqlite" {
         sqlite_script(&mut a, sql);
@@ -1265,6 +1281,15 @@ fn targets(statement: &Statement) -> Option<Vec<(String, String)>> {
             .collect(),
         Statement::Grant(g) => grants(g.objects.as_ref()),
         Statement::Revoke(r) => grants(r.objects.as_ref()),
+        // SELECT ... INTO creates a table.
+        Statement::Query(q) => match &*q.body {
+            SetExpr::Select(select) if select.into.is_some() => select
+                .into
+                .iter()
+                .flat_map(|into| one(&into.name))
+                .collect(),
+            _ => return None,
+        },
         _ => return None,
     })
 }
@@ -1278,8 +1303,9 @@ fn protected_schema(name: &str) -> bool {
 }
 
 /// How a statement names a schema it may act in (see `schema_names`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Via {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Via {
     /// A qualified name, an `IN SCHEMA` list or `SET SCHEMA` in a statement
     /// NTNT parses.
     Name,
@@ -1544,6 +1570,54 @@ pub(crate) fn protected_targets(sql: &str) -> Vec<(usize, String)> {
         })
         .map(|(number, _, written, _)| (number, written))
         .collect()
+}
+
+/// The statements of a PostgreSQL migration that may create, change, drop,
+/// grant or revoke objects in a schema outside the managed scope: neither
+/// `schema` nor one the history creates (`created`), `pg_catalog` or
+/// `pg_temp`. Statements on `_ntnt` and system schemas are refused instead
+/// (`protected_targets`). One entry per statement, schema and way of naming
+/// it, in statement order.
+pub(crate) fn outside_scope(sql: &str, schema: &str, created: &[String]) -> Vec<OutsideScope> {
+    let mut found: Vec<OutsideScope> = schema_names(sql)
+        .into_iter()
+        .filter(|(_, named, _, _)| {
+            named != schema
+                && !created.contains(named)
+                && named != "pg_temp"
+                && !protected_schema(named)
+        })
+        .map(|(statement, schema, _, via)| OutsideScope {
+            statement,
+            schema,
+            via,
+        })
+        .collect();
+    found.dedup();
+    found
+}
+
+/// `analyze_for`, and for PostgreSQL the statements that may act outside the
+/// managed scope (`outside_scope`), with the hazard `OUTSIDE_MANAGED_SCOPE`.
+/// Like a destructive change, this is for the reviewer: the plan stays
+/// reviewable and nothing is refused. Migrations that act only in the
+/// managed scope analyze exactly as `analyze_for` does.
+pub(crate) fn analyze_in_scope(
+    engine: &str,
+    sql: &str,
+    schema: &str,
+    created: &[String],
+) -> Analysis {
+    let mut a = analyze_for(engine, sql, schema);
+    if engine == "postgresql" {
+        a.outside_scope = outside_scope(sql, schema, created);
+        if !a.outside_scope.is_empty() {
+            a.hazards.push("OUTSIDE_MANAGED_SCOPE".into());
+            a.hazards.sort();
+            a.hazards.dedup();
+        }
+    }
+    a
 }
 /// Checks use a separate closed query grammar, not a SELECT/volatility heuristic.
 /// Live relation/type/operator resolution still requires the adapter purity gate
@@ -2166,6 +2240,10 @@ mod tests {
                 vec![(1, "pg_catalog")],
             ),
             ("CREATE TABLE pg_toast.t (id int)", vec![(1, "pg_toast.t")]),
+            (
+                "SELECT * INTO _ntnt.copy FROM app.t",
+                vec![(1, "_ntnt.copy")],
+            ),
         ] {
             let expected: Vec<(usize, String)> = expected
                 .into_iter()
@@ -2173,6 +2251,124 @@ mod tests {
                 .collect();
             assert_eq!(protected_targets(sql), expected, "{sql}");
         }
+    }
+    #[test]
+    fn statements_outside_the_managed_scope_are_flagged() {
+        let created = ["audit".to_string()];
+        let flags = |sql: &str| serde_json::to_value(outside_scope(sql, "app", &created)).unwrap();
+        // The managed scope, pg_catalog, pg_temp, rows, DO bodies, references
+        // and unqualified names are not flagged; system schemas are refused.
+        for sql in [
+            "CREATE TABLE app.t (id int); CREATE TABLE t2 (id int); CREATE SCHEMA audit; CREATE TABLE audit.log (id int)",
+            "CREATE TEMP TABLE x (id int); CREATE TABLE pg_temp.y (id int); CREATE EXTENSION pgcrypto",
+            "INSERT INTO app.t SELECT id FROM public.legacy; UPDATE public.legacy SET id = 1; SELECT public.f()",
+            "DO $$ BEGIN CREATE TABLE public.leak (id int); END $$",
+            "SET LOCAL search_path TO app, audit, pg_catalog, pg_temp; SET search_path TO DEFAULT",
+            "GRANT SELECT ON app.t TO PUBLIC; COMMENT ON TABLE app.t IS 'x'; ALTER TABLE app.t RENAME TO t2",
+            "GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC; DROP TABLE IF EXISTS _ntnt.schema_migrations_v2",
+        ] {
+            assert_eq!(flags(sql), serde_json::json!([]), "{sql}");
+        }
+        for (sql, expected) in [
+            (
+                "CREATE TABLE app.t (id int); CREATE TABLE public.audit_log (id int)",
+                serde_json::json!([[2, "public", "name"]]),
+            ),
+            (
+                "DROP TABLE IF EXISTS public.legacy, app.t, \"Shared\".x",
+                serde_json::json!([[1, "public", "name"], [1, "Shared", "name"]]),
+            ),
+            (
+                "REVOKE CREATE ON SCHEMA Public FROM PUBLIC",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+            (
+                "GRANT SELECT ON ALL TABLES IN SCHEMA public, audit TO PUBLIC",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+            (
+                "CREATE EXTENSION pgcrypto WITH SCHEMA public",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+            (
+                "ALTER FUNCTION app.f() SET SCHEMA public",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+            (
+                "SET LOCAL search_path TO public; DROP TABLE IF EXISTS legacy",
+                serde_json::json!([[1, "public", "search_path"]]),
+            ),
+            (
+                "SELECT set_config('search_path', 'reporting, app', true)",
+                serde_json::json!([[1, "reporting", "search_path"]]),
+            ),
+            // SQL sqlparser does not parse, or that NTNT does not read names from.
+            (
+                "ALTER SEQUENCE IF EXISTS public.s RESTART WITH 5",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "DROP ROUTINE IF EXISTS public.cleanup()",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "GRANT EXECUTE ON ALL ROUTINES IN SCHEMA public TO PUBLIC",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "ALTER VIEW IF EXISTS public.v RENAME TO v2",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "COMMENT ON TABLE public.legacy IS 'shared'",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "CREATE EXTENSION hstore SCHEMA public",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "ALTER TABLE app.t SET SCHEMA public",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "SELECT * INTO public.copy FROM app.t; SELECT * INTO app.copy FROM app.t",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+        ] {
+            let expected: Vec<serde_json::Value> = expected
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| serde_json::json!({"statement": e[0], "schema": e[1], "via": e[2]}))
+                .collect();
+            assert_eq!(flags(sql), serde_json::json!(expected), "{sql}");
+        }
+        // A flagged migration gains a hazard; any other analyzes exactly as
+        // before, so plans of histories that stay in the managed scope keep
+        // their digests.
+        let flagged = analyze_in_scope(
+            "postgresql",
+            "REVOKE CREATE ON SCHEMA public FROM PUBLIC",
+            "app",
+            &created,
+        );
+        assert!(
+            flagged.hazards.iter().any(|h| h == "OUTSIDE_MANAGED_SCOPE"),
+            "{flagged:?}"
+        );
+        for sql in [
+            "CREATE TABLE app.t (id int)",
+            "CREATE TABLE audit.log (id int)",
+        ] {
+            assert_eq!(
+                serde_json::to_value(analyze_in_scope("postgresql", sql, "app", &created)).unwrap(),
+                serde_json::to_value(analyze_for("postgresql", sql, "app")).unwrap(),
+                "{sql}"
+            );
+        }
+        let sqlite = analyze_in_scope("sqlite", "CREATE TABLE t (id INTEGER)", "main", &[]);
+        assert!(sqlite.outside_scope.is_empty());
     }
     #[test]
     fn search_path_settings_are_read_like_postgresql() {
