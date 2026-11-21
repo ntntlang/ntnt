@@ -73,6 +73,11 @@ reports a runtime error in an imported module against that module's file.
 - **Long histories (unchanged).** PostgreSQL replay still costs time in
   proportion to the square of the history length; DATABASE_MIGRATIONS.md
   states the current limits. #421 stays open for PostgreSQL.
+- **Known limitation.** A pending migration that replaces an object already on
+  the target outside the managed schema, for example `DROP TABLE IF EXISTS
+  public.legacy` followed by `CREATE TABLE public.legacy`, is reported as drift
+  and cannot be planned. Create the replacement under a new name, or drop the
+  old object before planning (#439).
 
 ## `ntnt db` on every engine
 
@@ -107,5 +112,12 @@ reports a runtime error in an imported module against that module's file.
   module's line number, beside unrelated or empty source (#412).
 - Route handler error logs and the development error page still pair the
   handler's file with the error's line; #257 tracks them.
+
+## Upgrading
+
+- Finish any `migrate` that stopped during a concurrent index build with
+  `ntnt db reconcile` before upgrading. A plan saved by 0.6.3 whose pending
+  migrations act outside the managed schema no longer validates in 0.6.4, so
+  0.6.4 cannot reconcile that attempt (#440).
 
 See [NTNT v0.6.3](v0.6.3.md) for the previous release.
