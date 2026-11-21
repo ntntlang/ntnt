@@ -785,12 +785,57 @@ fn visible(text: &str) -> String {
 /// The literal messages of the `RAISE(ABORT|FAIL|ROLLBACK, '...')` calls in
 /// a SQLite trigger's SQL (#424).
 pub(crate) fn sqlite_raise_messages(sql: &str) -> Vec<String> {
-    use sqlparser::tokenizer::{Token, Tokenizer};
+    use sqlparser::tokenizer::Tokenizer;
     let Ok(tokens) = Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql).tokenize() else {
         return vec![];
     };
-    let tokens: Vec<&Token> = tokens
+    raise_literals(tokens.iter())
+}
+
+/// The literal RAISE messages of the CREATE TRIGGER statements among the
+/// first `count` statements of the SQLite migration `sql`, numbered by
+/// SQLite's own statement boundaries. A RAISE(ROLLBACK) undoes the
+/// transaction that created such a trigger, so once the statement it raised
+/// in has failed the catalog no longer holds it (review r1).
+pub(crate) fn sqlite_created_raise_messages(sql: &str, count: usize) -> Vec<String> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let Ok(tokens) =
+        Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql).tokenize_with_location()
+    else {
+        return vec![];
+    };
+    let keyword = |token: Option<&Token>, keywords: &[&str]| {
+        matches!(token, Some(Token::Word(w)) if w.quote_style.is_none()
+            && keywords.iter().any(|k| w.value.eq_ignore_ascii_case(k)))
+    };
+    sqlite_statements(&tokens)
+        .ranges
         .iter()
+        .take(count)
+        .flat_map(|range| {
+            let piece = tokens[range.clone()].iter().map(|t| &t.token);
+            let mut words = piece.clone().filter(|t| !matches!(t, Token::Whitespace(_)));
+            let create = keyword(words.next(), &["CREATE"]);
+            let mut next = words.next();
+            if keyword(next, &["TEMP", "TEMPORARY"]) {
+                next = words.next();
+            }
+            if create && keyword(next, &["TRIGGER"]) {
+                raise_literals(piece)
+            } else {
+                vec![]
+            }
+        })
+        .collect()
+}
+
+/// The messages of the RAISEs in `tokens` whose message is one string
+/// literal: text the SQL spells out, never one computed from a row.
+fn raise_literals<'a>(
+    tokens: impl Iterator<Item = &'a sqlparser::tokenizer::Token>,
+) -> Vec<String> {
+    use sqlparser::tokenizer::Token;
+    let tokens: Vec<&Token> = tokens
         .filter(|t| !matches!(t, Token::Whitespace(_)))
         .collect();
     tokens

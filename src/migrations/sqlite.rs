@@ -422,6 +422,10 @@ fn known_tables(conn: &Connection) -> Result<std::collections::HashSet<String>> 
 /// a dropped name cannot fall through to an eponymous virtual table later.
 fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Result<()> {
     let conn = &state.conn;
+    // A RAISE(ROLLBACK) undoes the transaction, and with it any trigger it
+    // created, so the triggers a RAISE may come from are read before any
+    // statement runs (review r1).
+    let triggers = trigger_sql(conn);
     let mut batch = rusqlite::Batch::new(conn, sql);
     let mut statement = 0usize;
     loop {
@@ -469,7 +473,8 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                     None if error.code == "DB_TIMEOUT" => statement_limit(statement, limit, replay),
                     None => {
                         if let Some(text) = failure.raised.take() {
-                            error.message = if raised_literal(conn, &text) {
+                            let created = (sql, statement);
+                            error.message = if raised_literal(conn, &triggers, created, &text) {
                                 format!("a trigger raised: {text} (SQLITE_CONSTRAINT_TRIGGER).")
                             } else {
                                 "a trigger raised an error whose message is computed, so it is suppressed (SQLITE_CONSTRAINT_TRIGGER).".to_owned()
@@ -527,23 +532,41 @@ impl Failure {
 }
 
 /// Whether `text` is the message of a `RAISE(..., '<literal>')` in a trigger
-/// the catalog holds: then the migration wrote it, and no row value is in it.
-fn raised_literal(conn: &Connection, text: &str) -> bool {
+/// a migration wrote: one the catalog held before the migration ran
+/// (`before`) or holds now, or one that a CREATE TRIGGER before statement
+/// `number` of the migration `sql` created (`created`). Then no row value is
+/// in it. The catalog alone cannot say once a RAISE(ROLLBACK) has undone
+/// the triggers its transaction created (review r1).
+fn raised_literal(
+    conn: &Connection,
+    before: &[String],
+    (sql, number): (&str, usize),
+    text: &str,
+) -> bool {
+    let literal = |trigger: &String| {
+        super::analysis::sqlite_raise_messages(trigger)
+            .iter()
+            .any(|m| m == text)
+    };
+    before.iter().chain(&trigger_sql(conn)).any(literal)
+        || super::analysis::sqlite_created_raise_messages(sql, number.saturating_sub(1))
+            .iter()
+            .any(|m| m == text)
+}
+/// The SQL of every trigger the catalog holds; none if it cannot be read.
+fn trigger_sql(conn: &Connection) -> Vec<String> {
     rows(
         conn,
         "SELECT sql FROM main.sqlite_schema WHERE type='trigger'",
         &[],
     )
-    .is_ok_and(|triggers| {
+    .map(|triggers| {
         triggers
             .iter()
-            .filter_map(|row| row[0].as_str())
-            .any(|sql| {
-                super::analysis::sqlite_raise_messages(sql)
-                    .iter()
-                    .any(|m| m == text)
-            })
+            .filter_map(|row| row[0].as_str().map(str::to_owned))
+            .collect()
     })
+    .unwrap_or_default()
 }
 
 /// What to do about statement `number` of a migration that failed in its

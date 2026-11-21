@@ -91,6 +91,30 @@ fn sqlite_replay_failures_name_the_error_and_its_identifiers() {
             3,
             "a trigger raised an error whose message is computed, so it is suppressed (SQLITE_CONSTRAINT_TRIGGER)",
         ),
+        // RAISE(ROLLBACK) undoes the transaction that created the trigger,
+        // and its literal is still shown; FAIL too (review r1).
+        (
+            "CREATE TABLE t (b INTEGER); CREATE TRIGGER g BEFORE INSERT ON t BEGIN SELECT RAISE(ROLLBACK, 'b must be positive'); END; INSERT INTO t VALUES (1);",
+            3,
+            "a trigger raised: b must be positive (SQLITE_CONSTRAINT_TRIGGER)",
+        ),
+        (
+            "CREATE TABLE t (b INTEGER); CREATE TRIGGER g BEFORE INSERT ON t BEGIN SELECT RAISE(FAIL, 'b must be positive'); END; INSERT INTO t VALUES (1);",
+            3,
+            "a trigger raised: b must be positive (SQLITE_CONSTRAINT_TRIGGER)",
+        ),
+        (
+            "CREATE TABLE t (b TEXT); CREATE TRIGGER g BEFORE INSERT ON t BEGIN SELECT RAISE(ROLLBACK, 'rejected ' || new.b); END; INSERT INTO t VALUES ('rowsecret-6');",
+            3,
+            "a trigger raised an error whose message is computed, so it is suppressed (SQLITE_CONSTRAINT_TRIGGER)",
+        ),
+        // A computed message is suppressed even when a trigger the migration
+        // creates only after the failing statement spells out the same text.
+        (
+            "CREATE TABLE t (b TEXT); CREATE TRIGGER g BEFORE INSERT ON t BEGIN SELECT RAISE(ROLLBACK, new.b); END; INSERT INTO t VALUES ('rowsecret-8'); CREATE TRIGGER h BEFORE UPDATE ON t BEGIN SELECT RAISE(ABORT, 'rowsecret-8'); END;",
+            3,
+            "a trigger raised an error whose message is computed, so it is suppressed (SQLITE_CONSTRAINT_TRIGGER)",
+        ),
         (
             "CREATE TABLE t (b INTEGER) STRICT; INSERT INTO t VALUES ('rowsecret-5');",
             2,
@@ -158,6 +182,89 @@ fn sqlite_migrate_failure_names_the_statement_and_how_to_continue() {
         .unwrap();
     let again = f.apply("seed.json", p["plan_digest"].as_str());
     assert_eq!(again["outcome"], "pass", "{again}");
+}
+/// RAISE(ROLLBACK) undoes the whole transaction, so in replay a trigger an
+/// earlier migration created is gone from the catalog once the statement it
+/// raised in has failed; its literal message is still shown, never the row,
+/// and fixing the statement, as advised, gives a passing plan (review r1).
+#[test]
+fn sqlite_replay_shows_a_raise_rollback_literal_from_an_earlier_migration() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_t.sql",
+        "CREATE TABLE t (b TEXT); CREATE TRIGGER g BEFORE INSERT ON t WHEN length(new.b) > 5 BEGIN SELECT RAISE(ROLLBACK, 'b is too long'); END;",
+    );
+    f.sql(
+        "0002_rows.sql",
+        "INSERT INTO t VALUES ('short'); INSERT INTO t VALUES ('rowsecret-7');",
+    );
+    let r = f.command("plan", &[]);
+    let d = diagnostic(&r, "DB_SQLITE");
+    assert_eq!(
+        message(d),
+        "Statement 2: a trigger raised: b is too long (SQLITE_CONSTRAINT_TRIGGER).",
+        "{r}"
+    );
+    assert_eq!(d["source"], "0002_rows.sql", "{r}");
+    assert!(
+        next_action(d).starts_with("Fix statement 2 of the migration named in source"),
+        "{r}"
+    );
+    assert!(!r.to_string().contains("rowsecret"), "{r}");
+    // Following the advice: statement 2 fixed, the plan passes.
+    f.sql(
+        "0002_rows.sql",
+        "INSERT INTO t VALUES ('short'); INSERT INTO t VALUES ('tiny');",
+    );
+    f.plan("rows.json");
+}
+
+/// In migrate, a trigger's RAISE(ROLLBACK) literal is shown whether the
+/// failing migration creates the trigger, which the rollback undoes, or an
+/// earlier migration committed it (review r1). The target's row never
+/// appears, and correcting it, as advised, lets the same plan pass.
+#[test]
+fn sqlite_migrate_shows_a_raise_rollback_literal() {
+    let trigger = "CREATE TRIGGER g BEFORE INSERT ON t WHEN (SELECT count(*) FROM t) > 0 BEGIN SELECT RAISE(ROLLBACK, 'only one row'); END;";
+    let same = format!("{trigger} INSERT INTO t VALUES ('first');");
+    let earlier = format!("CREATE TABLE t (b TEXT); {trigger}");
+    for (initial, guard, statement) in [
+        ("CREATE TABLE t (b TEXT);", same.as_str(), 2),
+        (earlier.as_str(), "INSERT INTO t VALUES ('first');", 1),
+    ] {
+        let f = Fixture::new();
+        f.sql("0001_initial.sql", initial);
+        let p = f.plan("initial.json");
+        assert_eq!(
+            f.apply("initial.json", p["plan_digest"].as_str())["outcome"],
+            "pass"
+        );
+        // A row the replay's empty database does not have.
+        f.target()
+            .execute_batch("INSERT INTO t VALUES ('rowsecret-target')")
+            .unwrap();
+        f.sql("0002_guard.sql", guard);
+        let p = f.plan("guard.json");
+        let failed = f.apply("guard.json", p["plan_digest"].as_str());
+        let d = diagnostic(&failed, "DB_SQLITE");
+        assert_eq!(
+            message(d),
+            format!(
+                "Statement {statement}: a trigger raised: only one row (SQLITE_CONSTRAINT_TRIGGER)."
+            ),
+            "{guard}: {failed}"
+        );
+        assert_eq!(d["source"], "0002_guard.sql");
+        assert!(
+            next_action(d).starts_with("Nothing from this migration was committed"),
+            "{failed}"
+        );
+        assert!(!failed.to_string().contains("rowsecret"), "{failed}");
+        // Following the advice: correct the conflicting row, rerun the plan.
+        f.target().execute_batch("DELETE FROM t").unwrap();
+        let again = f.apply("guard.json", p["plan_digest"].as_str());
+        assert_eq!(again["outcome"], "pass", "{guard}: {again}");
+    }
 }
 #[cfg(unix)]
 fn chmod(path: &std::path::Path, mode: u32) {
