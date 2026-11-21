@@ -488,11 +488,17 @@ fn refuse_on_delete_drops(state: &State, number: usize, dropped: &[String]) -> R
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
         [] => unreachable!("only a non-empty set of children is refused"),
     };
+    let (s, them) = if children.len() == 1 {
+        ("s", "that table")
+    } else {
+        ("", "those tables")
+    };
+    // A rebuild keeps every table (`RebuildGuard`), so the sidecar cannot
+    // retire one.
     Err(Diagnostic::new(
         "DB_REBUILD_REQUIRED",
         &format!(
-            "Statement {number} drops table `{table}`, which {named} reference{s}. SQLite deletes every row of a dropped table first, which would run those actions.",
-            s = if children.len() == 1 { "s" } else { "" }
+            "Statement {number} drops table `{table}`, which {named} reference{s}. SQLite deletes every row of a dropped table first, which would run those actions. To rebuild `{table}` (create the new table and copy its rows), use a `sqlite_rebuild` sidecar; to retire it, first remove those foreign keys from {them} or drop {them}."
         ),
     ))
 }

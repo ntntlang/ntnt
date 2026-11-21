@@ -913,6 +913,17 @@ Explicitly recreate the selected table's named indexes/triggers and any views dr
 
 Without this sidecar, a migration that drops a table which other tables reference with `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT` is refused with `DB_REBUILD_REQUIRED` before the drop runs, naming each child table and its action. SQLite deletes every row of a dropped table first. On a target with data, the drop would run those actions, and scratch replay, which starts empty, could not show it. A drop that runs no such action stays allowed: one whose children were dropped first, one whose child foreign keys have no `ON DELETE` action, and a table's reference to itself.
 
+The sidecar is for a migration that rebuilds the table: it creates the replacement and copies the rows. A migration that retires the table cannot use it, because the guard requires the same set of tables. To retire a table, first remove the foreign keys that reference it from the tables the refusal names, or drop those tables, earlier in the migration or in an earlier one. SQLite removes a foreign key only by rebuilding its table: create the table again without the key, copy its rows, drop the old table and rename the new one. For example, to retire `accounts` while keeping `posts` and dropping `comments`:
+
+```sql
+CREATE TABLE posts_new(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL);
+INSERT INTO posts_new SELECT id, account_id FROM posts;
+DROP TABLE posts;
+ALTER TABLE posts_new RENAME TO posts;
+DROP TABLE comments;
+DROP TABLE accounts;
+```
+
 Counts and FK checks do not prove row identities, correct value mappings, every uniqueness assumption, old-client compatibility or recovery after a committed destructive change. Use named transition checks and the same executor in representative native upgrade tests to assert exact keys/values, preserved children and working dependencies. `tests/db_sqlite.rs` demonstrates an email-lowercasing rebuild with existing rows, indexes, views, audit trigger and cascading foreign keys, plus negative dependency/row-loss/orphan cases. Empty replay alone cannot provide that evidence. Unknown business effects remain review-required even when these guards pass.
 
 ## Results and plan identity
