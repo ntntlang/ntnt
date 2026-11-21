@@ -1349,6 +1349,133 @@ fn a_changed_target_setting_is_named_in_the_stale_plan() {
     assert_eq!(applied["outcome"], "pass", "{applied}");
 }
 
+/// #425 (sq-18, cli-13): DB_APPROVAL_REQUIRED says to set this database's
+/// approval_secret, by name, to the reviewed plan's digest through the
+/// provider and rerun the same plan; following it runs. A wrong approval
+/// value is never shown.
+#[test]
+fn approval_refusals_say_how_to_approve_the_plan() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let plan = f.plan("review.json");
+    let digest = plan["plan_digest"].as_str().unwrap();
+    for approval in [None, Some("ntnt425_wrong_approval")] {
+        let r = f.apply("review.json", approval);
+        let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+        let message = d["message"].as_str().unwrap();
+        assert!(
+            message.contains("DB_APPROVAL") && message.contains("database app"),
+            "{d}"
+        );
+        let next_action = d["next_action"].as_str().unwrap();
+        assert!(next_action.starts_with("Set DB_APPROVAL"), "{d}");
+        for says in [digest, "secrets provider", "same plan"] {
+            assert!(next_action.contains(says), "{says}: {d}");
+        }
+        assert!(!r.to_string().contains("ntnt425_wrong_approval"), "{r}");
+    }
+    // A provider that can read no secret says how to fix the provider.
+    let owned = digest.to_owned();
+    let r = report_with(&f, "migrate", &move |c| {
+        c.args(["--plan", "review.json"])
+            .env("DB_APPROVAL", &owned)
+            .env("NTNT_ENV", "production");
+    });
+    let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+    assert!(
+        d["message"].as_str().unwrap().starts_with(
+            "Approval secret DB_APPROVAL cannot be read: the env secrets provider is disabled"
+        ),
+        "{d}"
+    );
+    assert!(
+        d["next_action"].as_str().unwrap().contains("NTNT_ENV"),
+        "{d}"
+    );
+    // Following the advice literally: the same plan, approved.
+    let applied = f.apply("review.json", Some(digest));
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
+/// #425 (cli-13): a database that declares no approval_secret, or one whose
+/// secret is not declared under [secrets], is told so, naming the database
+/// or the secret; following that advice gets the plan approved and run.
+#[test]
+fn a_missing_approval_declaration_is_named() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let manifest = f.root.path().join("ntnt.toml");
+    let declared = std::fs::read_to_string(&manifest).unwrap();
+    let without = declared
+        .replace("approval_secret = \"DB_APPROVAL\"\n", "")
+        .replace("[secrets.DB_APPROVAL]\n", "");
+    std::fs::write(&manifest, &without).unwrap();
+    let plan = f.plan("review.json");
+    let r = f.apply("review.json", plan["plan_digest"].as_str());
+    let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+    assert_eq!(
+        d["message"],
+        "Database app declares no approval_secret, so migrate cannot run any plan for it. No target or ledger writes were attempted.",
+        "{d}"
+    );
+    let next_action = d["next_action"].as_str().unwrap();
+    for says in [
+        "approval_secret = \"APP_MIGRATION_APPROVAL\"",
+        "[databases.app]",
+        "[secrets.APP_MIGRATION_APPROVAL]",
+        "plan, review and approve again",
+    ] {
+        assert!(next_action.contains(says), "{says}: {d}");
+    }
+    let migrate = |plan: &str, approval: &str| {
+        let out = f
+            .process("migrate")
+            .args(["--plan", plan])
+            .env("APP_MIGRATION_APPROVAL", approval)
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    // Declared for the database, but not under [secrets].
+    let half = without.replace(
+        "migrations_dir = \"migrations\"\n",
+        "migrations_dir = \"migrations\"\napproval_secret = \"APP_MIGRATION_APPROVAL\"\n",
+    );
+    std::fs::write(&manifest, &half).unwrap();
+    let plan = f.plan("review-2.json");
+    let r = migrate("review-2.json", plan["plan_digest"].as_str().unwrap());
+    let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Approval secret APP_MIGRATION_APPROVAL is not declared under [secrets]"),
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("[secrets.APP_MIGRATION_APPROVAL]"),
+        "{d}"
+    );
+    // Following both: declared, planned again and approved.
+    std::fs::write(
+        &manifest,
+        format!("{half}[secrets.APP_MIGRATION_APPROVAL]\n"),
+    )
+    .unwrap();
+    let plan = f.plan("review-3.json");
+    let applied = migrate("review-3.json", plan["plan_digest"].as_str().unwrap());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
 /// #413: a scratch that is not empty keeps its journal mode and is reported as
 /// not empty; nothing in it is changed.
 #[test]

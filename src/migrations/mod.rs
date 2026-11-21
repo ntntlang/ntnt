@@ -71,7 +71,8 @@ impl Diagnostic {
             "DB_STATEMENT_LIMIT" => "Make the statement cheaper. For migrate on a target, raise statement_seconds in [databases.<name>.limits] (docs/DATABASE_MIGRATIONS.md, Time limits) and review a new plan, since the limit is part of the plan; replay's limit on the empty scratch database is fixed.",
             "DB_LOCK_CONFLICT" => "Another session held a conflicting lock; nothing was committed for this migration. Retry the same reviewed plan when application or migrator load allows.",
             "DB_TIMEOUT" => "Check endpoint availability and conflicting locks. Preserve committed progress; reconcile unknown migration outcomes with the same reviewed plan before any further SQL.",
-            "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
+            "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
+            "DB_APPROVAL_REQUIRED" => "Set this database's approval_secret, by its name, to the reviewed plan's plan_digest through the secrets provider, then rerun migrate with the same plan; a plan digest grants nothing until that secret holds it.",
             "DB_OUTPUT" => "Select a new output filename with a writable parent directory; existing files are never replaced.",
             "DB_OUTPUT_LIMIT" => "Reduce the saved report using --object, or reduce oversized migration metadata. No artifact was written; verification is never truncated to fit.",
             "DB_INIT_CONFLICT" => "Nothing was written. If another `ntnt db init` or `ntnt db new` held the manifest lock, or an editor was changing the manifest, rerun init once it has finished; do not run init while ntnt.toml is being edited. Otherwise choose another --database name (its secret names derive from it), or edit the existing [databases.<name>] and [secrets.<NAME>] declarations by hand; init never changes existing declarations or replaces an existing migrations path. Give a further database its own migrations_dir as in docs/DATABASE_MIGRATIONS.md#multiple-databases-in-one-application.",
@@ -701,6 +702,16 @@ mod tests {
                 ["left unchanged", "Rerun `ntnt db new`"].as_slice(),
             ),
             ("DB_SCAFFOLD_IO", ["writable", "never truncated"].as_slice()),
+            (
+                "DB_APPROVAL_REQUIRED",
+                [
+                    "approval_secret",
+                    "plan_digest",
+                    "secrets provider",
+                    "same plan",
+                ]
+                .as_slice(),
+            ),
             (
                 "DB_COVERAGE_INCOMPLETE",
                 [

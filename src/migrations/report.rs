@@ -26,9 +26,9 @@ fn record_replay(report: &mut Value, replay: Result<()>, cleanup_failure: Option
 fn diagnostic(report: &mut Value, d: Diagnostic) {
     report["diagnostics"].as_array_mut().unwrap().push(json!(d));
 }
-/// `DB_SECRET` for a connection secret `name` of `role` (target or scratch)
-/// that could not be resolved: names the secret and the cause, never a
-/// value, with advice for that cause (#422).
+/// `DB_SECRET` for a connection secret `name` of `role` (target or scratch,
+/// or the approval secret) that could not be resolved: names the secret and
+/// the cause, never a value, with advice for that cause (#422).
 pub(super) fn unresolved_secret(
     role: &str,
     name: &str,
@@ -38,9 +38,11 @@ pub(super) fn unresolved_secret(
     use crate::stdlib::secrets::ManifestSecretError::*;
     let subject = match role {
         "scratch" => format!("Scratch connection secret {name}"),
+        "approval" => format!("Approval secret {name}"),
         _ => format!("Target connection secret {name}"),
     };
     let value = match (engine, role) {
+        (_, "approval") => "the reviewed plan's plan_digest",
         ("sqlite", "scratch") => "the absolute path of a separate, empty scratch file (`touch` one: an empty file is a valid SQLite database)",
         ("sqlite", _) => "the absolute path of the existing target file, for example \"$(pwd -P)/data/app.sqlite\"",
         (_, "scratch") => "the scratch database's libpq connection string",

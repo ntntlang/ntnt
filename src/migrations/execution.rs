@@ -149,17 +149,46 @@ fn limits_match(inputs: &CapturedInputs, plan: &Value) -> bool {
 
 /// Resolve exact approval through the existing secret provider. The protected
 /// provider and DB owner are trusted boundaries, not adversaries this can sandbox.
+/// A refusal names the database and its approval secret, never the secret's
+/// value, and says how to approve this plan (#425).
 fn authorize(inputs: &CapturedInputs, saved: &Value) -> Result<()> {
-    let reject = || {
-        Diagnostic::new("DB_APPROVAL_REQUIRED", "A separately declared approval_secret must resolve to this exact reviewed plan digest. No target or ledger writes were attempted; provider details suppressed.")
+    use crate::stdlib::secrets::ManifestSecretError::*;
+    let database = &inputs.database_name;
+    let refuse = |message: String, next_action: String| {
+        let mut d = Diagnostic::new("DB_APPROVAL_REQUIRED", &message);
+        d.next_action = next_action;
+        d
     };
-    let name = inputs.config.approval_secret.as_ref().ok_or_else(reject)?;
-    let approval = crate::stdlib::secrets::require_from_manifest(name, &inputs.document)
-        .map_err(|_| reject())?;
-    if saved["plan_digest"].as_str() != Some(approval.expose()) {
-        return Err(reject());
+    let Some(name) = inputs.config.approval_secret.as_ref() else {
+        let suggested = format!(
+            "{}_MIGRATION_APPROVAL",
+            database.to_ascii_uppercase().replace('-', "_")
+        );
+        return Err(refuse(
+            format!("Database {database} declares no approval_secret, so migrate cannot run any plan for it. No target or ledger writes were attempted."),
+            format!("Declare one: add approval_secret = \"{suggested}\" to [databases.{database}] and a [secrets.{suggested}] table to the manifest. The manifest is part of the plan, so then plan, review and approve again: set {suggested} to the new plan's plan_digest through the secrets provider and run migrate with that plan."),
+        ));
+    };
+    // The digest of an intact saved plan: validate ran first.
+    let digest = saved["plan_digest"].as_str().unwrap_or_default();
+    match crate::stdlib::secrets::require_from_manifest(name, &inputs.document) {
+        Ok(approval) if saved["plan_digest"].as_str() == Some(approval.expose()) => Ok(()),
+        Err(Undeclared) => Err(refuse(
+            format!("Approval secret {name} is not declared under [secrets] in the manifest, so database {database}'s approval_secret cannot be resolved. No target or ledger writes were attempted."),
+            format!("Add a [secrets.{name}] table to the manifest (the name only, never its value). The manifest is part of the plan, so then plan, review and approve again: set {name} to the new plan's plan_digest through the secrets provider and run migrate with that plan."),
+        )),
+        // The provider cannot read any secret: say how to fix that.
+        Err(error @ (EnvProviderDisabled | UnsupportedProvider | ProviderConfiguration | InvalidDeclarations)) => {
+            let mut d = super::report::unresolved_secret("approval", name, &inputs.config.engine, error);
+            d.code = "DB_APPROVAL_REQUIRED".into();
+            d.message.push_str(" No target or ledger writes were attempted.");
+            Err(d)
+        }
+        _ => Err(refuse(
+            format!("Approval secret {name} (database {database}'s approval_secret) does not hold this plan's plan_digest; migrate runs a plan only when it does. No target or ledger writes were attempted; provider details suppressed."),
+            format!("Set {name} to this plan's plan_digest, {digest}, through the secrets provider (for local development with the env provider: export {name}={digest}), then rerun migrate with the same plan."),
+        )),
     }
-    Ok(())
 }
 
 /// Validate a fresh snapshot under session ownership and native relation locks.

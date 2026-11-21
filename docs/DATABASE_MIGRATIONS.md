@@ -146,7 +146,8 @@ opened the file fails `migrate` with `DB_PLAN_STALE` naming `target setting
 journal_mode: plan delete, now wal`; plan and approve again.
 
 `migrate` without `APP_MIGRATION_APPROVAL` fails with `DB_APPROVAL_REQUIRED` and
-writes nothing. Rerunning the same plan reports `already_applied`. For the next
+writes nothing; its `next_action` names `APP_MIGRATION_APPROVAL` and the plan's
+digest to set it to, then rerun `migrate` with the same plan. Rerunning the same plan reports `already_applied`. For the next
 change, run `ntnt db new <name>` (it creates `migrations/0002_<name>.sql`), write
 its SQL, and plan, approve and migrate again. Each new plan has a new digest.
 
@@ -349,7 +350,7 @@ unresolved can still be resolved after upgrading.
 
 ## Exact-plan authority and execution
 
-`approval_secret` is optional for inspection but **required for every execution**, including additive changes and reruns. It names a separate top-level secret, never a connection secret. Its resolved value must be exactly the reviewed `plan_digest` (no whitespace trimming). The deployment/operator publishes that value through a separately protected existing `std/secrets` provider after reviewing the plan and migration SQL. The digest binds SQL/metadata, policy, logical store/target and physical identity; **knowing the digest does not authorize execution**. Obtaining its exact value through the protected provider does. There is no `--approve`, `--force`, self-authorizing manifest Boolean, signing server or new approval service.
+`approval_secret` is optional for inspection but **required for every execution**, including additive changes and reruns. It names a separate top-level secret, never a connection secret. Its resolved value must be exactly the reviewed `plan_digest` (no whitespace trimming). Otherwise `migrate` and `reconcile` fail with `DB_APPROVAL_REQUIRED`, which names the database and its approval secret, never the secret's value: its `next_action` says to set that secret to this plan's `plan_digest` through the secrets provider and rerun with the same plan. A database that declares no `approval_secret`, or whose secret has no `[secrets.<NAME>]` table, is told to declare it; as the manifest is part of the plan, plan and approve again after that. The deployment/operator publishes that value through a separately protected existing `std/secrets` provider after reviewing the plan and migration SQL. The digest binds SQL/metadata, policy, logical store/target and physical identity; **knowing the digest does not authorize execution**. Obtaining its exact value through the protected provider does. There is no `--approve`, `--force`, self-authorizing manifest Boolean, signing server or new approval service.
 
 For PostgreSQL, use separate application and migrator credentials, and restrict schema DDL/ledger ownership to the migrator. SQLite has no database roles: restrict file/directory access and approval delivery through the operating system and provider, as described below. Development fixtures may use the environment provider; protected deployments use the existing Unix-socket provider and separately controlled approval delivery. NTNT cannot protect against someone who already controls that provider or direct database-owner credentials. Never publish resolved connection strings or provider values. Backup/PITR, restore testing, old-client compatibility and maintenance authorization remain separately operated responsibilities; a committed destructive change is not made reversible by transactional rollback.
 
@@ -380,6 +381,7 @@ For example, add this alongside the `app` definition above:
 engine = "postgresql"
 schema = "analytics"
 migrations_dir = "migrations/analytics"
+approval_secret = "ANALYTICS_MIGRATION_APPROVAL"
 
 [databases.analytics.targets.development]
 connection_secret = "ANALYTICS_INSPECTION_DATABASE"
@@ -396,7 +398,13 @@ disposable = true
 required = true
 [secrets.ANALYTICS_REPLAY_DATABASE]
 required = true
+[secrets.ANALYTICS_MIGRATION_APPROVAL]
+required = true
 ```
+
+Each database has its own `approval_secret`, so approving a plan for one never
+approves a plan for another. `migrate` refuses a database that declares none with
+`DB_APPROVAL_REQUIRED`, naming the database and saying to declare one.
 
 ```sh
 ntnt db plan --database app --target development --json
