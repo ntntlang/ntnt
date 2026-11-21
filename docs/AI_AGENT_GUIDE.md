@@ -1737,6 +1737,9 @@ the target, execute SQL checks, or adopt an existing database. They compare the 
 catalog to replay at the **applied prefix**, not the pending repository head. Read
 `catalog.uncovered`, `diagnostics`, and `assertions`: unknown coverage is not no drift,
 and zero executed SQL assertions is `not_run`, not a business-verification pass.
+`DB_COVERAGE_INCOMPLETE` lists the uncovered catalog keys in `objects` and, when
+replaying a migration produced them, names that migration in `source`. SQLite
+covers partial and expression indexes by definition, like PostgreSQL.
 Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
 
 `ntnt db migrate --database app --target development --plan review.json --json`
