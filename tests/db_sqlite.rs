@@ -1383,6 +1383,46 @@ fn sqlite_failed_statement_is_numbered() {
     assert_eq!(d["source"], "0001_initial.sql", "{d}");
 }
 
+/// Longest the replay-timeout test waits for `ntnt db plan` to exit. The plan
+/// stops at the replay's statement deadline after a few seconds; only a
+/// deadline that never fires reaches this guard, which then fails the test
+/// instead of leaving CI waiting on a query that would run for hours.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The JSON `command` prints, failing the test if it outlives `HANG_GUARD`.
+fn json_within_hang_guard(mut command: std::process::Command) -> Value {
+    use std::io::Read;
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Drain both pipes on their own threads, so a full pipe never stalls the child.
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).map(|_| bytes)
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
+    let started = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > HANG_GUARD {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("`ntnt db plan` still ran after HANG_GUARD ({HANG_GUARD:?}): the replay deadline never fired");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let (stdout, stderr) = (
+        stdout.join().unwrap().unwrap(),
+        stderr.join().unwrap().unwrap(),
+    );
+    serde_json::from_slice(&stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&stderr)))
+}
+
 /// A replay that runs out of time is reported as DB_TIMEOUT. Its session is
 /// discarded, so the cleanup rollback fails as well; that failure is listed
 /// after the timeout instead of replacing it. The statement is a cross join of
@@ -1403,7 +1443,7 @@ fn sqlite_replay_timeout_is_reported_before_its_failed_cleanup() {
              INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3, main.a AS a4, main.a AS a5, main.a AS a6;"
         ),
     );
-    let r = f.command("plan", &[]);
+    let r = json_within_hang_guard(f.process("plan"));
     assert_ne!(r["outcome"], "pass", "{r}");
     let codes: Vec<&str> = r["diagnostics"]
         .as_array()
