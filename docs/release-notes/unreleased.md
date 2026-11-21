@@ -39,17 +39,40 @@ reports a runtime error in an imported module against that module's file.
   `DB_STATEMENT_LIMIT`, naming the statement and the limit. Scratch replay keeps
   its fixed 5-second bound. A plan records a declared limit, so a changed limit
   makes the plan stale (#429).
+- **Long histories.** Replay inspection reuses the work for objects a migration
+  does not change, so `plan`, `status`, `verify` and `migrate` grow about
+  linearly with the history: 400 one-table migrations plan in under half a
+  second instead of 28 seconds, and 1,024 in about 2 seconds instead of timing
+  out. Histories dense in foreign keys benefit too: a 400-table `ON DELETE
+  CASCADE` chain plans in half a second. SQLite refuses programs nested more
+  than 1,000 trigger or foreign-key-action levels deep, so a table at the end
+  of a deeper chain is uncovered. SQLite operations now run on threads with an
+  8 MiB stack, enough for the deepest programs SQLite accepts (#421).
 
 ## `ntnt db` on PostgreSQL
 
-- **Schemas the history creates.** Inspection covers every schema the
-  migration history creates, with the same coverage and drift rules as the
-  managed schema. An object dropped there out of band is now reported as drift,
-  not as a pass. A migration that would create, change or drop objects in any
-  other schema is refused with `DB_OUTSIDE_SCOPE`, naming the objects (#420).
+- **Objects outside the managed schema.** Inspection covers every schema the
+  migration history creates, and the objects the history creates in other
+  schemas (for example `public.audit_log`), with the same coverage and drift
+  rules as the managed schema. An object dropped there out of band is now
+  reported as drift, not as a pass. Other objects in those schemas are not
+  inspected (#420).
+- **Statements outside the managed schema** run as written. A pending statement
+  that may act outside the managed scope (a qualified name, an `IN SCHEMA` list,
+  `search_path`, or SQL the parser cannot read) is flagged in the plan with the
+  hazard `OUTSIDE_MANAGED_SCOPE`, naming the statement and the schema, and the
+  plan can still be approved. `DB_OUTSIDE_SCOPE` refuses only changes to the
+  `_ntnt` ledger schema and to system schemas. When the history creates objects
+  outside the managed scope, `status` and `verify` read the target twice, and
+  report `DB_TARGET_CHANGED` instead of comparing if it changed in between. A
+  saved plan whose pending migrations act outside the managed scope must be
+  planned again (#420).
 - **Policies that call outside routines.** A row-level security policy that
   calls a routine outside `pg_catalog` and the managed scope is now uncovered.
   It used to be reported as covered (#434).
+- **Long histories (unchanged).** PostgreSQL replay still costs time in
+  proportion to the square of the history length; DATABASE_MIGRATIONS.md
+  states the current limits. #421 stays open for PostgreSQL.
 
 ## `ntnt db` on every engine
 
