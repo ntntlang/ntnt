@@ -222,6 +222,8 @@ fn database_runtime_on<T>(
 ) -> Result<T> {
     let runtime = builder
         .enable_all()
+        // SQLite operations run on the runtime's blocking threads.
+        .thread_stack_size(sqlite::OPERATION_STACK)
         .build()
         .map_err(|_| Diagnostic::new("DB_RUNTIME", "Cannot create database I/O runtime."))?;
     let result = runtime.block_on(async {
@@ -777,5 +779,60 @@ mod tests {
         result
             .expect("database_runtime must return while the blocking work still runs")
             .unwrap();
+    }
+
+    /// #421: SQLite operations run on threads with a stack of their own, so
+    /// the deepest program SQLite compiles (an INSERT whose triggers nest
+    /// 1,000 levels deep, its limit) compiles whatever stack std gives other
+    /// threads, and one level deeper is refused rather than overflowing the
+    /// stack. The test runs itself again with RUST_MIN_STACK at 1 MiB, less
+    /// than that compile needs.
+    #[test]
+    fn sqlite_operations_compile_the_deepest_programs_on_their_own_stack() {
+        const CHILD: &str = "NTNT_TEST_DEEPEST_SQLITE_PROGRAM";
+        if std::env::var_os(CHILD).is_none() {
+            let name = "migrations::tests::sqlite_operations_compile_the_deepest_programs_on_their_own_stack";
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([name, "--exact", "--nocapture", "--test-threads", "1"])
+                .env(CHILD, "1")
+                .env("RUST_MIN_STACK", "1048576")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deep.sqlite");
+        let mut sql = String::from("BEGIN; CREATE TABLE t1(v INTEGER);");
+        for i in 2..=1002 {
+            let p = i - 1;
+            sql.push_str(&format!("CREATE TABLE t{i}(v INTEGER); CREATE TRIGGER g{p} AFTER INSERT ON t{p} BEGIN INSERT INTO t{i}(v) VALUES (new.v); END;"));
+        }
+        sql.push_str("COMMIT;");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(&sql)
+            .unwrap();
+        let secret =
+            crate::interpreter::SecretValue::new("FIXTURE", path.to_str().unwrap().to_owned())
+                .unwrap();
+        let (deepest, deeper) =
+            super::database_runtime(std::time::Duration::from_secs(120), async {
+                let db = super::sqlite::Sqlite::connect(&secret, super::adapter::Access::Inspect)
+                    .await?;
+                // t2's INSERT fires g2 to g1001: 1,000 levels. t1's fires g1 too.
+                let deepest = db.compile("INSERT INTO t2(v) VALUES (1)").await;
+                let deeper = db.compile("INSERT INTO t1(v) VALUES (1)").await;
+                Ok((deepest, deeper))
+            })
+            .unwrap();
+        assert!(deepest.is_ok(), "{deepest:?}");
+        assert_eq!(deeper.map_err(|d| d.code), Err("DB_SQLITE".to_owned()));
     }
 }

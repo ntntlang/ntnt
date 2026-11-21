@@ -28,6 +28,13 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// it discards the session: an operation SQLite can interrupt always returns
 /// first, and only one stuck outside SQLite is discarded.
 const DISCARD_GRACE: Duration = Duration::from_secs(5);
+/// The stack of each thread that runs SQLite operations: the database
+/// runtime gives its blocking threads this much (`database_runtime_on`).
+/// Compiling a program recurses through every trigger and foreign-key action
+/// it nests, up to SQLITE_LIMIT_TRIGGER_DEPTH (1,000) levels, and at that
+/// limit needed up to 1.75 MiB, most of the 2 MiB std gives a thread by
+/// default (#421). This is more than four times that.
+pub(super) const OPERATION_STACK: usize = 8 << 20;
 const LEDGER: &str = "_ntnt_schema_migrations_v2";
 const LEDGER_SQL: &str = "CREATE TABLE _ntnt_schema_migrations_v2 (position INTEGER NOT NULL PRIMARY KEY,id TEXT NOT NULL,name TEXT NOT NULL,checksum TEXT NOT NULL,state TEXT NOT NULL,logical_database TEXT NOT NULL,managed_schema TEXT NOT NULL) STRICT";
 
@@ -1297,6 +1304,17 @@ impl Sqlite {
                 .set_limit(Limit::SQLITE_LIMIT_TRIGGER_DEPTH, limit)
                 .map_err(sql_error)?;
             Ok(())
+        })
+        .await
+    }
+    /// Compile `sql` under the definition policy, as inspection compiles a
+    /// table's programs.
+    #[cfg(test)]
+    pub async fn compile(&self, sql: &str) -> Result<()> {
+        let sql = sql.to_owned();
+        self.run(move |s| {
+            let _active = s.auth.activate(&s.conn, Policy::Definition)?;
+            s.conn.prepare(&sql).map(drop).map_err(sql_error)
         })
         .await
     }
