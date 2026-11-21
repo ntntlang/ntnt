@@ -2875,3 +2875,33 @@ fn histories_that_create_nothing_outside_record_no_outside_objects() {
         assert!(verified["target"].get("outside_objects").is_none(), "{history}");
     }
 }
+
+/// A check runs after migrations whose managed objects refer to an object the
+/// history created outside the managed scope: check purity inspects those
+/// objects as plan, verify and migrate do (#420, review r4654889022).
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_run_after_managed_objects_refer_to_objects_created_outside() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE public.audit_log (id int PRIMARY KEY, msg text);
+CREATE TABLE app.entries (id int PRIMARY KEY, log int REFERENCES public.audit_log (id));
+CREATE VIEW app.recent AS SELECT id, msg FROM public.audit_log;",
+    );
+    f.sql("0002_seed.sql", "INSERT INTO app.entries VALUES (1, NULL);");
+    std::fs::write(
+        f.root.path().join("migrations/0002_seed.toml"),
+        "[ensures]\nseeded = 'SELECT EXISTS (SELECT 1 FROM app.entries)'\n",
+    )
+    .unwrap();
+    let plan = f.plan("checked.json");
+    assert_eq!(
+        plan["plan"]["execution"]["outside_objects"],
+        serde_json::json!(["public.relation:audit_log"]),
+        "{plan}"
+    );
+    let applied = f.apply("checked.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(applied["assertions"]["executed"], 1, "{applied}");
+}

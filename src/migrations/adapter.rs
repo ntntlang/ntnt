@@ -297,9 +297,18 @@ impl Adapter {
             Self::Sqlite(db) => db.execute_captured(migration, limit).await,
         }
     }
-    pub async fn check_purity(&self, schema: &str, extra: &[String]) -> Result<()> {
+    /// Live objects must stay within check-purity coverage. `outside` lists
+    /// the objects the history creates outside the managed scope, which the
+    /// plan records; references to them are covered as in every other
+    /// inspection (#420).
+    pub async fn check_purity(
+        &self,
+        schema: &str,
+        extra: &[String],
+        outside: &[String],
+    ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.check_purity(schema, extra).await,
+            Self::Postgres(pg) => pg.check_purity(schema, extra, outside).await,
             Self::Sqlite(db) => db.check_purity().await,
         }
     }

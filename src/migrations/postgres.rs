@@ -836,8 +836,13 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     }
     /// Checks read only managed-schema tables, so objects the history creates
     /// outside the managed scope do not matter here.
-    pub async fn check_purity(&self, schema: &str, extra: &[String]) -> Result<()> {
-        let catalog = self.catalog(schema, extra, &[], "").await?;
+    pub async fn check_purity(
+        &self,
+        schema: &str,
+        extra: &[String],
+        outside: &[String],
+    ) -> Result<()> {
+        let catalog = self.catalog(schema, extra, outside, "").await?;
         if !catalog.uncovered.is_empty() {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
