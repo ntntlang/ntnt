@@ -597,7 +597,7 @@ fn module_path_follows_the_entry_path_as_typed_from_another_directory() {
     );
 }
 
-const RATIO: &str = "// ratio pad\n// pad\nfn ratio(a, b)\n    requires a / b > 0\n{\n    return a / b\n}\nfn scaled(a)\n    ensures result / 0 > 1\n{\n    return a\n}\n";
+const RATIO: &str = "// ratio pad\n// pad\nfn ratio(a, b)\n    requires a / b > 0\n{\n    return a / b\n}\nfn scaled(a)\n    ensures result / 0 > 1\n{\n    return a\n}\nfn kept(a, b)\n    ensures result == old(a / b)\n{\n    return a\n}\n";
 
 #[test]
 fn contract_clause_that_fails_to_evaluate_names_the_module_clause() {
@@ -606,13 +606,15 @@ fn contract_clause_that_fails_to_evaluate_names_the_module_clause() {
     for (call, line, text) in [
         ("ratio(1, 0)", 4, "    requires a / b > 0"),
         ("scaled(1)", 9, "    ensures result / 0 > 1"),
+        // An old() argument is evaluated before the body, for its clause.
+        ("kept(1, 0)", 14, "    ensures result == old(a / b)"),
     ] {
         let (_root, app) = app();
         write(&app, "lib/ratio.tnt", RATIO);
         write(
             &app,
             "main.tnt",
-            &format!("import {{ ratio, scaled }} from \"lib/ratio\"\nprint(\"checking\")\nlet x = {call}\n"),
+            &format!("import {{ ratio, scaled, kept }} from \"lib/ratio\"\nprint(\"checking\")\nlet x = {call}\n"),
         );
         let run = run(&app);
         assert_reported(
@@ -627,21 +629,24 @@ fn contract_clause_that_fails_to_evaluate_names_the_module_clause() {
 
 #[test]
 fn a_default_argument_does_not_move_the_contract_call_line() {
-    // `b = pad()` runs pad's statements before the precondition is checked;
-    // the note still names the call on line 11, not pad's last line, 3.
-    let (_root, app) = app();
-    write(
-        &app,
-        "main.tnt",
-        "fn pad() {\n    let unused = 0\n    return 0\n}\nfn need(a, b = pad())\n    requires a > 0\n{\n    return a\n}\nprint(\"calling\")\nneed(0)\n",
-    );
-    let run = run(&app);
-    assert_reported(&run, "main.tnt", 6, "    requires a > 0", &[]);
-    assert!(
-        run.stderr.contains("contract checked for call at line 11"),
-        "{}",
-        run.stderr
-    );
+    // pad() runs its statements before the precondition is checked: as a
+    // default argument, as an argument, or earlier in the same expression. The
+    // note still names the call on line 11, never pad's last line, 3.
+    for call in ["need(0)", "need(pad())", "let x = pad() + need(0)"] {
+        let (_root, app) = app();
+        write(
+            &app,
+            "main.tnt",
+            &format!("fn pad() {{\n    let unused = 0\n    return 0\n}}\nfn need(a, b = pad())\n    requires a > 0\n{{\n    return a\n}}\nprint(\"calling\")\n{call}\n"),
+        );
+        let run = run(&app);
+        assert_reported(&run, "main.tnt", 6, "    requires a > 0", &[]);
+        assert!(
+            run.stderr.contains("contract checked for call at line 11"),
+            "{call}: {}",
+            run.stderr
+        );
+    }
 }
 
 #[cfg(unix)]

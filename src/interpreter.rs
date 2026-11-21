@@ -10119,6 +10119,10 @@ impl Interpreter {
         let deferred_base = self.deferred_statements.len();
         let caller_old = self.current_old_values.take();
         let caller_result = self.current_result.take();
+        // The caller's statement position. The callee's statements move it, and
+        // the rest of the caller's statement (a later call's contract note, a
+        // native assertion) must name the caller's own line again.
+        let caller_position = (self.current_line, self.current_col);
 
         let outcome = self.run_callee(
             &name,
@@ -10139,6 +10143,7 @@ impl Interpreter {
         let finished_env = std::mem::replace(&mut self.environment, caller_env);
         self.current_old_values = caller_old;
         self.current_result = caller_result;
+        (self.current_line, self.current_col) = caller_position;
         cycles::retire(finished_env);
         cycles::collect(false);
         outcome
@@ -11616,7 +11621,15 @@ impl Interpreter {
         let mut old_values = OldValues::new();
 
         for clause in ensures {
-            self.extract_old_calls(&clause.expression, &mut old_values)?;
+            // An error evaluating an old() argument is its clause's own (#412).
+            self.extract_old_calls(&clause.expression, &mut old_values)
+                .map_err(|e| {
+                    if clause.line > 0 {
+                        self.error_left_statement(e, clause.line)
+                    } else {
+                        e
+                    }
+                })?;
         }
 
         Ok(old_values)
