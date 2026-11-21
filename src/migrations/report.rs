@@ -1407,7 +1407,8 @@ mod tests {
         for i in 2..=5 {
             below_cycle.push_str(&cascade(&format!("z{i}"), &format!("z{}", i - 1)));
         }
-        let histories: Vec<(i32, Vec<(String, &[&str])>)> = vec![
+        type Steps<'a> = Vec<(String, &'a [&'a str])>;
+        let histories: Vec<(i32, Steps)> = vec![
             (1, vec![
                 (format!("CREATE TABLE r7(id INTEGER PRIMARY KEY); {}", cascade("tree", "r7")), &[]),
                 ("ALTER TABLE tree ADD COLUMN parent INTEGER REFERENCES tree(id) ON DELETE CASCADE;".into(), &["r7"]),

@@ -161,7 +161,8 @@ pub(super) fn names(sql: &str, out: &mut HashSet<String>) {
 /// deleted or its key updated, as `pragma_foreign_key_list` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum Action {
-    NoAction,
+    /// NO ACTION.
+    None,
     Restrict,
     SetNull,
     SetDefault,
@@ -172,7 +173,7 @@ pub(super) enum Action {
 impl Action {
     pub fn parse(text: Option<&str>) -> Self {
         match text {
-            Some("NO ACTION") => Self::NoAction,
+            Some("NO ACTION") => Self::None,
             Some("RESTRICT") => Self::Restrict,
             Some("SET NULL") => Self::SetNull,
             Some("SET DEFAULT") => Self::SetDefault,
@@ -829,7 +830,7 @@ impl Cache {
         for (grandchild, position) in &group.into {
             reads.insert(grandchild);
             let key = self.key(grandchild, *position);
-            if key.on_update != Action::NoAction && key.changed_by(columns, &output.primary_key) {
+            if key.on_update != Action::None && key.changed_by(columns, &output.primary_key) {
                 leaf = false;
             }
         }
@@ -855,11 +856,11 @@ impl Cache {
     ) -> bool {
         let mut leaf = || self.leaf(child, &key.from, reads);
         (match key.on_delete {
-            Action::NoAction | Action::Restrict | Action::Cascade => true,
+            Action::None | Action::Restrict | Action::Cascade => true,
             Action::SetNull => leaf(),
             _ => false,
         }) && match key.on_update {
-            Action::NoAction | Action::Restrict => true,
+            Action::None | Action::Restrict => true,
             Action::Cascade | Action::SetNull => leaf(),
             _ => false,
         }
@@ -975,7 +976,7 @@ impl Cache {
             );
             for (child, position) in &group.into {
                 let key = self.key(child, *position);
-                if key.on_delete == Action::NoAction && key.on_update == Action::NoAction {
+                if key.on_delete == Action::None && key.on_update == Action::None {
                     continue;
                 }
                 programs[index] += 2;
