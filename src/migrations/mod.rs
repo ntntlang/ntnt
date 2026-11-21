@@ -54,8 +54,9 @@ impl Diagnostic {
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and other non-transactional statements from migration files. The one supported non-transactional migration is a lone named CREATE INDEX CONCURRENTLY without checks.",
             "DB_COVERAGE_INCOMPLETE" => "Its objects field lists each catalog object outside supported inspection; when replaying a migration produced them, its source field names that migration (the target's own uncovered objects are also in catalog.uncovered). Change or remove those objects to stay within the coverage in docs/DATABASE_MIGRATIONS.md, or obtain manual evidence; do not interpret this result as no drift.",
             "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
-            "DB_OUTSIDE_SCOPE" => "Keep the named objects inside the managed scope: create, change and drop objects only in the configured schema or in a schema the history itself creates with a top-level CREATE SCHEMA statement. Its objects field names each object outside that scope and source names the migration. Provision shared objects, such as extensions in public, outside migrations. See docs/DATABASE_MIGRATIONS.md#managed-scope.",
+            "DB_OUTSIDE_SCOPE" => "Remove the named statements from the migration that source names. The _ntnt schema holds NTNT's migration ledger, and pg_catalog, information_schema and the other pg_* schemas belong to PostgreSQL: migrations may not create, change, drop, grant or revoke on them, or put _ntnt on the search_path (pg_temp is allowed). Statements on other schemas, such as public, are allowed. See docs/DATABASE_MIGRATIONS.md#managed-scope.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
+            "DB_TARGET_CHANGED" => "Another session changed the target while it was being inspected, for example a concurrent migrate. Rerun the command once that work has finished.",
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
@@ -67,7 +68,7 @@ impl Diagnostic {
             "DB_ATTEMPT_ACTIVE" => "The index build is still running in another session. Wait for it to finish or cancel that backend, then reconcile again.",
             "DB_RECONCILE_INCOMPLETE" => "The planned invalid index was dropped, so the database has changed, but the result did not match the plan's state before the migration and the attempt was kept. Inspect drift with an operator, then reconcile again.",
             "DB_RECONCILE_MISMATCH" => "The database does not match either outcome the plan predicts for this attempt. Nothing was changed. Inspect the named object with an operator; never edit the ledger to force a state.",
-            "DB_REBUILD_REQUIRED" => "Rebuild the named table with a `sqlite_rebuild = \"<table>\"` sidecar (docs/DATABASE_MIGRATIONS.md, SQLite table rebuilds), which runs the migration with foreign-key actions off and checks the rebuilt table, or remove those foreign keys in an earlier migration. Nothing ran.",
+            "DB_REBUILD_REQUIRED" => "If the migration rebuilds the named table (creates its replacement and copies the rows), add a `sqlite_rebuild = \"<table>\"` sidecar (docs/DATABASE_MIGRATIONS.md, SQLite table rebuilds), which runs the migration with foreign-key actions off and checks the rebuilt table. If it retires the table, the sidecar cannot help, because a rebuild must keep every table: first remove the foreign keys that reference it from the tables the message names, or drop those tables, earlier in the migration or in an earlier one. SQLite removes a foreign key only by rebuilding its table: create the table again without the key, copy its rows, drop the old table and rename the new one. Nothing ran.",
             "DB_MIGRATION_EMPTY" => "Write the migration's SQL below its header comment, or delete the file if it is not needed yet. Nothing was run.",
             "DB_STATEMENT_LIMIT" => "Make the statement cheaper. For migrate on a target, raise statement_seconds in [databases.<name>.limits] (docs/DATABASE_MIGRATIONS.md, Time limits) and review a new plan, since the limit is part of the plan; replay's limit on the empty scratch database is fixed.",
             "DB_BUSY" => "Retry once the writer finishes: wait for the other connection's write transaction to end, or close the connection that set PRAGMA locking_mode=EXCLUSIVE (it keeps the lock until it closes), then rerun the same command. Nothing was committed while ntnt waited; migrate, rerun with the same plan, skips any migration already committed.",
@@ -321,6 +322,8 @@ fn database_runtime_on<T>(
 ) -> Result<T> {
     let runtime = builder
         .enable_all()
+        // SQLite operations run on the runtime's blocking threads.
+        .thread_stack_size(sqlite::OPERATION_STACK)
         .build()
         .map_err(|_| Diagnostic::new("DB_RUNTIME", "Cannot create database I/O runtime."))?;
     let result = runtime.block_on(async {
@@ -844,6 +847,20 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     warning["code"], warning["relation"], warning["statement"], warning["message"]
                 );
             }
+            // Never refused, and NTNT inspects only what the history creates
+            // there: for the reviewer, like a destructive change.
+            for note in migration["analysis"]["outside_scope"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let (statement, schema) = (&note["statement"], &note["schema"]);
+                match note["via"].as_str() {
+                    Some("search_path") => println!("  Outside the managed scope: statement {statement} puts schema {schema} on the search path"),
+                    Some("token") => println!("  Outside the managed scope: statement {statement} names schema {schema} in SQL NTNT does not analyze"),
+                    _ => println!("  Outside the managed scope: statement {statement} names schema {schema}"),
+                }
+            }
         }
         for d in report["diagnostics"].as_array().into_iter().flatten() {
             println!("{}: {}", d["code"], d["message"]);
@@ -1091,5 +1108,62 @@ mod tests {
         result
             .expect("database_runtime must return while the blocking work still runs")
             .unwrap();
+    }
+
+    /// #421: SQLite operations run on threads with a stack of their own, so
+    /// the deepest program SQLite compiles (an INSERT whose triggers nest
+    /// 1,000 levels deep, its limit) compiles whatever stack std gives other
+    /// threads, and one level deeper is refused rather than overflowing the
+    /// stack. The test runs itself again with RUST_MIN_STACK at 1 MiB, less
+    /// than that compile needs.
+    #[test]
+    fn sqlite_operations_compile_the_deepest_programs_on_their_own_stack() {
+        const CHILD: &str = "NTNT_TEST_DEEPEST_SQLITE_PROGRAM";
+        if std::env::var_os(CHILD).is_none() {
+            let name = "migrations::tests::sqlite_operations_compile_the_deepest_programs_on_their_own_stack";
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([name, "--exact", "--nocapture", "--test-threads", "1"])
+                .env(CHILD, "1")
+                .env("RUST_MIN_STACK", "1048576")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // SQLite targets must not sit under a symlink; macOS temp dirs do
+        // (/var is a link to /private/var).
+        let path = dir.path().canonicalize().unwrap().join("deep.sqlite");
+        let mut sql = String::from("BEGIN; CREATE TABLE t1(v INTEGER);");
+        for i in 2..=1002 {
+            let p = i - 1;
+            sql.push_str(&format!("CREATE TABLE t{i}(v INTEGER); CREATE TRIGGER g{p} AFTER INSERT ON t{p} BEGIN INSERT INTO t{i}(v) VALUES (new.v); END;"));
+        }
+        sql.push_str("COMMIT;");
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(&sql)
+            .unwrap();
+        let secret =
+            crate::interpreter::SecretValue::new("FIXTURE", path.to_str().unwrap().to_owned())
+                .unwrap();
+        let (deepest, deeper) =
+            super::database_runtime(std::time::Duration::from_secs(120), async {
+                let db = super::sqlite::Sqlite::connect(&secret, super::adapter::Access::Inspect)
+                    .await?;
+                // t2's INSERT fires g2 to g1001: 1,000 levels. t1's fires g1 too.
+                let deepest = db.compile("INSERT INTO t2(v) VALUES (1)").await;
+                let deeper = db.compile("INSERT INTO t1(v) VALUES (1)").await;
+                Ok((deepest, deeper))
+            })
+            .unwrap();
+        assert!(deepest.is_ok(), "{deepest:?}");
+        assert_eq!(deeper.map_err(|d| d.code), Err("DB_SQLITE".to_owned()));
     }
 }

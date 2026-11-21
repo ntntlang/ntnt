@@ -26,8 +26,15 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   (#429).
 - `ntnt db`: a migration with no statements fails with DB_MIGRATION_EMPTY
   (#428).
-- `ntnt db` (PostgreSQL): inspection covers the schemas the history creates, and
-  changes to other schemas are refused with DB_OUTSIDE_SCOPE (#420).
+- `ntnt db` (PostgreSQL): inspection covers the schemas the history creates and
+  the objects it creates in other schemas; statements outside the managed scope
+  run as written and are flagged in the plan (OUTSIDE_MANAGED_SCOPE);
+  DB_OUTSIDE_SCOPE refuses only changes to `_ntnt` and system schemas;
+  DB_TARGET_CHANGED reports a target that changed between verify's two reads
+  (#420).
+- `ntnt db` (SQLite): replay inspection reuses unchanged work, so long
+  histories, including ones dense in foreign keys, plan in seconds; SQLite
+  operations get an 8 MiB stack (#421).
 - `ntnt db` (PostgreSQL): a policy that calls a routine outside the managed scope
   is uncovered (#434).
 - `ntnt run`: a runtime error raised in an imported module names that module's

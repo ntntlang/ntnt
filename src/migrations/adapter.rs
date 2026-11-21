@@ -72,10 +72,18 @@ impl Adapter {
         }
     }
     /// The managed scope's catalog: `schema` and, for PostgreSQL, the `extra`
-    /// schemas the history creates (`CapturedInputs::history_schemas`).
-    pub async fn catalog(&self, schema: &str, extra: &[String], role: &str) -> Result<Catalog> {
+    /// schemas the history creates (`CapturedInputs::history_schemas`) and the
+    /// `outside` objects it creates in other schemas, by catalog key (empty
+    /// for SQLite).
+    pub async fn catalog(
+        &self,
+        schema: &str,
+        extra: &[String],
+        outside: &[String],
+        role: &str,
+    ) -> Result<Catalog> {
         match self {
-            Self::Postgres(pg) => pg.catalog(schema, extra, role).await,
+            Self::Postgres(pg) => pg.catalog(schema, extra, outside, role).await,
             Self::Sqlite(db) => db.catalog().await,
         }
     }
@@ -86,12 +94,13 @@ impl Adapter {
         &self,
         schema: &str,
         extra: &[String],
+        outside: &[String],
         role: &str,
         digests: &mut CatalogDigests,
     ) -> Result<(Vec<String>, String)> {
         match self {
             Self::Postgres(pg) => {
-                let catalog = pg.catalog(schema, extra, role).await?;
+                let catalog = pg.catalog(schema, extra, outside, role).await?;
                 let fingerprint = digests.digest(&catalog);
                 Ok((catalog.uncovered, fingerprint))
             }
@@ -103,11 +112,21 @@ impl Adapter {
         &self,
         schema: &str,
         extra: &[String],
+        outside: &[String],
         role: &str,
     ) -> Result<Vec<String>> {
         match self {
-            Self::Postgres(pg) => Ok(pg.catalog(schema, extra, role).await?.uncovered),
+            Self::Postgres(pg) => Ok(pg.catalog(schema, extra, outside, role).await?.uncovered),
             Self::Sqlite(db) => db.coverage().await,
+        }
+    }
+    /// PostgreSQL scratch: what the replayed history created outside the
+    /// managed scope so far, by catalog key, for `catalog`'s `outside`.
+    /// Empty for SQLite, whose scope is all of `main`, and for a target.
+    pub async fn outside_objects(&self, schema: &str, extra: &[String]) -> Result<Vec<String>> {
+        match self {
+            Self::Postgres(pg) => pg.outside_objects(schema, extra).await,
+            Self::Sqlite(_) => Ok(vec![]),
         }
     }
     pub async fn history(&self) -> Result<History> {
@@ -222,9 +241,14 @@ impl Adapter {
             Self::Sqlite(_) => Ok(None),
         }
     }
-    pub async fn validate_execution_scope(&self, schema: &str, extra: &[String]) -> Result<()> {
+    pub async fn validate_execution_scope(
+        &self,
+        schema: &str,
+        extra: &[String],
+        outside: &[String],
+    ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.validate_execution_scope(schema, extra).await,
+            Self::Postgres(pg) => pg.validate_execution_scope(schema, extra, outside).await,
             Self::Sqlite(_) => Ok(()),
         }
     }
@@ -245,11 +269,10 @@ impl Adapter {
         target: &Identity,
         endpoint: &Endpoint,
         schema: &str,
-        extra: &[String],
     ) -> Result<Identity> {
         match (self, target) {
             (Self::Postgres(pg), Identity::Postgres(target)) => pg
-                .prepare_scratch(target, endpoint, schema, extra)
+                .prepare_scratch(target, endpoint, schema)
                 .await
                 .map(Identity::Postgres),
             (Self::Sqlite(db), Identity::Sqlite(target)) => {
@@ -263,22 +286,29 @@ impl Adapter {
     }
     /// `limit` bounds the migration on a target: each PostgreSQL statement, or
     /// the whole SQLite script. Scratch replay keeps SQLite's fixed bound.
-    /// `extra` lists the schemas the history creates (PostgreSQL; empty for SQLite).
     pub async fn execute_captured(
         &self,
         migration: &Migration,
         schema: &str,
-        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.execute_captured(migration, schema, extra, limit).await,
+            Self::Postgres(pg) => pg.execute_captured(migration, schema, limit).await,
             Self::Sqlite(db) => db.execute_captured(migration, limit).await,
         }
     }
-    pub async fn check_purity(&self, schema: &str, extra: &[String]) -> Result<()> {
+    /// Live objects must stay within check-purity coverage. `outside` lists
+    /// the objects the history creates outside the managed scope, which the
+    /// plan records; references to them are covered as in every other
+    /// inspection (#420).
+    pub async fn check_purity(
+        &self,
+        schema: &str,
+        extra: &[String],
+        outside: &[String],
+    ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.check_purity(schema, extra).await,
+            Self::Postgres(pg) => pg.check_purity(schema, extra, outside).await,
             Self::Sqlite(db) => db.check_purity().await,
         }
     }

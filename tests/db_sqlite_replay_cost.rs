@@ -150,6 +150,72 @@ fn a_new_referencing_table_uncovers_a_parent_whose_name_a_trigger_shares() {
     );
 }
 
+/// A table's programs are not compiled again when a table below it in a
+/// chain of ON DELETE CASCADE keys is added; when the new one's delete
+/// trigger writes the ledger, every table above it is outside coverage.
+#[test]
+fn a_cascade_into_a_new_table_uncovers_every_table_above_it() {
+    let mut migrations = vec![(
+        "0001_t1.sql".to_owned(),
+        "CREATE TABLE t1(id INTEGER PRIMARY KEY);".to_owned(),
+    )];
+    for i in 2..=5 {
+        migrations.push((
+            format!("{i:04}_t{i}.sql"),
+            format!("CREATE TABLE t{i}(id INTEGER PRIMARY KEY, prev INTEGER REFERENCES t{}(id) ON DELETE CASCADE);", i - 1),
+        ));
+    }
+    migrations.push(("0006_t6.sql".to_owned(), "CREATE TABLE t6(id INTEGER PRIMARY KEY, prev INTEGER REFERENCES t5(id) ON DELETE CASCADE); CREATE TRIGGER t6_gone AFTER DELETE ON t6 BEGIN DELETE FROM _ntnt_schema_migrations_v2; END;".to_owned()));
+    let migrations: Vec<(&str, &str)> = migrations
+        .iter()
+        .map(|(name, sql)| (name.as_str(), sql.as_str()))
+        .collect();
+    plan_stops_at(
+        &migrations,
+        "0006_t6.sql",
+        json!([
+            "table:\"t1\"",
+            "table:\"t2\"",
+            "table:\"t3\"",
+            "table:\"t4\"",
+            "table:\"t5\"",
+            "table:\"t6\""
+        ]),
+    );
+}
+
+/// ON DELETE SET NULL updates the child's key column, so a trigger on an
+/// UPDATE of that column, added to the unchanged child, takes the parent
+/// and the table above it outside coverage.
+#[test]
+fn a_set_null_child_s_update_trigger_uncovers_its_parents() {
+    plan_stops_at(
+        &[
+            ("0001_initial.sql", "CREATE TABLE a(id INTEGER PRIMARY KEY); CREATE TABLE b(id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES a(id) ON DELETE CASCADE);"),
+            ("0002_child.sql", "CREATE TABLE c(id INTEGER PRIMARY KEY, b_id INTEGER REFERENCES b(id) ON DELETE SET NULL);"),
+            ("0003_trigger.sql", "CREATE TRIGGER c_b AFTER UPDATE OF b_id ON c BEGIN DELETE FROM _ntnt_schema_migrations_v2; END;"),
+        ],
+        "0003_trigger.sql",
+        json!(["table:\"a\"", "table:\"b\"", "table:\"c\""]),
+    );
+}
+
+/// ON UPDATE CASCADE through two levels of unique keys: a trigger on the
+/// grandchild's UPDATE takes the child and the grandparent outside
+/// coverage, though neither changed.
+#[test]
+fn an_update_cascade_through_a_grandchild_uncovers_the_grandparent() {
+    plan_stops_at(
+        &[
+            ("0001_initial.sql", "CREATE TABLE a(id INTEGER PRIMARY KEY, k TEXT UNIQUE); CREATE TABLE f(id INTEGER PRIMARY KEY, a_k TEXT UNIQUE REFERENCES a(k) ON UPDATE CASCADE);"),
+            ("0002_grandchild.sql", "CREATE TABLE g(id INTEGER PRIMARY KEY, f_a_k TEXT REFERENCES f(a_k) ON UPDATE CASCADE);"),
+            ("0003_trigger.sql", "CREATE TRIGGER g_up AFTER UPDATE ON g BEGIN DELETE FROM _ntnt_schema_migrations_v2; END;"),
+        ],
+        "0003_trigger.sql",
+        json!(["table:\"a\"", "table:\"f\"", "table:\"g\""]),
+    );
+}
+
 /// The per-migration guarantee itself: an object outside coverage that a
 /// later migration removes is still found, attributed to the migration that
 /// made it.

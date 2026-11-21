@@ -79,10 +79,11 @@ pub(super) fn validate_named(
         })
         .map(|m| {
             let mut s = m.summary();
-            s["analysis"] = json!(super::analysis::analyze_for(
+            s["analysis"] = json!(super::analysis::analyze_in_scope(
                 &inputs.config.engine,
                 &m.sql,
-                &inputs.config.schema
+                &inputs.config.schema,
+                &inputs.history_schemas
             ));
             s
         })
@@ -127,6 +128,7 @@ pub(super) fn validate_named(
         || b["target_name"] != inputs.target_name
         || b["managed_schema"] != inputs.config.schema
         || !limits_match(inputs, plan)
+        || outside_objects(saved).is_err()
         || plan["pending"] != json!(pending)
         || inputs.migrations.iter().take(end).any(|m| {
             !super::analysis::analyze_for(&inputs.config.engine, &m.sql, &inputs.config.schema)
@@ -136,6 +138,33 @@ pub(super) fn validate_named(
         return Err(stale());
     }
     Ok(base)
+}
+
+/// The objects outside the managed scope a plan inspects on the target, by
+/// catalog key: everything its replay found the history creates there
+/// (`report::Replayed::outside`). A plan without the field inspects none:
+/// its history creates nothing there, or it was saved before plans recorded
+/// them and inspected none either.
+fn outside_objects(saved: &Value) -> Result<Vec<String>> {
+    let Some(list) = saved["plan"]["execution"].get("outside_objects") else {
+        return Ok(vec![]);
+    };
+    let keys: Option<Vec<String>> =
+        list.as_array()
+            .filter(|keys| !keys.is_empty())
+            .and_then(|keys| {
+                keys.iter()
+                    .map(|key| {
+                        key.as_str()
+                            .filter(|key| !key.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .collect()
+            });
+    match keys {
+        Some(keys) if keys.windows(2).all(|pair| pair[0] < pair[1]) => Ok(keys),
+        _ => Err(stale()),
+    }
 }
 
 /// A plan binds the effective limits. One saved before plans recorded them
@@ -243,10 +272,12 @@ async fn locked_prefix(
             .await?
     };
     let applied = super::report::prefix(&history, inputs)?;
+    let outside = outside_objects(saved)?;
     let (uncovered, fingerprint) = db
         .fingerprint(
             &inputs.config.schema,
             &inputs.history_schemas,
+            &outside,
             &inputs.endpoint.role,
             digests,
         )
@@ -277,7 +308,7 @@ async fn locked_prefix(
         }
         false
     };
-    db.validate_execution_scope(&inputs.config.schema, &inputs.history_schemas)
+    db.validate_execution_scope(&inputs.config.schema, &inputs.history_schemas, &outside)
         .await?;
     Ok((applied, history, identity, adopted))
 }
@@ -370,8 +401,8 @@ async fn connect(inputs: &CapturedInputs, saved: &Value) -> Result<Adapter> {
 async fn checks(
     db: &Adapter,
     checks: &std::collections::BTreeMap<String, String>,
-    schema: &str,
-    extra: &[String],
+    inputs: &CapturedInputs,
+    outside: &[String],
     source: &str,
     phase: &str,
     report: &mut Value,
@@ -379,6 +410,7 @@ async fn checks(
     if checks.is_empty() {
         return Ok(());
     }
+    let schema = inputs.config.schema.as_str();
     let mut tables: Vec<_> = checks
         .values()
         .flat_map(|sql| super::analysis::check_tables(sql, schema))
@@ -386,7 +418,8 @@ async fn checks(
     tables.sort();
     tables.dedup();
     db.lock_for_checks(&tables).await?;
-    db.check_purity(schema, extra).await?;
+    db.check_purity(schema, &inputs.history_schemas, outside)
+        .await?;
     for (name, sql) in checks {
         let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
         report["assertions"]["executed"] = json!(count + 1);
@@ -488,6 +521,7 @@ fn lock_backoff(attempt: u32) -> std::time::Duration {
 async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
     let action = Adoption::from_plan(inputs, saved)?;
     let base = validate(inputs, saved)?;
+    let outside = outside_objects(saved)?;
     let db = connect(inputs, saved).await?;
     db.own_migrations(inputs.limits().migrator_wait()).await?;
     let mut digests = CatalogDigests::default();
@@ -556,8 +590,8 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 checks(
                     &db,
                     &inputs.config.adoption_checks,
-                    &inputs.config.schema,
-                    &inputs.history_schemas,
+                    inputs,
+                    &outside,
                     "manifest",
                     "adoption",
                     report,
@@ -568,8 +602,8 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 checks(
                     &db,
                     &migration.requires,
-                    &inputs.config.schema,
-                    &inputs.history_schemas,
+                    inputs,
+                    &outside,
                     &migration.name,
                     "requires",
                     report,
@@ -578,15 +612,14 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 db.execute_captured(
                     migration,
                     &inputs.config.schema,
-                    &inputs.history_schemas,
                     inputs.limits().statement(),
                 )
                 .await?;
                 checks(
                     &db,
                     &migration.ensures,
-                    &inputs.config.schema,
-                    &inputs.history_schemas,
+                    inputs,
+                    &outside,
                     &migration.name,
                     "ensures",
                     report,
@@ -598,6 +631,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 .fingerprint(
                     &inputs.config.schema,
                     &inputs.history_schemas,
+                    &outside,
                     &inputs.endpoint.role,
                     &mut digests,
                 )
@@ -812,6 +846,7 @@ async fn locked_attempt(
         .catalog(
             &inputs.config.schema,
             &inputs.history_schemas,
+            &outside_objects(saved)?,
             &inputs.endpoint.role,
         )
         .await?;
@@ -892,7 +927,12 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
         return Err(d);
     }
     let mut catalog = db
-        .catalog(schema, &inputs.history_schemas, &inputs.endpoint.role)
+        .catalog(
+            schema,
+            &inputs.history_schemas,
+            &outside_objects(saved)?,
+            &inputs.endpoint.role,
+        )
         .await?;
     if !catalog.uncovered.is_empty() {
         return Err(mismatch(&index.name));
@@ -1231,5 +1271,37 @@ role = "owner"
         assert_eq!(uncertain_commit(&progress), Some(1));
         progress["progress"][1]["state"] = json!("committed");
         assert_eq!(uncertain_commit(&progress), None);
+    }
+
+    /// A plan records every outside object its replay found, whatever the
+    /// length of its key (a routine's identity arguments can run to
+    /// thousands of characters) or the number of keys, so `migrate` must
+    /// accept what `plan` wrote (#420, review r4654889050).
+    #[test]
+    fn plans_keep_every_outside_object_key_planning_records() {
+        let long = format!(
+            "public.routine:record({})",
+            vec!["at timestamp with time zone"; 70].join(", ")
+        );
+        assert!(long.len() > 1024);
+        let many: Vec<String> = (0..10_001)
+            .map(|i| format!("public.relation:t{i:05}"))
+            .collect();
+        for keys in [vec![long], many] {
+            let saved = json!({"plan": {"execution": {"outside_objects": keys.clone()}}});
+            assert_eq!(outside_objects(&saved).unwrap(), keys);
+        }
+        // Still stale: an empty list, an empty key, keys out of order or
+        // repeated, and a value that is not a list.
+        for bad in [
+            json!([]),
+            json!([""]),
+            json!(["b", "a"]),
+            json!(["a", "a"]),
+            json!("a"),
+        ] {
+            let saved = json!({"plan": {"execution": {"outside_objects": bad.clone()}}});
+            assert!(outside_objects(&saved).is_err(), "{bad}");
+        }
     }
 }

@@ -1805,9 +1805,10 @@ fn sqlite_drops_that_run_no_on_delete_actions_stay_allowed() {
 /// (`statement_seconds`, 90 seconds by default) instead of a fixed 5 seconds.
 /// The plan binds a declared limit; a statement past it fails with
 /// DB_STATEMENT_LIMIT naming it, nothing from that migration is committed, and
-/// a changed limit makes the plan stale. The statement is a cross join of
-/// 2.7 * 10^13 rows on the target's data (instant on the empty scratch), so it
-/// always reaches the limit.
+/// a changed limit makes the plan stale. The migration's second statement is a
+/// cross join of 2.7 * 10^13 rows on the target's data (instant on the empty
+/// scratch), so it always reaches the limit; the row its first statement
+/// wrote is rolled back with it.
 #[test]
 fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
     let f = Fixture::new();
@@ -1836,7 +1837,7 @@ fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
     .unwrap();
     f.sql(
         "0002_count.sql",
-        "INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3;",
+        "INSERT INTO b VALUES (0); INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3;",
     );
     let plan = f.plan("limit.json");
     assert_eq!(
@@ -1853,7 +1854,7 @@ fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
     let d = diagnostic(&r, "DB_STATEMENT_LIMIT");
     let message = d["message"].as_str().unwrap();
     assert!(
-        message.starts_with("Statement 1 did not finish within the 2-second statement limit"),
+        message.starts_with("Statement 2 did not finish within the 2-second statement limit"),
         "{message}"
     );
     assert_eq!(d["source"], "0002_count.sql", "{d}");
@@ -2170,4 +2171,72 @@ fn adoption_refusals_say_which_requirement_failed() {
         "{d}"
     );
     assert_eq!(plan(&[])["outcome"], "pass");
+}
+
+/// #419: DB_REBUILD_REQUIRED's advice also covers a migration that retires the
+/// table, which a `sqlite_rebuild` sidecar cannot help with: its guard requires
+/// every table to remain. Followed as written, removing the foreign key that
+/// references it from one named table (by rebuilding that table) and dropping
+/// the other named table first, the retirement migrates and keeps the rows of
+/// the table it rebuilt (review on #435, sqlite.rs).
+#[test]
+fn sqlite_retiring_a_table_with_on_delete_children_follows_the_advice() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_base.sql",
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL); \
+         CREATE TABLE posts(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE); \
+         CREATE TABLE comments(id INTEGER PRIMARY KEY, account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL);",
+    );
+    let base = f.plan("base.json");
+    assert_eq!(
+        f.apply("base.json", base["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("INSERT INTO accounts VALUES(1, 'a@example.com'); INSERT INTO posts VALUES(1, 1); INSERT INTO comments VALUES(1, 1);")
+        .unwrap();
+    f.sql("0002_retire.sql", "DROP TABLE accounts;");
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_REBUILD_REQUIRED");
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.ends_with("To rebuild `accounts` (create the new table and copy its rows), use a `sqlite_rebuild` sidecar; to retire it, first remove those foreign keys from those tables or drop those tables."),
+        "{message}"
+    );
+    let action = d["next_action"].as_str().unwrap();
+    for advice in [
+        "If the migration rebuilds the named table",
+        "`sqlite_rebuild",
+        "If it retires the table",
+        "first remove the foreign keys that reference it from the tables the message names, or drop those tables",
+        "create the table again without the key, copy its rows, drop the old table and rename the new one",
+    ] {
+        assert!(action.contains(advice), "{advice}: {action}");
+    }
+    // As the advice says: posts is rebuilt without its key, comments is
+    // dropped, then accounts.
+    f.sql(
+        "0002_retire.sql",
+        "CREATE TABLE posts_new(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL); \
+         INSERT INTO posts_new SELECT id, account_id FROM posts; \
+         DROP TABLE posts; \
+         ALTER TABLE posts_new RENAME TO posts; \
+         DROP TABLE comments; \
+         DROP TABLE accounts;",
+    );
+    let plan = f.plan("retire.json");
+    let applied = f.apply("retire.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let (posts, retired): (i64, i64) = f
+        .target()
+        .query_row(
+            "SELECT (SELECT count(*) FROM posts WHERE account_id = 1), (SELECT count(*) FROM sqlite_schema WHERE name IN ('accounts', 'comments'))",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((posts, retired), (1, 0));
+    assert_eq!(f.command("verify", &[])["outcome"], "pass");
 }

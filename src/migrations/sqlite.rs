@@ -3,13 +3,14 @@
 use super::adapter::Access;
 use super::inventory::{json_digest, Migration};
 use super::model::{Catalog, History, HistoryEntry};
-use super::sqlite_cache::{group_key, Cache, Output, Stats};
+use super::sqlite_cache::{Cache, ForeignKey, Output, Stats};
 use super::sqlite_file::FileBinding;
 use super::{Diagnostic, Result};
 use rusqlite::{
     config::DbConfig,
     fallible_iterator::FallibleIterator,
     hooks::{AuthAction, AuthContext, Authorization},
+    limits::Limit,
     types::ValueRef,
     Connection, OpenFlags,
 };
@@ -29,6 +30,13 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 /// it discards the session: an operation SQLite can interrupt always returns
 /// first, and only one stuck outside SQLite is discarded.
 const DISCARD_GRACE: Duration = Duration::from_secs(5);
+/// The stack of each thread that runs SQLite operations: the database
+/// runtime gives its blocking threads this much (`database_runtime_on`).
+/// Compiling a program recurses through every trigger and foreign-key action
+/// it nests, up to SQLITE_LIMIT_TRIGGER_DEPTH (1,000) levels, and at that
+/// limit needed up to 1.75 MiB, most of the 2 MiB std gives a thread by
+/// default (#421). This is more than four times that.
+pub(super) const OPERATION_STACK: usize = 8 << 20;
 const LEDGER: &str = "_ntnt_schema_migrations_v2";
 const LEDGER_SQL: &str = "CREATE TABLE _ntnt_schema_migrations_v2 (position INTEGER NOT NULL PRIMARY KEY,id TEXT NOT NULL,name TEXT NOT NULL,checksum TEXT NOT NULL,state TEXT NOT NULL,logical_database TEXT NOT NULL,managed_schema TEXT NOT NULL) STRICT";
 
@@ -631,11 +639,17 @@ fn refuse_on_delete_drops(state: &State, number: usize, dropped: &[String]) -> R
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
         [] => unreachable!("only a non-empty set of children is refused"),
     };
+    let (s, them) = if children.len() == 1 {
+        ("s", "that table")
+    } else {
+        ("", "those tables")
+    };
+    // A rebuild keeps every table (`RebuildGuard`), so the sidecar cannot
+    // retire one.
     Err(Diagnostic::new(
         "DB_REBUILD_REQUIRED",
         &format!(
-            "Statement {number} drops table `{table}`, which {named} reference{s}. SQLite deletes every row of a dropped table first, which would run those actions.",
-            s = if children.len() == 1 { "s" } else { "" }
+            "Statement {number} drops table `{table}`, which {named} reference{s}. SQLite deletes every row of a dropped table first, which would run those actions. To rebuild `{table}` (create the new table and copy its rows), use a `sqlite_rebuild` sidecar; to retire it, first remove those foreign keys from {them} or drop {them}."
         ),
     ))
 }
@@ -718,6 +732,11 @@ fn table_metadata(
         .iter()
         .map(|column| column[1].as_str().unwrap().to_owned())
         .collect();
+    let primary_key = columns
+        .iter()
+        .filter(|column| column[5].as_i64().is_some_and(|pk| pk > 0))
+        .map(|column| column[1].as_str().unwrap().to_ascii_lowercase())
+        .collect();
     let mut entries = Vec::with_capacity(columns.len());
     let mut visible = true;
     for mut column in columns {
@@ -751,6 +770,7 @@ fn table_metadata(
     Ok(super::sqlite_cache::Table {
         columns: entries,
         column_names,
+        primary_key,
         visible,
         foreign_keys,
         foreign_keys_supported,
@@ -992,11 +1012,7 @@ impl State {
         // Compile only: never step an application query during inspection.
         // Native authorization covers trigger/view/default programs as well
         // as their resolved base relations; SQL definitions remain opaque.
-        let names: Vec<(String, String)> = objects
-            .iter()
-            .filter_map(|o| Some((group_key(o[1].as_str()?), group_key(o[2].as_str()?))))
-            .collect();
-        let signatures = self.cache.signatures(&names);
+        let units = self.cache.plan();
         // Foreign-key enforcement changes what DML programs compile to;
         // rebuild migrations inspect with it off. If it cannot be read,
         // nothing is reused.
@@ -1004,29 +1020,34 @@ impl State {
             .conn
             .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY)
             .ok();
-        let mut failures = Vec::new();
+        // Programs nested this deep do not compile ("triggers nested too
+        // deep"); reuse after a change below a program needs its tree to stay
+        // shallower. If the limit cannot be read, that reuse is off.
+        let depth_limit = self
+            .conn
+            .limit(Limit::SQLITE_LIMIT_TRIGGER_DEPTH)
+            .map_or(0, |limit| u64::try_from(limit).unwrap_or(0));
+        let State {
+            conn, auth, cache, ..
+        } = self;
         // One allowlist serves every program: inspection changes no schema.
-        let mut active = None;
-        for (group, signature, programs) in self.cache.pending(&signatures, enforced) {
-            let mut compiled = true;
+        let (mut active, mut allowlists) = (None, 0);
+        let failures = cache.decide(&units, enforced, depth_limit, |programs| {
+            let mut failed = Vec::new();
             for (key, sql) in programs {
                 let active = active.get_or_insert_with(|| {
-                    self.cache.stats.allowlists += 1;
-                    self.auth.activate(&self.conn, Policy::Definition)
+                    allowlists += 1;
+                    auth.activate(conn, Policy::Definition)
                 });
-                self.cache.stats.programs_compiled += 1;
-                if !(active.is_ok() && self.conn.prepare(&sql).is_ok()) {
-                    failures.push(key);
-                    compiled = false;
+                if !(active.is_ok() && conn.prepare(sql).is_ok()) {
+                    failed.push(key.clone());
                 }
             }
-            let compiled = enforced
-                .filter(|_| compiled)
-                .map(|enforced| (enforced, signature));
-            self.cache.mark_compiled(&group, compiled);
-        }
+            failed
+        });
         drop(active);
-        self.cache.finish(Some(failures));
+        cache.stats.allowlists += allowlists;
+        cache.finish(Some(failures));
         Ok(())
     }
     /// Add one object (and a table's columns) to `output`; returns how many
@@ -1090,14 +1111,10 @@ impl State {
                 }
                 contributed += metadata.columns.len();
                 output.entries.extend(metadata.columns);
-                output.parents.extend(
-                    metadata
-                        .foreign_keys
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|fk| fk[2].as_str().map(str::to_owned)),
-                );
+                output.foreign_keys.extend(ForeignKey::parse(
+                    metadata.foreign_keys.as_array().map_or(&[], Vec::as_slice),
+                ));
+                output.primary_key = metadata.primary_key;
                 supported &= metadata.visible;
                 item["foreign_keys"] = metadata.foreign_keys;
                 supported &= metadata.foreign_keys_supported;
@@ -1512,6 +1529,29 @@ impl Sqlite {
     #[cfg(test)]
     pub async fn stats(&self) -> Result<Stats> {
         self.run(|s| Ok(s.cache.stats)).await
+    }
+    /// Lower SQLite's limit on nested trigger programs for this session, so
+    /// a test reaches it with a small schema.
+    #[cfg(test)]
+    pub async fn set_trigger_depth_limit(&self, limit: i32) -> Result<()> {
+        self.run(move |s| {
+            s.conn
+                .set_limit(Limit::SQLITE_LIMIT_TRIGGER_DEPTH, limit)
+                .map_err(sql_error)?;
+            Ok(())
+        })
+        .await
+    }
+    /// Compile `sql` under the definition policy, as inspection compiles a
+    /// table's programs.
+    #[cfg(test)]
+    pub async fn compile(&self, sql: &str) -> Result<()> {
+        let sql = sql.to_owned();
+        self.run(move |s| {
+            let _active = s.auth.activate(&s.conn, Policy::Definition)?;
+            s.conn.prepare(&sql).map(drop).map_err(sql_error)
+        })
+        .await
     }
     /// The catalog as an inspection that reuses nothing reports it. The
     /// session keeps what it had for later inspections.
