@@ -848,9 +848,13 @@ fn shown_source_path(path: &Path, typed_entry: Option<&Path>, entry: &Path) -> S
         if path == entry {
             return typed.display().to_string();
         }
+        let typed_dir = typed.parent().unwrap_or(Path::new(""));
         if let Some(rest) = entry.parent().and_then(|dir| path.strip_prefix(dir).ok()) {
-            let typed_dir = typed.parent().unwrap_or(Path::new(""));
-            return typed_dir.join(rest).display().to_string();
+            // Only when the typed directory is the entry's own: through a
+            // symlinked entry file it would name a path that may not exist.
+            if same_directory(typed_dir, entry) {
+                return typed_dir.join(rest).display().to_string();
+            }
         }
     }
     let cwd = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
@@ -861,6 +865,23 @@ fn shown_source_path(path: &Path, typed_entry: Option<&Path>, entry: &Path) -> S
         return rest.display().to_string();
     }
     path.display().to_string()
+}
+
+/// Whether `typed_dir`, as typed (empty for the working directory), is the
+/// directory of the resolved file `entry`.
+fn same_directory(typed_dir: &Path, entry: &Path) -> bool {
+    let typed_dir = if typed_dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        typed_dir
+    };
+    match (
+        typed_dir.canonicalize(),
+        entry.parent().map(Path::canonicalize),
+    ) {
+        (Ok(typed), Some(Ok(resolved))) => typed == resolved,
+        _ => false,
+    }
 }
 
 /// Format and display an error with rich context (error codes, source snippets, suggestions).
@@ -984,9 +1005,10 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
                     .join(", ");
                 eprintln!("  {} {}", "where:".cyan().bold(), rendered);
             }
-            // The clause and the call are in different files when the
-            // contract belongs to an imported function.
-            if *call_line > 0 && (raised_elsewhere.is_some() || Some(*call_line) != line_info) {
+            // A clause in another file gets `called from` notes below, which
+            // name the call site with its file; this note would repeat it
+            // without the file.
+            if *call_line > 0 && raised_elsewhere.is_none() && Some(*call_line) != line_info {
                 eprintln!(
                     "  {} contract checked for call at line {}",
                     "note:".cyan().bold(),

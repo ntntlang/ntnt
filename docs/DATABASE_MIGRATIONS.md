@@ -54,7 +54,12 @@ for the lock. While another `init` or `new` holds it, `init` refuses with
 `DB_INIT_CONFLICT` instead of overwriting another init's section, and `new` refuses
 with `DB_NEW_CONFLICT` instead of picking the ID another `new` is about to use. The
 refused command changes nothing; rerun it once the other has finished. The lock
-ends when the command exits, so it never needs cleaning up. Editors do not take
+ends when the command exits, so it never needs cleaning up. One refusal leaves a
+file: when `init` has just created `ntnt.toml` and a `new` locks it first, `init`
+refuses with `DB_INIT_CONFLICT` and the new manifest stays empty; rerun `init` to
+fill it. The lock belongs to one manifest, so two manifests that share a
+migrations directory do not take turns; an ID both of them pick is refused as
+`DB_DUPLICATE_ID` before anything runs. Editors do not take
 that lock: `init` also refuses when it sees that the manifest changed, but an edit
 saved just before `init` replaces the file can be lost, so do not run `init` while
 `ntnt.toml` is being edited. No local lock helps across branches: two branches

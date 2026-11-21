@@ -53,7 +53,8 @@ reports a runtime error in an imported module against that module's file.
   that file's source line, and adds a `note: called from main.tnt:3` for each
   call site that led there (`note: imported from ...` when the module's own
   top-level code failed while it was imported). A parse error in an imported
-  module names the module. These errors used to name the entry file with the
+  module names the module, and an error raised while a function's `requires` or
+  `ensures` clause is evaluated points at that clause. These errors used to name the entry file with the
   module's line number, beside unrelated or empty source (#412).
 - Route handler error logs and the development error page still pair the
   handler's file with the error's line; #257 tracks them.

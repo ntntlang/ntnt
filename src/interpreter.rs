@@ -6190,6 +6190,19 @@ impl Interpreter {
         }
     }
 
+    /// Evaluate a contract clause on `line`. An error raised while evaluating
+    /// it (dividing by zero, say) is the clause's own and takes its line, as a
+    /// statement's error takes the statement's.
+    fn eval_clause(&mut self, expression: &Expression, line: usize) -> Result<Value> {
+        self.eval_expression(expression).map_err(|e| {
+            if line > 0 {
+                self.error_left_statement(e, line)
+            } else {
+                e
+            }
+        })
+    }
+
     /// Error path of a user-function call, before the caller's scope is put
     /// back: the callee's lines belong to the module scope it was defined in.
     fn trace_function_exit(&mut self, error: &IntentError) {
@@ -6281,6 +6294,8 @@ impl Interpreter {
                         match evaluated {
                             Ok(v) => v,
                             Err(e) => {
+                                // A handled error's trace ends with it.
+                                self.error_trace.clear();
                                 if !is_production_mode() {
                                     eprintln!("[WARN] otherwise caught runtime error: {}", e);
                                 }
@@ -6514,6 +6529,8 @@ impl Interpreter {
                         match evaluated {
                             Ok(v) => v,
                             Err(e) => {
+                                // A handled error's trace ends with it.
+                                self.error_trace.clear();
                                 if !is_production_mode() {
                                     eprintln!(
                                         "[WARN] return-otherwise caught runtime error: {}",
@@ -7280,7 +7297,7 @@ impl Interpreter {
         if let Some(c) = contract {
             for clause in &c.requires {
                 let condition_str = Self::format_expression(&clause.expression);
-                let check = self.eval_expression(&clause.expression)?;
+                let check = self.eval_clause(&clause.expression, clause.line)?;
                 if !check.is_truthy() {
                     self.error_trace.clear();
                     return Err(IntentError::ContractViolation {
@@ -7344,7 +7361,7 @@ impl Interpreter {
         if let Some(c) = contract {
             for clause in &c.ensures {
                 let condition_str = Self::format_expression(&clause.expression);
-                let check = self.eval_expression(&clause.expression)?;
+                let check = self.eval_clause(&clause.expression, clause.line)?;
                 if !check.is_truthy() {
                     self.error_trace.clear();
                     return Err(IntentError::ContractViolation {
@@ -8406,7 +8423,11 @@ impl Interpreter {
                             other => Ok(Value::ok(other)),
                         }
                     }
-                    Err(e) => Ok(Value::err(Value::String(format!("{}", e)))),
+                    Err(e) => {
+                        // A handled error's trace ends with it.
+                        self.error_trace.clear();
+                        Ok(Value::err(Value::String(format!("{}", e))))
+                    }
                 }
             }
 
@@ -10135,6 +10156,10 @@ impl Interpreter {
         args: Vec<Value>,
         deferred_base: usize,
     ) -> Result<Value> {
+        // The caller's Located statement line. Default arguments and the body
+        // run statements that move current_line, so capture it first.
+        let call_site_line = self.current_line;
+
         // Bind parameters: provided args first, then defaults, which are
         // evaluated in the callee scope so they can reference earlier params.
         let arg_count = args.len();
@@ -10158,16 +10183,11 @@ impl Interpreter {
             }
         }
 
-        // The caller's Located statement line — current_line still points at
-        // the call site here; after the body runs it points at the last body
-        // statement, so capture it before execution.
-        let call_site_line = self.current_line;
-
         // Check preconditions BEFORE execution
         if let Some(func_contract) = contract {
             for clause in &func_contract.requires {
                 let condition_str = Self::format_expression(&clause.expression);
-                let result = self.eval_expression(&clause.expression)?;
+                let result = self.eval_clause(&clause.expression, clause.line)?;
                 if !result.is_truthy() {
                     // Read parameter values while the callee scope is still
                     // installed; the caller's scope comes back afterwards.
@@ -10222,7 +10242,7 @@ impl Interpreter {
         if let Some(func_contract) = contract {
             for clause in &func_contract.ensures {
                 let condition_str = Self::format_expression(&clause.expression);
-                let postcond_result = self.eval_expression(&clause.expression)?;
+                let postcond_result = self.eval_clause(&clause.expression, clause.line)?;
                 if !postcond_result.is_truthy() {
                     // `result` and the parameters live in the callee scope,
                     // which is still installed here.

@@ -431,8 +431,10 @@ fn module_contract_violation_names_the_module_clause() {
         &[note("called", "main.tnt", 3)],
     );
     assert!(run.stderr.contains("where: b = 0"), "{}", run.stderr);
+    // The `called from` note names the call site with its file; the file-less
+    // `contract checked for call at line N` note is not repeated beside it.
     assert!(
-        run.stderr.contains("contract checked for call at line 3"),
+        !run.stderr.contains("contract checked for call"),
         "{}",
         run.stderr
     );
@@ -483,7 +485,7 @@ fn deferred_cleanup_failing_while_an_error_unwinds_keeps_the_original_location()
         "main.tnt",
         r#"import { work } from "lib/work"
 fn cleanup() {
-    let skipped = 0
+    print("cleanup ran")
     return unwrap(Err("cleanup failed"))
 }
 fn run() {
@@ -494,6 +496,7 @@ run()
 "#,
     );
     let run = run(&app);
+    assert!(run.stdout.contains("cleanup ran"), "{}", run.stdout);
     assert!(run.stderr.contains("work failed"), "{}", run.stderr);
     assert_reported(
         &run,
@@ -592,4 +595,104 @@ fn module_path_follows_the_entry_path_as_typed_from_another_directory() {
         "    return unwrap(Err(\"startup refused\"))",
         &[note("called", &entry, 3)],
     );
+}
+
+const RATIO: &str = "// ratio pad\n// pad\nfn ratio(a, b)\n    requires a / b > 0\n{\n    return a / b\n}\nfn scaled(a)\n    ensures result / 0 > 1\n{\n    return a\n}\n";
+
+#[test]
+fn contract_clause_that_fails_to_evaluate_names_the_module_clause() {
+    // Each clause divides by zero while it is evaluated. The error is the
+    // clause's own, in lib/ratio.tnt, not the call's in main.tnt.
+    for (call, line, text) in [
+        ("ratio(1, 0)", 4, "    requires a / b > 0"),
+        ("scaled(1)", 9, "    ensures result / 0 > 1"),
+    ] {
+        let (_root, app) = app();
+        write(&app, "lib/ratio.tnt", RATIO);
+        write(
+            &app,
+            "main.tnt",
+            &format!("import {{ ratio, scaled }} from \"lib/ratio\"\nprint(\"checking\")\nlet x = {call}\n"),
+        );
+        let run = run(&app);
+        assert_reported(
+            &run,
+            &shown(&["lib", "ratio.tnt"]),
+            line,
+            text,
+            &[note("called", "main.tnt", 3)],
+        );
+    }
+}
+
+#[test]
+fn a_default_argument_does_not_move_the_contract_call_line() {
+    // `b = pad()` runs pad's statements before the precondition is checked;
+    // the note still names the call on line 11, not pad's last line, 3.
+    let (_root, app) = app();
+    write(
+        &app,
+        "main.tnt",
+        "fn pad() {\n    let unused = 0\n    return 0\n}\nfn need(a, b = pad())\n    requires a > 0\n{\n    return a\n}\nprint(\"calling\")\nneed(0)\n",
+    );
+    let run = run(&app);
+    assert_reported(&run, "main.tnt", 6, "    requires a > 0", &[]);
+    assert!(
+        run.stderr.contains("contract checked for call at line 11"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_entry_file_never_names_a_module_path_that_does_not_exist() {
+    // alias/main.tnt is a symlink to app/main.tnt, so the module is
+    // app/lib/checks.tnt. The typed directory joined with the module's path
+    // would be alias/lib/checks.tnt, which does not exist; the module is named
+    // relative to the working directory instead.
+    let (root, app) = app();
+    write(&app, "lib/checks.tnt", CHECKS);
+    write(
+        &app,
+        "main.tnt",
+        "import { refuse_startup } from \"./lib/checks\"\nprint(\"starting\")\nrefuse_startup()\n",
+    );
+    let alias = root.path().join("alias");
+    fs::create_dir_all(&alias).unwrap();
+    std::os::unix::fs::symlink(app.join("main.tnt"), alias.join("main.tnt")).unwrap();
+    let entry = shown(&["alias", "main.tnt"]);
+    let run = run_in(root.path(), &entry);
+    assert_reported(
+        &run,
+        &shown(&["app", "lib", "checks.tnt"]),
+        9,
+        "    return unwrap(Err(\"startup refused\"))",
+        &[note("called", &entry, 3)],
+    );
+}
+
+#[test]
+fn a_caught_module_error_leaves_no_origin_for_another_error() {
+    // The E005 from lib/checks.tnt:9 is handled by `try` or `otherwise`. Its
+    // trace ends there: a different E005 on the same line is not that error.
+    use ntnt::error::IntentError;
+    for caught in [
+        "let caught = try { refuse_startup() }\nprint(caught)\n",
+        "fn guarded() {\n    let caught = refuse_startup() otherwise { return -1 }\n    return caught\n}\nprint(guarded())\n",
+    ] {
+        let (_root, app) = app();
+        write(&app, "lib/checks.tnt", CHECKS);
+        write(
+            &app,
+            "main.tnt",
+            &format!("import {{ refuse_startup }} from \"./lib/checks\"\n{caught}"),
+        );
+        let source = ntnt::source::SourceFile::read(app.join("main.tnt")).unwrap();
+        let parsed = source.parse().unwrap();
+        let mut interpreter = ntnt::interpreter::Interpreter::new();
+        interpreter.eval_source(&parsed).unwrap();
+        let other = IntentError::runtime_error("another failure").at_line(9);
+        assert!(interpreter.error_origin(&other).is_none(), "{caught}");
+    }
 }

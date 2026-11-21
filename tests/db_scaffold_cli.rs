@@ -822,7 +822,12 @@ fn new_refuses_while_another_process_holds_the_manifest_lock() {
     let root = tempfile::tempdir().unwrap();
     pass(root.path(), &["init", "--engine", "sqlite"]);
     let before = snapshot(root.path());
-    let holder = std::fs::File::open(root.path().join("ntnt.toml")).unwrap();
+    // Opened for writing, as `new` opens it: NFS locks only such a handle.
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.path().join("ntnt.toml"))
+        .unwrap();
     holder.try_lock().unwrap();
     let json = db(root.path())
         .args(["new", "accounts", "--json"])
@@ -870,7 +875,25 @@ fn new_locks_a_read_only_manifest() {
     std::fs::set_permissions(&path, read_only).unwrap();
     let before = std::fs::read(&path).unwrap();
     let holder = std::fs::File::open(&path).unwrap();
-    holder.try_lock().unwrap();
+    match holder.try_lock() {
+        Ok(()) => {}
+        // NFS refuses an exclusive lock on a read-only handle. `new` cannot
+        // lock this manifest either: it stops with DB_SCAFFOLD_IO, creating
+        // nothing.
+        Err(std::fs::TryLockError::Error(_)) => {
+            drop(holder);
+            refused(root.path(), &["new", "accounts"], "DB_SCAFFOLD_IO");
+            assert_eq!(
+                std::fs::read_dir(root.path().join("migrations"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            std::fs::set_permissions(&path, writable).unwrap();
+            return;
+        }
+        Err(std::fs::TryLockError::WouldBlock) => panic!("nothing else holds the manifest lock"),
+    }
     refused(root.path(), &["new", "accounts"], "DB_NEW_CONFLICT");
     drop(holder);
     assert_eq!(

@@ -300,7 +300,9 @@ pub enum OriginStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OriginFrame {
     /// The file `line` belongs to. `None` when no file was recorded for the
-    /// scope, which is the case for code in the entry file's own scope.
+    /// scope: code in the entry file's own scope, or in the one root scope an
+    /// embedder evaluates several sources into with `eval_source`, where the
+    /// sources cannot be told apart.
     pub file: Option<std::path::PathBuf>,
     /// 1-based line.
     pub line: usize,
