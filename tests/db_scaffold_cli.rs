@@ -814,6 +814,109 @@ fn printed_commands_run_as_printed_for_a_manifest_path_that_needs_quoting() {
     assert_eq!(applied["progress"][0]["state"], "committed", "{applied}");
 }
 
+/// `ntnt db new` takes the manifest lock init takes and holds it from listing the
+/// migrations until the new file exists. While another process holds it, `new`
+/// refuses at once with exit status 1, names the manifest and creates nothing.
+#[test]
+fn new_refuses_while_another_process_holds_the_manifest_lock() {
+    let root = tempfile::tempdir().unwrap();
+    pass(root.path(), &["init", "--engine", "sqlite"]);
+    let before = snapshot(root.path());
+    // Opened for writing, as `new` opens it: NFS locks only such a handle.
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.path().join("ntnt.toml"))
+        .unwrap();
+    holder.try_lock().unwrap();
+    let json = db(root.path())
+        .args(["new", "accounts", "--json"])
+        .bounded_output();
+    let text = db(root.path()).args(["new", "accounts"]).bounded_output();
+    // Windows locks are mandatory: read the files once the lock is released.
+    drop(holder);
+    let r = report(&json);
+    assert_eq!(json.status.code(), Some(1), "{r}");
+    assert_eq!(r["outcome"], "fail", "{r}");
+    let diagnostic = &r["diagnostics"][0];
+    assert_eq!(diagnostic["code"], "DB_NEW_CONFLICT", "{r}");
+    assert_eq!(
+        diagnostic["message"],
+        "Another `ntnt db new` or `ntnt db init` holds the lock on the manifest ntnt.toml; no migration was created.",
+        "{r}"
+    );
+    let next = diagnostic["next_action"].as_str().unwrap();
+    assert!(next.contains("Rerun `ntnt db new`"), "{next}");
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert_eq!(text.status.code(), Some(1), "{stdout}");
+    assert_eq!(
+        stdout,
+        format!(
+            "Database new: fail\nDB_NEW_CONFLICT: {}\n  Next: {next}\n",
+            diagnostic["message"].as_str().unwrap()
+        )
+    );
+    assert_eq!(snapshot(root.path()), before, "a refused new changed files");
+    let r = pass(root.path(), &["new", "accounts"]);
+    assert_eq!(r["migration"]["source"], "0001_accounts.sql");
+}
+
+/// A manifest `new` may not write is locked through a read-only handle, which local
+/// filesystems accept: `new` still refuses while another process holds the lock,
+/// and otherwise numbers the migration as before and leaves the manifest as it was.
+#[test]
+fn new_locks_a_read_only_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    pass(root.path(), &["init", "--engine", "sqlite"]);
+    let path = root.path().join("ntnt.toml");
+    let writable = std::fs::metadata(&path).unwrap().permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&path, read_only).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    // Opened the way `new` opens it (input_file::open_replaceable): for writing
+    // when the process may (root may, despite the mode), read-only otherwise.
+    // The lock the holder gets is then the one `new` would get.
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .or_else(|_| std::fs::File::open(&path))
+        .unwrap();
+    match holder.try_lock() {
+        Ok(()) => {}
+        // NFS refuses an exclusive lock on a read-only handle. `new` cannot
+        // lock this manifest either: it stops with DB_SCAFFOLD_IO, creating
+        // nothing.
+        Err(std::fs::TryLockError::Error(_)) => {
+            drop(holder);
+            refused(root.path(), &["new", "accounts"], "DB_SCAFFOLD_IO");
+            assert_eq!(
+                std::fs::read_dir(root.path().join("migrations"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            std::fs::set_permissions(&path, writable).unwrap();
+            return;
+        }
+        Err(std::fs::TryLockError::WouldBlock) => panic!("nothing else holds the manifest lock"),
+    }
+    refused(root.path(), &["new", "accounts"], "DB_NEW_CONFLICT");
+    drop(holder);
+    assert_eq!(
+        std::fs::read_dir(root.path().join("migrations"))
+            .unwrap()
+            .count(),
+        0
+    );
+    let r = pass(root.path(), &["new", "accounts"]);
+    assert_eq!(r["migration"]["source"], "0001_accounts.sql");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(std::fs::metadata(&path).unwrap().permissions().readonly());
+    std::fs::set_permissions(&path, writable).unwrap();
+}
+
 #[test]
 fn new_requires_a_manifest_and_an_existing_migrations_directory() {
     let root = tempfile::tempdir().unwrap();

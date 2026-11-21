@@ -287,6 +287,39 @@ impl IntentError {
     }
 }
 
+/// How a call site in an [`ErrorOrigin`] reached the location inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginStep {
+    /// A function defined in the inner location's file was called here.
+    Call,
+    /// The inner location's file was loaded here (an import, for example).
+    Import,
+}
+
+/// One source location in an [`ErrorOrigin`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginFrame {
+    /// The file `line` belongs to. `None` when no file was recorded for the
+    /// scope: code in the entry file's own scope, or in the one root scope an
+    /// embedder evaluates several sources into with `eval_source`, where the
+    /// sources cannot be told apart.
+    pub file: Option<std::path::PathBuf>,
+    /// 1-based line.
+    pub line: usize,
+    /// How this location reached the previous one; `None` for the location
+    /// where the error was raised.
+    pub step: Option<OriginStep>,
+}
+
+/// Where a runtime error was raised and the call sites that led there,
+/// recorded while it unwound (see `Interpreter::error_origin`). Diagnostic
+/// only: it never takes part in evaluation or path resolution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ErrorOrigin {
+    /// The error's own location first, then each call site outward.
+    pub frames: Vec<OriginFrame>,
+}
+
 /// Method names agents commonly reach for, mapped to the NTNT function that
 /// actually exists. Consulted before Levenshtein by both the runtime
 /// method-miss error and the typechecker's unknown-method lint.

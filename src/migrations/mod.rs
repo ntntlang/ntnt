@@ -23,6 +23,10 @@ pub struct Diagnostic {
     pub code: String,
     pub message: String,
     pub source: Option<String>,
+    /// Catalog keys of the objects this diagnostic is about, such as the
+    /// uncovered objects of `DB_COVERAGE_INCOMPLETE`. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<String>,
     pub next_action: String,
 }
 
@@ -35,7 +39,8 @@ impl Diagnostic {
             "DB_DATABASE_REQUIRED" | "DB_DATABASE_UNKNOWN" => "Select a declared [databases.<name>] with --database <name>. --database may be omitted only when exactly one logical database is declared; --target is required by every command except init and new.",
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and other non-transactional statements from migration files. The one supported non-transactional migration is a lone named CREATE INDEX CONCURRENTLY without checks.",
-            "DB_COVERAGE_INCOMPLETE" | "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
+            "DB_COVERAGE_INCOMPLETE" => "Its objects field lists each catalog object outside supported inspection; when replaying a migration produced them, its source field names that migration (the target's own uncovered objects are also in catalog.uncovered). Change or remove those objects to stay within the coverage in docs/DATABASE_MIGRATIONS.md, or obtain manual evidence; do not interpret this result as no drift.",
+            "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
@@ -53,10 +58,11 @@ impl Diagnostic {
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
             "DB_OUTPUT" => "Select a new output filename with a writable parent directory; existing files are never replaced.",
             "DB_OUTPUT_LIMIT" => "Reduce the saved report using --object, or reduce oversized migration metadata. No artifact was written; verification is never truncated to fit.",
-            "DB_INIT_CONFLICT" => "Nothing was written. If another `ntnt db init` or an editor was changing the manifest, rerun init once it has finished; do not run init while ntnt.toml is being edited. Otherwise choose another --database name (its secret names derive from it), or edit the existing [databases.<name>] and [secrets.<NAME>] declarations by hand; init never changes existing declarations or replaces an existing migrations path. Give a further database its own migrations_dir as in docs/DATABASE_MIGRATIONS.md#multiple-databases-in-one-application.",
+            "DB_INIT_CONFLICT" => "Nothing was written. If another `ntnt db init` or `ntnt db new` held the manifest lock, or an editor was changing the manifest, rerun init once it has finished; do not run init while ntnt.toml is being edited. Otherwise choose another --database name (its secret names derive from it), or edit the existing [databases.<name>] and [secrets.<NAME>] declarations by hand; init never changes existing declarations or replaces an existing migrations path. Give a further database its own migrations_dir as in docs/DATABASE_MIGRATIONS.md#multiple-databases-in-one-application.",
             "DB_INIT_NAME" => "Pass --database with 1-50 lowercase ASCII letters, digits or underscores, starting with a letter (for example --database app). Names starting with pg_ and information_schema are reserved; secret, role and database names are derived from this name.",
             "DB_MIGRATION_NAME" => "Use 1-64 lowercase ASCII letters, digits or underscores, for example `ntnt db new add_accounts`; the numeric ID and .sql suffix are added for you.",
             "DB_MIGRATION_EXISTS" => "The existing file was left unchanged. Rerun `ntnt db new` to take the next free ID; never edit or renumber a migration that has been applied.",
+            "DB_NEW_CONFLICT" => "Nothing was created. Rerun `ntnt db new` once the other `ntnt db new` or `ntnt db init` has finished; it then takes the next free ID. The lock ends when that command exits, so there is nothing to clean up.",
             "DB_SCAFFOLD_IO" => "Make the project and migrations directories writable and keep ntnt.toml a writable regular file on a filesystem that supports file locks, then rerun. Existing files are never truncated: an existing ntnt.toml is replaced only by a complete, synced copy with the new section appended.",
             _ => "Correct the reported input or configuration using docs/DATABASE_MIGRATIONS.md; inspect committed progress before retrying any migration.",
         };
@@ -64,8 +70,14 @@ impl Diagnostic {
             code: code.into(),
             message: message.into(),
             source: None,
+            objects: Vec::new(),
             next_action: next_action.into(),
         }
+    }
+    /// Name the catalog objects (their keys) this diagnostic is about.
+    pub(crate) fn with_objects(mut self, objects: &[String]) -> Self {
+        self.objects = objects.to_vec();
+        self
     }
 }
 impl std::fmt::Display for Diagnostic {
@@ -500,10 +512,14 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             }
         }
         for d in report["diagnostics"].as_array().into_iter().flatten() {
-            println!(
-                "{}: {}\n  Next: {}",
-                d["code"], d["message"], d["next_action"]
-            );
+            println!("{}: {}", d["code"], d["message"]);
+            if !d["source"].is_null() {
+                println!("  Source: {}", d["source"]);
+            }
+            if let Some(objects) = d.get("objects") {
+                println!("  Objects: {objects}");
+            }
+            println!("  Next: {}", d["next_action"]);
         }
         if let Some(r) = report
             .get("reconciliation")
@@ -607,7 +623,7 @@ mod tests {
                 "DB_INIT_CONFLICT",
                 [
                     "Nothing was written",
-                    "another `ntnt db init`",
+                    "another `ntnt db init` or `ntnt db new`",
                     "being edited",
                     "--database",
                     "by hand",
@@ -624,10 +640,30 @@ mod tests {
                 ["lowercase", "64", "ntnt db new add_accounts"].as_slice(),
             ),
             (
+                "DB_NEW_CONFLICT",
+                [
+                    "Nothing was created",
+                    "Rerun `ntnt db new`",
+                    "`ntnt db init`",
+                    "next free ID",
+                ]
+                .as_slice(),
+            ),
+            (
                 "DB_MIGRATION_EXISTS",
                 ["left unchanged", "Rerun `ntnt db new`"].as_slice(),
             ),
             ("DB_SCAFFOLD_IO", ["writable", "never truncated"].as_slice()),
+            (
+                "DB_COVERAGE_INCOMPLETE",
+                [
+                    "objects field",
+                    "source field names that migration",
+                    "catalog.uncovered",
+                    "no drift",
+                ]
+                .as_slice(),
+            ),
         ] {
             let action = super::Diagnostic::new(code, "x").next_action;
             assert_ne!(action, generic, "{code} uses the generic next action");

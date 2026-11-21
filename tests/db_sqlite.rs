@@ -1192,3 +1192,325 @@ fn sqlite_human_adoption_output_names_the_checkpoint_not_a_null_migration() {
     );
     assert!(!applied.contains("Migration null"));
 }
+
+fn diagnostic<'a>(r: &'a Value, code: &str) -> &'a Value {
+    r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == code)
+        .unwrap_or_else(|| panic!("no {code} in {r}"))
+}
+
+fn journal_mode(path: &std::path::Path) -> String {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn set_journal_mode(connection: &rusqlite::Connection, mode: &str) {
+    let set: String = connection
+        .query_row(&format!("PRAGMA journal_mode={mode}"), [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(set, mode);
+}
+
+/// #414: SQLite's date and time functions are allowed in migration programs, so
+/// the usual timestamp defaults and an updated-at trigger plan, apply and verify.
+#[test]
+fn sqlite_time_defaults_and_triggers_plan_apply_and_verify() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE events(\
+            id INTEGER PRIMARY KEY, \
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, \
+            created_on TEXT NOT NULL DEFAULT CURRENT_DATE, \
+            created_time TEXT NOT NULL DEFAULT CURRENT_TIME, \
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')), \
+            epoch INTEGER NOT NULL DEFAULT (unixepoch()), \
+            day REAL NOT NULL DEFAULT (julianday('now')), \
+            stamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), \
+            due TEXT NOT NULL DEFAULT (date('now', '+7 days')), \
+            at TEXT NOT NULL DEFAULT (time('now')), \
+            label TEXT); \
+         CREATE TRIGGER events_touch AFTER UPDATE OF label ON events BEGIN \
+            UPDATE events SET updated_at = datetime('now') WHERE id = new.id; END;",
+    );
+    let p = f.plan("time.json");
+    let r = f.apply("time.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let target = f.target();
+    target
+        .execute_batch("INSERT INTO events(label) VALUES('a'); UPDATE events SET label='b';")
+        .unwrap();
+    let unset: i64 = target
+        .query_row(
+            "SELECT count(*) FROM events WHERE created_at IS NULL OR updated_at IS NULL OR epoch IS NULL OR due IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(unset, 0);
+    assert_eq!(f.command("verify", &[])["outcome"], "pass");
+}
+
+/// #414: a function outside the allowed set is reported as DB_SQL_UNSUPPORTED
+/// naming the function, the statement and the migration, not as an opaque
+/// DB_SQLITE code -1. Literals in the statement stay out of the report.
+#[test]
+fn sqlite_unsupported_function_names_the_function_and_statement() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE a(id INTEGER PRIMARY KEY); \
+         CREATE TABLE b(id INTEGER PRIMARY KEY, token TEXT DEFAULT (hex(randomblob(16)) || 'private_marker_414'));",
+    );
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    assert!(!code(&r, "DB_SQLITE"), "{r}");
+    let d = diagnostic(&r, "DB_SQL_UNSUPPORTED");
+    let message = d["message"].as_str().unwrap();
+    assert!(message.contains("Statement 2"), "{message}");
+    assert!(
+        message.contains("`randomblob`") || message.contains("`hex`"),
+        "{message}"
+    );
+    assert_eq!(d["source"], "0001_initial.sql", "{d}");
+    assert!(!r.to_string().contains("private_marker_414"), "{r}");
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+/// #413: `std/db/sqlite` connect() puts application databases in WAL mode, and a
+/// scratch made with `touch` is not. An empty scratch takes the target's journal
+/// mode, in either direction, instead of failing the replay.
+#[test]
+fn sqlite_empty_scratch_takes_the_target_journal_mode() {
+    for (target_mode, scratch_mode) in [("wal", "delete"), ("delete", "wal")] {
+        let f = Fixture::new();
+        set_journal_mode(&f.target(), target_mode);
+        set_journal_mode(
+            &rusqlite::Connection::open(&f.scratch_path).unwrap(),
+            scratch_mode,
+        );
+        f.sql(
+            "0001_initial.sql",
+            "CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT NOT NULL);",
+        );
+        let p = f.plan("journal.json");
+        assert_eq!(
+            p["scratch"]["identity"]["settings"]["journal_mode"], target_mode,
+            "{p}"
+        );
+        assert_eq!(journal_mode(&f.scratch_path), target_mode);
+        let r = f.apply("journal.json", p["plan_digest"].as_str());
+        assert_eq!(r["outcome"], "pass", "{r}");
+        assert_eq!(f.command("verify", &[])["outcome"], "pass");
+    }
+}
+
+/// #413: a scratch that is not empty keeps its journal mode and is reported as
+/// not empty; nothing in it is changed.
+#[test]
+fn sqlite_nonempty_scratch_keeps_its_journal_mode() {
+    let f = Fixture::new();
+    set_journal_mode(&f.target(), "wal");
+    rusqlite::Connection::open(&f.scratch_path)
+        .unwrap()
+        .execute_batch("CREATE TABLE leftover(id INTEGER)")
+        .unwrap();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE notes(id INTEGER PRIMARY KEY);",
+    );
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    assert!(code(&r, "DB_SCRATCH_NOT_EMPTY"), "{r}");
+    assert!(!code(&r, "DB_SQLITE"), "{r}");
+    assert_eq!(journal_mode(&f.scratch_path), "delete");
+}
+
+/// #413: a setting that cannot be matched automatically is named with both
+/// values, and the cleanup after the refusal no longer replaces that diagnostic
+/// with an opaque DB_SQLITE code 1.
+#[test]
+fn sqlite_scratch_setting_mismatch_names_the_setting_and_values() {
+    let f = Fixture::new();
+    rusqlite::Connection::open(&f.scratch_path)
+        .unwrap()
+        .execute_batch("PRAGMA page_size=1024; VACUUM;")
+        .unwrap();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE notes(id INTEGER PRIMARY KEY);",
+    );
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    assert!(!code(&r, "DB_SQLITE"), "{r}");
+    let message = diagnostic(&r, "DB_SCRATCH_MISMATCH")["message"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        message.contains("page_size: target 4096, scratch 1024"),
+        "{message}"
+    );
+}
+
+/// #414: any failing statement is numbered, and an error that SQLite ties to a
+/// token of the statement (here an unknown column) reports its real SQLite code,
+/// not -1.
+#[test]
+fn sqlite_failed_statement_is_numbered() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER); CREATE TABLE u(id INTEGER); INSERT INTO t SELECT missing FROM main.u;",
+    );
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_SQLITE");
+    let message = d["message"].as_str().unwrap();
+    assert!(message.starts_with("Statement 3: "), "{message}");
+    assert!(message.contains("(code 1)"), "{message}");
+    assert_eq!(d["source"], "0001_initial.sql", "{d}");
+}
+
+/// Longest the replay-timeout test waits for `ntnt db plan` to exit. The plan
+/// stops at the replay's statement deadline after a few seconds; only a
+/// deadline that never fires reaches this guard, which then fails the test
+/// instead of leaving CI waiting on a query that would run for hours.
+const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The JSON `command` prints, failing the test if it outlives `HANG_GUARD`.
+fn json_within_hang_guard(mut command: std::process::Command) -> Value {
+    use std::io::Read;
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Drain both pipes on their own threads, so a full pipe never stalls the child.
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).map(|_| bytes)
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
+    let started = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > HANG_GUARD {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("`ntnt db plan` still ran after HANG_GUARD ({HANG_GUARD:?}): the replay deadline never fired");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let (stdout, stderr) = (
+        stdout.join().unwrap().unwrap(),
+        stderr.join().unwrap().unwrap(),
+    );
+    serde_json::from_slice(&stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&stderr)))
+}
+
+/// A replay that runs out of time is reported as DB_TIMEOUT, not as its
+/// cleanup's error. SQLite rolls back the transaction of an INSERT it
+/// interrupts, so the cleanup finds none open; before 0.6.4 its failing
+/// ROLLBACK replaced the timeout with DB_SQLITE code 1 (#413). When the
+/// session's outer deadline fires first, the session is discarded and the
+/// cleanup fails with DB_CANCELLED, listed after the timeout (that order is
+/// unit-tested in `report.rs`; which deadline fires first is not fixed). The
+/// statement is a cross join of 10^12 rows that never writes, so it always
+/// reaches a deadline. The tables are qualified because SQLite gives a read
+/// that names no column no database, which the migration authorizer refuses.
+#[test]
+fn sqlite_replay_timeout_is_not_masked_by_its_cleanup() {
+    let f = Fixture::new();
+    let rows = (1..=100)
+        .map(|i| format!("({i})"))
+        .collect::<Vec<_>>()
+        .join(",");
+    f.sql(
+        "0001_initial.sql",
+        &format!(
+            "CREATE TABLE a(x INTEGER); INSERT INTO a VALUES {rows}; CREATE TABLE b(n INTEGER); \
+             INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3, main.a AS a4, main.a AS a5, main.a AS a6;"
+        ),
+    );
+    let r = json_within_hang_guard(f.process("plan"));
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let codes: Vec<&str> = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(codes.first(), Some(&"DB_TIMEOUT"), "{r}");
+    // Anything after the timeout is the failed cleanup of a discarded session.
+    assert!(codes[1..].iter().all(|c| *c == "DB_CANCELLED"), "{r}");
+    let cleanup = if codes.len() == 1 { "pass" } else { "unknown" };
+    assert_eq!(r["scratch"]["cleanup"], cleanup, "{r}");
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+/// #414: where a function outside the allowed set is reported depends on when
+/// SQLite compiles the code that calls it. A statement compiles its own calls
+/// and those of a trigger it fires or a view it reads, so those are refused and
+/// named. A trigger or view body nothing in the migration uses is compiled only
+/// during inspection, where it is uncovered. Authored PRAGMAs never reach
+/// SQLite. docs/DATABASE_MIGRATIONS.md states each case.
+#[test]
+fn sqlite_refusals_are_named_where_the_statement_compiles_them() {
+    let trigger = "CREATE TABLE t(id INTEGER PRIMARY KEY, token TEXT); \
+        CREATE TRIGGER t_token AFTER INSERT ON t BEGIN \
+        UPDATE t SET token = hex(randomblob(8)) WHERE id = new.id; END;";
+    let view = "CREATE TABLE t(id INTEGER PRIMARY KEY); \
+        CREATE VIEW v AS SELECT id, random() AS r FROM t;";
+    let cases = [
+        (format!("{trigger} INSERT INTO t(id) VALUES (1);"), "DB_SQL_UNSUPPORTED", Some("Statement 3 uses SQLite function `hex`"), None),
+        (trigger.to_owned(), "DB_COVERAGE_INCOMPLETE", None, Some(r#"table:"t""#)),
+        (format!("{view} CREATE TABLE copy(id INTEGER, r INTEGER); INSERT INTO copy SELECT id, r FROM main.v;"), "DB_SQL_UNSUPPORTED", Some("Statement 4 uses SQLite function `random`"), None),
+        (view.to_owned(), "DB_COVERAGE_INCOMPLETE", None, Some(r#"view:"v""#)),
+        ("CREATE TABLE t(id INTEGER PRIMARY KEY); PRAGMA foreign_keys = ON;".to_owned(), "DB_REPLAY_UNSUPPORTED", None, None),
+    ];
+    for (sql, expected, message, object) in cases {
+        let f = Fixture::new();
+        f.sql("0001_initial.sql", &sql);
+        let r = f.command("plan", &[]);
+        assert_ne!(r["outcome"], "pass", "{sql}: {r}");
+        let d = diagnostic(&r, expected);
+        assert_eq!(d["source"], "0001_initial.sql", "{sql}: {d}");
+        if let Some(message) = message {
+            assert!(
+                d["message"].as_str().unwrap().starts_with(message),
+                "{sql}: {d}"
+            );
+        }
+        if let Some(object) = object {
+            assert_eq!(d["objects"], serde_json::json!([object]), "{sql}: {d}");
+        }
+        assert_eq!(
+            f.target()
+                .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+}
