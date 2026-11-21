@@ -92,6 +92,23 @@ fn inventory_refusals_name_the_entry_in_the_report() {
     }
 }
 
+/// #422: a `.gitkeep` or README in migrations/ no longer stops every
+/// command: inspection gets past the inventory to the unset secret.
+#[test]
+fn dotfiles_and_readmes_in_migrations_are_ignored() {
+    let root = project();
+    std::fs::write(
+        root.path().join("migrations/0001_one.sql"),
+        "CREATE TABLE app.t (id int);",
+    )
+    .unwrap();
+    for entry in [".gitkeep", "README.md"] {
+        std::fs::write(root.path().join("migrations").join(entry), "").unwrap();
+    }
+    let report = inspect(root.path());
+    assert_eq!(report["diagnostics"][0]["code"], "DB_SECRET", "{report}");
+}
+
 #[test]
 fn db_reports_manifest_errors_as_versioned_json() {
     let root = tempfile::tempdir().unwrap();

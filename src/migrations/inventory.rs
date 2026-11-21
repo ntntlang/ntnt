@@ -331,7 +331,7 @@ fn invalid(message: &str) -> Diagnostic {
 
 // What to do about a refused entry of the migrations directory (#422). Each
 // is about the directory, not the manifest.
-const MOVE_OR_RENAME: &str = "Move the named entry out of the migrations directory, or rename it to <positive-id>_<name>.sql for a migration or to the .toml sidecar name of an existing migration. Names use ASCII letters, digits, underscores or hyphens and a lowercase suffix; the directory holds nothing else. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const MOVE_OR_RENAME: &str = "Move the named entry out of the migrations directory, or rename it to <positive-id>_<name>.sql for a migration or to the .toml sidecar name of an existing migration. Names use ASCII letters, digits, underscores or hyphens and a lowercase suffix. Apart from README files and names starting with a dot, which are ignored, the directory holds nothing else. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
 const REPLACE_ENTRY: &str = "Replace the named entry with a regular file that has a single link and at most 1 MiB (for a link, a copy of the file it points to), or move it out of the migrations directory. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
 const RENUMBER: &str = "Rename whichever of the two named migrations has not been applied anywhere to an unused ID above the highest in the migrations directory (`ntnt db new <name>` takes the next free ID); never renumber an applied migration.";
 const SAVE_AS_UTF8: &str = "Save the named file as UTF-8 text; the migrations directory holds only UTF-8 migrations and sidecars.";
@@ -345,6 +345,18 @@ const DIRECTORY_LIMITS: &str = "Remove files that do not belong to this database
 const UNLISTABLE: &str =
     "Make the migrations directory readable and listable by this user, then rerun.";
 
+/// Entries of the migrations directory that are not part of its history and
+/// are never read: names starting with `.` (`.gitkeep`, `.DS_Store`, editor
+/// swap files and lock links, macOS `._` files) and README or README.<ext>
+/// (one extension, such as README.md or readme.txt) in any letter case.
+fn ignored_entry(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_lowercase();
+    name.starts_with('.')
+        || name == "readme"
+        || name
+            .strip_prefix("readme.")
+            .is_some_and(|extension| !extension.is_empty() && !extension.contains('.'))
+}
 /// Refuse an entry of the migrations directory (or the directory itself),
 /// naming it in the message and in `source` with advice about the directory.
 fn refuse_entry(code: &str, entry: &str, problem: &str, next_action: &str) -> Diagnostic {
@@ -802,6 +814,9 @@ impl CapturedInputs {
         for entry in std::fs::read_dir(&dir).map_err(unlistable)? {
             let entry = entry.map_err(unlistable)?;
             let file_name = entry.file_name();
+            if ignored_entry(&file_name) {
+                continue;
+            }
             let label = entry_label(shown, &file_name);
             let name = file_name.into_string().map_err(|_| {
                 refuse_entry(
@@ -1747,6 +1762,73 @@ role="target_role"
             if let Err(d) = CapturedInputs::load(&manifest, "local", None) {
                 panic!("{} after following its advice: {d}", case.entry);
             }
+        }
+    }
+
+    /// #422: names starting with `.` (`.gitkeep`, `.DS_Store`, editor swap
+    /// files and lock links, macOS `._` files) and README or README.<ext> in
+    /// any letter case are not part of the history. They are not read and
+    /// do not change the inputs' identity. Every other entry that is not a
+    /// migration or sidecar is still refused, by name.
+    #[test]
+    fn dotfiles_and_readmes_are_ignored() {
+        let root = project();
+        let manifest = root.path().join("ntnt.toml");
+        put(
+            root.path(),
+            "migrations/0001_initial.sql",
+            "CREATE TABLE app.t(id INT);",
+        );
+        let bare = CapturedInputs::load(&manifest, "local", None).unwrap();
+        for entry in [
+            ".gitkeep",
+            ".DS_Store",
+            ".0001_initial.sql.swp",
+            "._0001_initial.sql",
+            ".0002_hidden.sql",
+            "README",
+            "README.md",
+            "readme.txt",
+            "ReadMe.rst",
+        ] {
+            put(
+                root.path(),
+                &format!("migrations/{entry}"),
+                "not a migration",
+            );
+        }
+        std::fs::create_dir(root.path().join("migrations/.hidden")).unwrap();
+        std::fs::create_dir(root.path().join("migrations/README.d")).unwrap();
+        #[cfg(unix)]
+        {
+            // An Emacs lock link points nowhere; it is never followed.
+            std::os::unix::fs::symlink(
+                "user@host.1:1",
+                root.path().join("migrations/.#0001_initial.sql"),
+            )
+            .unwrap();
+            use std::os::unix::ffi::OsStrExt;
+            let name = std::ffi::OsStr::from_bytes(b".\xff");
+            std::fs::write(root.path().join("migrations").join(name), "x").unwrap();
+        }
+        let ignoring = CapturedInputs::load(&manifest, "local", None).unwrap();
+        assert_eq!(ignoring.input_digest, bare.input_digest);
+        assert_eq!(ignoring.migrations.len(), 1);
+        for entry in [
+            "README.md.bak",
+            "README_.md",
+            "READMEFILE",
+            "readme.",
+            "notes.txt",
+            "0002_more.SQL",
+            "0001_initial.sql~",
+        ] {
+            put(root.path(), &format!("migrations/{entry}"), "x");
+            let d = CapturedInputs::load(&manifest, "local", None)
+                .err()
+                .unwrap_or_else(|| panic!("{entry} was accepted"));
+            assert_eq!(d.source, Some(format!("migrations/{entry}")), "{d}");
+            remove(root.path(), &format!("migrations/{entry}"));
         }
     }
 
