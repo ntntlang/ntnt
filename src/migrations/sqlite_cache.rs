@@ -510,6 +510,9 @@ impl Cache {
             if let Some(group) = self.groups.get_mut(*key) {
                 group.compiled = None;
                 stale.extend(group.output.take());
+                // `install` marks the group dirty again when its output is
+                // rebuilt, before the next plan; this keeps it dirty until
+                // then, so no history tells the two apart.
                 self.dirty.insert((*key).to_owned());
             }
         }
@@ -640,6 +643,8 @@ impl Cache {
             }
             stale.insert(key);
         }
+        // Every group with programs got them through `install`, which
+        // marked it dirty; this only keeps a plan for each one regardless.
         for (key, group) in &self.groups {
             if group.planned.is_none() && Self::has_programs(group) {
                 stale.insert(key.clone());
@@ -747,6 +752,10 @@ impl Cache {
                     })
             };
             let first = unit[0].as_str();
+            // A group that certifies itself is in a cycle too. (The second
+            // rule could not reuse it anyway: it needs a verdict at this
+            // inspection for every certifier, and a group has none for itself
+            // before it is decided.)
             let cyclic = unit.len() > 1 || planned(first).certifiers.iter().any(|c| c == first);
             let (reuse, changed) = if cyclic {
                 // Groups that certify each other are compiled again together
@@ -756,6 +765,8 @@ impl Cache {
             } else if unchanged(first) {
                 (true, false)
             } else if same(first)
+                // Each certifier is a table, which has programs and so was
+                // decided in an earlier unit.
                 && planned(first)
                     .certifiers
                     .iter()
@@ -826,6 +837,16 @@ impl Cache {
     }
     /// Whether `key` of `child` into the group being planned is certified
     /// by the child's own programs (see the module documentation).
+    ///
+    /// Two of its conditions are conservative: no history of migrations
+    /// can tell them apart from certifying without them. What a SET NULL or
+    /// ON UPDATE CASCADE action's UPDATE fires (the child's triggers, the
+    /// actions of keys into the child) is compiled by the child's own UPDATE
+    /// of every column too, one level less deep, and `depths` bounds that
+    /// level. A SET DEFAULT action's UPDATE differs from a SET NULL one only
+    /// in resolving the child's column defaults again under the authorizer,
+    /// and a migration can only create a default whose functions the same
+    /// allowlist allows.
     fn simple<'a>(
         &'a self,
         child: &'a str,
@@ -877,8 +898,16 @@ impl Cache {
             }
             for (child, position) in &self.group(group).into {
                 let child = child.as_str();
+                // Reading the children (and, in `leaf`, theirs) keeps each
+                // plan exact. A plan that kept a stale choice of certifiers
+                // would still be safe: a certifier must compile at the
+                // inspection, and `depths` reads the current schema.
                 reads.insert(child);
                 let key = self.key(child, *position);
+                // Deeper in the tree, only CASCADE keys certify (below).
+                // Certifying the other keys that `simple` accepts there too
+                // would be sound for the same reasons; keeping them in the
+                // signature is conservative.
                 if group == root && self.simple(child, key, &mut reads) {
                     certifiers.insert(child);
                     continue;

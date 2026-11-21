@@ -760,7 +760,9 @@ mod tests {
     /// references the last of a chain of ON DELETE CASCADE keys, a hub that
     /// every table references (each with an index and a trigger), and a DAG
     /// of CASCADE and SET NULL keys. The DELETE of every table above a new
-    /// one now cascades into it, yet none of them is compiled again.
+    /// one now cascades into it, yet none of them is compiled again. Tables
+    /// that each reference themselves certify their own programs, which are
+    /// reused as long as nothing in them changed.
     #[test]
     fn replay_inspection_work_grows_linearly_with_history() {
         const N: u64 = 8;
@@ -796,6 +798,9 @@ mod tests {
             ),
         }
         };
+        let trees = |i: usize| {
+            format!("CREATE TABLE t{i}(id INTEGER PRIMARY KEY, parent INTEGER REFERENCES t{i}(id) ON DELETE CASCADE);")
+        };
         for n in [N, 2 * N] {
             let work = replay_work(n as usize, tables);
             // The state before the first migration and after each one.
@@ -813,7 +818,11 @@ mod tests {
             // The view's SELECT too.
             assert_eq!(work.programs_compiled, 7 * n, "{work:?}");
             assert_eq!(work.allowlists, n, "{work:?}");
-            for (shape, history) in [("chain", &chain as &dyn Fn(usize) -> String), ("dag", &dag)] {
+            for (shape, history) in [
+                ("chain", &chain as &dyn Fn(usize) -> String),
+                ("dag", &dag),
+                ("trees", &trees),
+            ] {
                 let work = replay_work(n as usize, history);
                 assert_eq!(work.catalogs, n + 1, "{shape} {work:?}");
                 assert_eq!(work.metadata_queries, 2 * n, "{shape} {work:?}");
@@ -1296,6 +1305,16 @@ mod tests {
             ("CREATE TABLE vt(id INTEGER PRIMARY KEY, x INTEGER); CREATE VIEW vv1 AS SELECT id, x FROM vt; CREATE VIEW vv2 AS SELECT x FROM vv1;".into(), &[]),
             ("DROP TABLE vt; CREATE TABLE vt(id INTEGER PRIMARY KEY);".into(), &["view:\"vv1\"", "view:\"vv2\""]),
             ("DROP TABLE vt; CREATE TABLE vt(id INTEGER PRIMARY KEY, x INTEGER);".into(), &[]),
+            // A trigger reaches SET DEFAULT, ON UPDATE SET NULL and ON UPDATE
+            // SET DEFAULT actions whose children have UPDATE triggers writing
+            // tables that are then rebuilt without the column they write.
+            ("CREATE TABLE ra1(id INTEGER PRIMARY KEY, w INTEGER); CREATE TABLE ra2(id INTEGER PRIMARY KEY, w INTEGER); CREATE TABLE ra3(id INTEGER PRIMARY KEY, w INTEGER); CREATE TABLE rx(id INTEGER PRIMARY KEY, k INTEGER UNIQUE); CREATE TABLE rh1(id INTEGER PRIMARY KEY, x_id INTEGER DEFAULT 0 REFERENCES rx(id) ON DELETE SET DEFAULT); CREATE TABLE rh2(id INTEGER PRIMARY KEY, x_k INTEGER REFERENCES rx(k) ON UPDATE SET NULL); CREATE TABLE rh3(id INTEGER PRIMARY KEY, x_k INTEGER DEFAULT 0 REFERENCES rx(k) ON UPDATE SET DEFAULT); CREATE TRIGGER rh1_t AFTER UPDATE ON rh1 BEGIN INSERT INTO ra1(w) VALUES (1); END; CREATE TRIGGER rh2_t AFTER UPDATE ON rh2 BEGIN INSERT INTO ra2(w) VALUES (1); END; CREATE TRIGGER rh3_t AFTER UPDATE ON rh3 BEGIN INSERT INTO ra3(w) VALUES (1); END; CREATE TABLE rp(id INTEGER PRIMARY KEY); CREATE TRIGGER rp_t AFTER INSERT ON rp BEGIN DELETE FROM rx WHERE id = new.id; UPDATE rx SET k = k + 1 WHERE id = new.id; END;".into(), &[]),
+            ("DROP TABLE ra1; CREATE TABLE ra1(id INTEGER PRIMARY KEY);".into(), &["rh1", "rp", "rx"]),
+            ("DROP TABLE ra1; CREATE TABLE ra1(id INTEGER PRIMARY KEY, w INTEGER);".into(), &[]),
+            ("DROP TABLE ra2; CREATE TABLE ra2(id INTEGER PRIMARY KEY);".into(), &["rh2", "rp", "rx"]),
+            ("DROP TABLE ra2; CREATE TABLE ra2(id INTEGER PRIMARY KEY, w INTEGER);".into(), &[]),
+            ("DROP TABLE ra3; CREATE TABLE ra3(id INTEGER PRIMARY KEY);".into(), &["rh3", "rp", "rx"]),
+            ("DROP TABLE ra3; CREATE TABLE ra3(id INTEGER PRIMARY KEY, w INTEGER);".into(), &[]),
         ];
         let scripts: Vec<(String, Option<&str>)> =
             steps.iter().map(|(sql, _)| (sql.clone(), None)).collect();
@@ -1354,6 +1373,106 @@ mod tests {
             .map(|(_, tables)| tables.iter().map(|t| (*t).to_owned()).collect())
             .collect();
         assert_eq!(uncovered_tables(&states), expected);
+    }
+
+    /// #421: the bound on how deeply a program nests sub-programs counts
+    /// every way SQLite nests them. In each history a change below an
+    /// unchanged table takes it, and not the table below it that certifies
+    /// it, past a lowered limit, so it is outside coverage only if it is
+    /// compiled again:
+    ///
+    /// - limit 1: a table that references itself nests its own cascade once.
+    /// - limit 2: a SET NULL action's UPDATE fires the child's triggers and
+    ///   the ON UPDATE actions (CASCADE or RESTRICT) of keys into the columns
+    ///   it changes, named or through the primary key; one that fires
+    ///   nothing still nests a level.
+    /// - limit 3: in a cycle of keys, one key's action nests twice, for a
+    ///   DELETE and for an UPDATE.
+    /// - limit 4: SQLite codes a trigger once per conflict policy it is fired
+    ///   with, so a path through triggers passes one trigger more than once.
+    /// - limit 7: the levels below a cycle add to those in it.
+    #[test]
+    fn incremental_inspection_is_exact_where_sub_programs_nest_at_the_limit() {
+        let cascade = |child: &str, parent: &str| {
+            format!("CREATE TABLE {child}(id INTEGER PRIMARY KEY, p_id INTEGER REFERENCES {parent}(id) ON DELETE CASCADE);")
+        };
+        let set_null = |child: &str, key: &str, parent: &str| {
+            format!("CREATE TABLE {child}({key} REFERENCES {parent}(id) ON DELETE SET NULL);")
+        };
+        let policy = |i: usize, policy: &str| {
+            format!("CREATE TRIGGER d{i} AFTER DELETE ON t BEGIN INSERT OR {policy} INTO u(v) VALUES (old.x); END;")
+        };
+        let mut below_cycle = String::from("CREATE TABLE r8(id INTEGER PRIMARY KEY); CREATE TABLE x(id INTEGER PRIMARY KEY, r_id INTEGER REFERENCES r8(id) ON DELETE CASCADE, y_id INTEGER REFERENCES y(id) ON DELETE CASCADE); CREATE TABLE y(id INTEGER PRIMARY KEY, x_id INTEGER REFERENCES x(id) ON DELETE CASCADE);");
+        below_cycle.push_str(&cascade("z1", "y"));
+        for i in 2..=5 {
+            below_cycle.push_str(&cascade(&format!("z{i}"), &format!("z{}", i - 1)));
+        }
+        let histories: Vec<(i32, Vec<(String, &[&str])>)> = vec![
+            (1, vec![
+                (format!("CREATE TABLE r7(id INTEGER PRIMARY KEY); {}", cascade("tree", "r7")), &[]),
+                ("ALTER TABLE tree ADD COLUMN parent INTEGER REFERENCES tree(id) ON DELETE CASCADE;".into(), &["r7"]),
+            ]),
+            (2, vec![
+                (format!("CREATE TABLE p1(id INTEGER PRIMARY KEY); {} {} CREATE TABLE q1(v INTEGER);", cascade("c1", "p1"), set_null("s1", "id INTEGER PRIMARY KEY, c_id INTEGER", "c1")), &[]),
+                ("CREATE TRIGGER s1_t AFTER UPDATE ON s1 BEGIN INSERT INTO q1(v) VALUES (1); END;".into(), &["p1"]),
+                ("DROP TRIGGER s1_t;".into(), &[]),
+                (format!("CREATE TABLE p2(id INTEGER PRIMARY KEY); {} {}", cascade("c2", "p2"), set_null("s2", "id INTEGER PRIMARY KEY, c_id INTEGER UNIQUE", "c2")), &[]),
+                ("CREATE TABLE g2(id INTEGER PRIMARY KEY, s_c INTEGER REFERENCES s2(c_id) ON UPDATE CASCADE);".into(), &["p2"]),
+                ("DROP TABLE g2;".into(), &[]),
+                ("CREATE TABLE g2(id INTEGER PRIMARY KEY, s_c INTEGER REFERENCES s2(c_id) ON UPDATE RESTRICT);".into(), &["p2"]),
+                ("DROP TABLE g2;".into(), &[]),
+                (format!("CREATE TABLE p4(id INTEGER PRIMARY KEY); {} CREATE TABLE s4(c_id INTEGER REFERENCES c4(id) ON DELETE SET NULL, v INTEGER, PRIMARY KEY(c_id, v));", cascade("c4", "p4")), &[]),
+                ("CREATE TABLE g4(c INTEGER, v INTEGER, FOREIGN KEY(c, v) REFERENCES s4 ON UPDATE CASCADE);".into(), &["p4"]),
+                ("DROP TABLE g4;".into(), &[]),
+                (format!("CREATE TABLE p5(id INTEGER PRIMARY KEY); {} {}", cascade("c5", "p5"), cascade("d5", "c5")), &[]),
+                (set_null("s5", "id INTEGER PRIMARY KEY, d_id INTEGER", "d5"), &["p5"]),
+            ]),
+            (3, vec![
+                ("CREATE TABLE r(id INTEGER PRIMARY KEY); CREATE TABLE p(id INTEGER PRIMARY KEY REFERENCES c(p_id) ON UPDATE CASCADE, r_id INTEGER REFERENCES r(id) ON DELETE CASCADE); CREATE TABLE c(id INTEGER PRIMARY KEY, p_id INTEGER UNIQUE REFERENCES p(id) ON DELETE SET NULL);".into(), &[]),
+                ("DROP TABLE c; CREATE TABLE c(id INTEGER PRIMARY KEY, p_id INTEGER UNIQUE REFERENCES p(id) ON DELETE SET NULL ON UPDATE CASCADE);".into(), &["r"]),
+            ]),
+            (4, vec![
+                (format!("CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE t(p_id INTEGER REFERENCES p(id) ON DELETE CASCADE, x INTEGER); CREATE TABLE u(v INTEGER); CREATE TRIGGER tu AFTER INSERT ON u BEGIN DELETE FROM t WHERE x = new.v; END; {}", policy(1, "ROLLBACK")), &[]),
+                (policy(2, "ABORT"), &["p", "u"]),
+            ]),
+            (7, vec![
+                (below_cycle, &[]),
+                (cascade("z6", "z5"), &["r8"]),
+            ]),
+        ];
+        for (limit, steps) in histories {
+            let scripts: Vec<(String, Option<&str>)> =
+                steps.iter().map(|(sql, _)| (sql.clone(), None)).collect();
+            let (failed, states) =
+                assert_incremental_inspection_is_exact(&scripts, usize::MAX, Some(limit));
+            assert_eq!(failed, Vec::<String>::new(), "limit {limit}");
+            let expected: Vec<Vec<String>> = steps
+                .iter()
+                .map(|(_, tables)| tables.iter().map(|t| (*t).to_owned()).collect())
+                .collect();
+            assert_eq!(uncovered_tables(&states), expected, "limit {limit}");
+        }
+    }
+
+    /// #421: programs compiled with foreign keys off, as a rebuild
+    /// migration's guard inspects the rebuilt catalog, are compiled again
+    /// once they are on. Rebuilding x with a cascade from c nests p's DELETE
+    /// two levels deep with foreign keys on, past a limit of 1, and not at
+    /// all with them off.
+    #[test]
+    fn incremental_inspection_is_exact_when_foreign_key_enforcement_changes() {
+        let scripts: Vec<(String, Option<&str>)> = [
+            ("CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE c(id INTEGER PRIMARY KEY, p_id INTEGER REFERENCES p(id) ON DELETE CASCADE); CREATE TABLE x(id INTEGER PRIMARY KEY, c_id INTEGER);", None),
+            ("CREATE TABLE x2(id INTEGER PRIMARY KEY, c_id INTEGER REFERENCES c(id) ON DELETE CASCADE); INSERT INTO x2 SELECT id, c_id FROM x; DROP TABLE x; ALTER TABLE x2 RENAME TO x;", Some("x")),
+            ("CREATE TABLE y(id INTEGER);", None),
+        ]
+        .into_iter()
+        .map(|(sql, rebuild)| (sql.to_owned(), rebuild))
+        .collect();
+        let (failed, states) =
+            assert_incremental_inspection_is_exact(&scripts, usize::MAX, Some(1));
+        assert_eq!(failed, Vec::<String>::new());
+        assert_eq!(uncovered_tables(&states), [vec![], vec!["p"], vec!["p"]]);
     }
 
     /// `steps` migrations over a few tables that reference each other and
