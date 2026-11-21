@@ -17,11 +17,13 @@ reports a runtime error in an imported module against that module's file.
   body that nothing in the migration uses is checked only during inspection and
   reported as `DB_COVERAGE_INCOMPLETE`, and an authored PRAGMA is refused before
   replay with `DB_REPLAY_UNSUPPORTED` (#414).
-- **Scratch journal mode.** An empty scratch takes the target's journal mode, so
-  a scratch made with `touch` still works after the application has opened the
-  target, which `std/db/sqlite` `connect()` switches to WAL. Any other setting
-  that differs fails with `DB_SCRATCH_MISMATCH`, naming each setting and both
-  values. These cases used to fail with `DB_SQLITE` "code 1" (#413).
+- **Scratch settings.** An empty scratch takes the target's journal mode, page
+  size, encoding and auto-vacuum, so a scratch made with `touch` works with any
+  target, including one the application has opened, which `std/db/sqlite`
+  `connect()` switches to WAL. A difference that SQLite can no longer change in
+  a scratch that is not empty fails with `DB_SCRATCH_MISMATCH`, naming each
+  setting and both values, and says to replace the scratch with a new empty
+  file. These cases used to fail with `DB_SQLITE` "code 1" (#413, #425).
 - **Partial and expression indexes.** `CREATE INDEX ... WHERE ...`, unique or
   not, and indexes on expressions such as `lower(email)` plan, migrate and
   verify, and a predicate or expression changed outside a migration is reported
@@ -99,6 +101,54 @@ reports a runtime error in an imported module against that module's file.
     fails with `DB_INPUT_IO` and can be rerun.
   - On NFS, a read-only `ntnt.toml` cannot be locked, so `ntnt db new` fails
     with `DB_SCAFFOLD_IO` naming the file and the error.
+
+## `ntnt db` refusals say what to fix
+
+Refusals that used one fixed message now name the file, secret, migration or
+flag they are about and the cause, with advice for that cause. Codes are
+unchanged, and secret values, row values and file contents are never shown.
+
+- **Inputs.** `DB_INPUT_IO` names the file it could not read and why: not
+  found, a symbolic link, too large, changed while it was read, or the
+  operating system's error. This covers the manifest, `--plan`, `--against`
+  and migrations entries. A refused migrations entry is named relative to the
+  project, a sidecar that is not valid TOML gives its line and column,
+  `DB_CHECK_UNSUPPORTED` names the check and its phase, and `DB_DUPLICATE_ID`
+  names both files (#422).
+- **Dotfiles and READMEs.** In `migrations/`, entries whose names start with
+  `.`, and `README` or `README.<ext>` in any letter case, are ignored, so a
+  `.gitkeep`, a README or an editor's swap file no longer stops `status` and
+  `plan`. Every other file that is not a migration or sidecar is still
+  refused, by name (#422).
+- **Secrets and files.** `DB_SECRET` names the connection secret, its role
+  (target, scratch or approval) and the cause, such as an unset environment
+  variable, a missing `[secrets.<NAME>]` table or `NTNT_ENV=production`
+  disabling the env provider. `DB_FILE_IDENTITY` names the secret whose SQLite
+  path broke a rule, and which rule, never the path. The SQLite quick start
+  uses `"$(pwd -P)/data/app.sqlite"`, because `$PWD` keeps a symlinked
+  directory, which is refused (#422).
+- **Selections.** An unknown `--target` or `--database` lists the declared
+  names, and `DB_ADOPTION_INPUT` says which adoption requirement failed (#422).
+- **History and plans.** `DB_HISTORY_EDITED`, `DB_HISTORY_MISSING` and
+  `DB_HISTORY_DIVERGENT` name the migration and how to restore it. A
+  migration merged in below the last applied ID is told to take an unused ID
+  above it. `DB_PLAN_STALE` names the binding that changed, such as the
+  selected target (#423).
+- **Approval and output.** `DB_APPROVAL_REQUIRED` says how to approve the plan,
+  instead of advising a new plan, whose digest would fail the same way.
+  `DB_OUTPUT` names the file, and an `--out` file that already exists, or
+  whose directory does not, is refused before any replay or migration runs
+  (#425).
+- **`--help`.** Each `ntnt db` subcommand lists only the flags it takes.
+  Command lines accepted before are still accepted (#432).
+- **SQLite errors.** A failing statement gives SQLite's own message where it
+  holds only names (which UNIQUE or FOREIGN KEY constraint failed, a missing
+  column) and the result code's name, such as `SQLITE_CONSTRAINT_UNIQUE`. A
+  file that cannot be written is named by role and secret instead of being
+  blamed on a statement. The parser gate names the statement and why it
+  stopped: a syntax error near a token, the 4,096-token limit, an authored
+  PRAGMA or an unsupported statement. `DB_BUSY` says that another connection
+  holds the lock and that nothing was committed (#424, #425).
 
 ## Runtime errors in imported modules
 

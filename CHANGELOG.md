@@ -37,6 +37,24 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   operations get an 8 MiB stack (#421).
 - `ntnt db` (PostgreSQL): a policy that calls a routine outside the managed scope
   is uncovered (#434).
+- `ntnt db`: refusals name the file, secret, migration or flag they are about and
+  the cause, with advice for that cause: `DB_INPUT_IO`, inventory and sidecar
+  refusals, `DB_SECRET`, `DB_FILE_IDENTITY`, unknown `--target` and `--database`
+  values, and `DB_ADOPTION_INPUT` (#422).
+- `ntnt db`: dotfiles and `README` files in the migrations directory are ignored
+  (#422).
+- `ntnt db`: history refusals name the migration and how to restore it, and
+  `DB_PLAN_STALE` names the binding that changed (#423).
+- `ntnt db`: `DB_APPROVAL_REQUIRED` says how to approve the plan; `DB_OUTPUT`
+  names the file, and an `--out` that exists or has no directory is refused
+  before any work (#425).
+- `ntnt db`: each subcommand's `--help` lists only the flags it takes (#432).
+- `ntnt db` (SQLite): failures name the result code and, where it holds only
+  names, SQLite's message; an unwritable file is named by role and secret; the
+  parser gate names the statement and the cause; `DB_BUSY` says who holds the
+  lock and that nothing was committed (#424, #425).
+- `ntnt db` (SQLite): an empty scratch also takes the target's page size,
+  encoding and auto-vacuum (#425).
 - `ntnt run`: a runtime error raised in an imported module names that module's
   file and line, shows its source, and lists the call sites that led there
   (#412).
