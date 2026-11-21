@@ -272,6 +272,8 @@ fn denial(action: &AuthAction<'_>) -> String {
         | DropTempTrigger { .. }
         | DropTempView { .. } => "a temporary object".into(),
         Analyze { .. } => "ANALYZE".into(),
+        Recursive => "a recursive common table expression (WITH RECURSIVE)".into(),
+        Unknown { code, .. } => format!("SQLite authorizer action {code}"),
         _ => "an operation".into(),
     }
 }
@@ -537,6 +539,46 @@ fn statement_advice(number: usize, replay: bool) -> String {
     } else {
         format!("Nothing from this migration was committed: its transaction rolled back when statement {number} failed on the target, and progress shows what this run committed before it. If the target's data conflicts with the statement, correct that data and rerun migrate with the same plan; if the migration is wrong, change it, then plan, review and approve again.")
     }
+}
+
+/// DB_REPLAY_UNSUPPORTED for a migration the SQLite parser gate refuses
+/// (#424): the statement and the cause, with advice for that cause.
+fn replay_unsupported(sql: &str) -> Diagnostic {
+    use super::analysis::SqliteRefusal::*;
+    let Some(refusal) = super::analysis::sqlite_refusal(sql) else {
+        return Diagnostic::new(
+            "DB_REPLAY_UNSUPPORTED",
+            "Migration is outside the supported SQLite subset.",
+        );
+    };
+    let (message, next_action) = match refusal {
+        Syntax { statement, near } => (
+            match near {
+                Some(near) => format!("Statement {statement} has a syntax error near {near}."),
+                None => format!("Statement {statement} has a syntax error."),
+            },
+            format!("Correct statement {statement} in the migration named in source, then rerun plan. Nothing in this migration ran."),
+        ),
+        TokenLimit { statement, limit } => (
+            format!("Statement {statement} passes the {limit}-token limit for one SQLite migration file (whitespace and comments count), so the file is not read further."),
+            format!("Split the migration into smaller migration files that keep its statements in order, each within {limit} tokens, then rerun plan. Nothing in this migration ran."),
+        ),
+        Pragma { statement, name } => (
+            format!("Statement {statement} is PRAGMA {name}; migrations cannot run PRAGMAs."),
+            "Remove the PRAGMA from the migration, then rerun plan. ntnt db sets foreign_keys and recursive_triggers on its own connections, and file settings such as journal_mode belong to the application's connection, not to a migration. Nothing in this migration ran.".to_owned(),
+        ),
+        Unsupported { statement, construct } => (
+            if construct.is_empty() {
+                format!("Statement {statement} is outside the supported SQLite subset.")
+            } else {
+                format!("Statement {statement} (`{construct}`) is outside the supported SQLite subset.")
+            },
+            format!("Rewrite statement {statement} with the statements SQLite migrations support: CREATE, ALTER and DROP TABLE; CREATE and DROP INDEX, VIEW and TRIGGER; and INSERT, UPDATE and DELETE (write CREATE TABLE ... AS SELECT as CREATE TABLE, then INSERT ... SELECT), as docs/DATABASE_MIGRATIONS.md describes under Supported SQL and catalog coverage. Then rerun plan. Nothing in this migration ran."),
+        ),
+    };
+    let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", &message);
+    d.next_action = next_action;
+    d
 }
 
 /// A statement SQLite interrupted at the migration's deadline (#429).
@@ -1491,10 +1533,7 @@ impl Sqlite {
                 return Err(super::empty_migration());
             }
             if !super::analysis::analyze_for("sqlite", &migration.sql, "main").replay_supported {
-                return Err(Diagnostic::new(
-                    "DB_REPLAY_UNSUPPORTED",
-                    "Migration is outside the supported SQLite subset.",
-                ));
+                return Err(replay_unsupported(&migration.sql));
             }
             let guard = migration
                 .sqlite_rebuild

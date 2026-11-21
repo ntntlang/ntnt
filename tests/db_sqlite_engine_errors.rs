@@ -238,3 +238,104 @@ fn sqlite_read_only_target_is_named_and_the_advice_works() {
     let r = f.apply("writable.json", p["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
 }
+/// The parser gate names the statement it stops at and why: a syntax error
+/// near a keyword, identifier or symbol (never a literal), the token limit,
+/// an authored PRAGMA or a construct outside the subset (#424 sq-05, cli-20).
+#[test]
+fn sqlite_parser_gate_names_the_statement_and_the_cause() {
+    let refusal = |sql: &str| {
+        let r = plan_one(sql);
+        let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").clone();
+        assert_eq!(d["source"], "0001_case.sql", "{r}");
+        assert!(!next_action(&d).contains("CONCURRENTLY"), "{r}");
+        assert!(!r.to_string().contains("rowsecret"), "{r}");
+        d
+    };
+    // A syntax error in statement 40 of 40 (sq-05).
+    let mut sql = String::from("CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT);\n");
+    for i in 1..=38 {
+        sql.push_str(&format!("INSERT INTO t (a) VALUES ('r{i}');\n"));
+    }
+    sql.push_str("CREATE INDEX t_a ON t (a) WHERE;\n");
+    let d = refusal(&sql);
+    assert_eq!(message(&d), "Statement 40 has a syntax error near `;`.");
+    assert!(next_action(&d).starts_with("Correct statement 40 "), "{d}");
+    // A one-word typo in statement 2 (cli-20).
+    let d = refusal(
+        "CREATE TABLE accounts (id INTEGER PRIMARY KEY, email TEXT NOT NULL);\nCREAT INDEX accounts_email ON accounts (email);\nCREATE TABLE notes (id INTEGER PRIMARY KEY);\n",
+    );
+    assert_eq!(message(&d), "Statement 2 has a syntax error near `CREAT`.");
+    // A trigger body's semicolons do not end its statement.
+    let d = refusal(
+        "CREATE TABLE t (a TEXT);\nCREATE TRIGGER g AFTER INSERT ON t BEGIN DELETE FROM t WHERE a IS NULL; DELETE FROM t WHERE a = 'y'; END;\nCREAT TABLE u (id INTEGER);\n",
+    );
+    assert_eq!(message(&d), "Statement 3 has a syntax error near `CREAT`.");
+    // A UTF-8 byte order mark.
+    let d = refusal("\u{feff}CREATE TABLE a (id INTEGER PRIMARY KEY);\n");
+    assert_eq!(
+        message(&d),
+        "Statement 1 has a syntax error near a UTF-8 byte order mark (BOM) at the start of the file."
+    );
+    // Near a literal: the literal is not shown.
+    let d = refusal("CREATE TABLE t (a TEXT);\nINSERT INTO t VALUES ('rowsecret-syntax' 5);\n");
+    assert_eq!(
+        message(&d),
+        "Statement 2 has a syntax error near a literal."
+    );
+    // The token limit, crossed in statement 316: each line is 13 tokens.
+    let mut sql = String::from("CREATE TABLE t (a INTEGER);\n");
+    for _ in 0..400 {
+        sql.push_str("INSERT INTO t VALUES (1);\n");
+    }
+    let d = refusal(&sql);
+    assert!(
+        message(&d).starts_with("Statement 316 passes the 4096-token limit"),
+        "{d}"
+    );
+    assert!(next_action(&d).starts_with("Split the migration"), "{d}");
+    // An authored PRAGMA is named; its value is not shown.
+    let d = refusal("CREATE TABLE a (id INTEGER PRIMARY KEY);\nPRAGMA user_version = 31337;\n");
+    assert_eq!(
+        message(&d),
+        "Statement 2 is PRAGMA user_version; migrations cannot run PRAGMAs."
+    );
+    assert!(next_action(&d).starts_with("Remove the PRAGMA"), "{d}");
+    let d = refusal("PRAGMA foreign_keys = ON;\nCREATE TABLE a (id INTEGER PRIMARY KEY);\n");
+    assert_eq!(
+        message(&d),
+        "Statement 1 is PRAGMA foreign_keys; migrations cannot run PRAGMAs."
+    );
+    // A construct outside the subset, by its leading keywords.
+    let d = refusal(
+        "CREATE TABLE a (id INTEGER PRIMARY KEY);\nCREATE VIRTUAL TABLE v USING fts5(x);\n",
+    );
+    assert_eq!(
+        message(&d),
+        "Statement 2 (`CREATE VIRTUAL TABLE`) is outside the supported SQLite subset."
+    );
+    assert!(next_action(&d).starts_with("Rewrite statement 2 "), "{d}");
+    let d =
+        refusal("CREATE TABLE a (id INTEGER PRIMARY KEY);\nCREATE TABLE b AS SELECT id FROM a;\n");
+    assert_eq!(
+        message(&d),
+        "Statement 2 (`CREATE TABLE ... AS SELECT`) is outside the supported SQLite subset."
+    );
+    let d = refusal("BEGIN;\nCREATE TABLE a (id INTEGER PRIMARY KEY);\nCOMMIT;\n");
+    assert_eq!(
+        message(&d),
+        "Statement 1 (`BEGIN`) is outside the supported SQLite subset."
+    );
+}
+
+/// An authorizer refusal without a name of its own names the action.
+#[test]
+fn sqlite_recursive_cte_refusal_names_the_action() {
+    let r = plan_one(
+        "CREATE TABLE n (x INTEGER);\nINSERT INTO n SELECT x FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3) SELECT x FROM c);\n",
+    );
+    assert_eq!(
+        message(diagnostic(&r, "DB_SQL_UNSUPPORTED")),
+        "Statement 2 uses a recursive common table expression (WITH RECURSIVE), which SQLite migrations cannot use.",
+        "{r}"
+    );
+}

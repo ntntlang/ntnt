@@ -89,6 +89,10 @@ pub(crate) fn is_empty(sql: &str, engine: &str) -> bool {
     })
 }
 
+/// The most tokens, whitespace and comments included, that the parser reads
+/// in one script.
+pub(crate) const PARSER_TOKEN_LIMIT: usize = 4096;
+
 /// Parse PostgreSQL syntax within fixed token and recursion bounds.
 /// Invalid, empty or unsupported input is not evidence that replay would be safe.
 fn parse(sql: &str) -> Option<Vec<Statement>> {
@@ -99,7 +103,7 @@ fn parse_with(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> Option<Ve
         .tokenize_with_location()
         .ok()?;
     // Bound both parser work and recursive AST destruction on all CLI stacks.
-    if tokens.len() > 4096 {
+    if tokens.len() > PARSER_TOKEN_LIMIT {
         return None;
     }
     Parser::new(dialect)
@@ -446,28 +450,319 @@ fn sqlite_script(a: &mut Analysis, sql: &str) {
         // CTAS must not use that newly declared name to authorize an
         // eponymous virtual-table source during the same preparation. Keep
         // copies explicit: CREATE ordinary table, then INSERT ... SELECT.
-        let supported = !matches!(&s, Statement::CreateTable(table) if table.query.is_some())
-            && matches!(
-                s,
-                Statement::CreateTable(_)
-                    | Statement::AlterTable(_)
-                    | Statement::CreateIndex(_)
-                    | Statement::CreateView { .. }
-                    | Statement::CreateTrigger { .. }
-                    | Statement::DropTrigger { .. }
-                    | Statement::Insert(_)
-                    | Statement::Update(_)
-                    | Statement::Delete(_)
-                    | Statement::Drop {
-                        object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
-                        ..
-                    }
-            );
+        let supported = sqlite_kind_supported(&s);
         if !supported || a.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES") {
             a.replay_supported = false;
             a.unknowns.push("SQL_UNSUPPORTED".into());
         }
     }
+}
+
+/// Whether the SQLite subset includes statement `s`'s kind (see `sqlite_script`).
+fn sqlite_kind_supported(s: &Statement) -> bool {
+    !matches!(s, Statement::CreateTable(table) if table.query.is_some())
+        && matches!(
+            s,
+            Statement::CreateTable(_)
+                | Statement::AlterTable(_)
+                | Statement::CreateIndex(_)
+                | Statement::CreateView { .. }
+                | Statement::CreateTrigger { .. }
+                | Statement::DropTrigger { .. }
+                | Statement::Insert(_)
+                | Statement::Update(_)
+                | Statement::Delete(_)
+                | Statement::Drop {
+                    object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
+                    ..
+                }
+        )
+}
+
+/// Why the SQLite parser gate refuses a migration (#424): the statement it
+/// stops at and the cause. It names keywords, identifiers and symbols, never
+/// a literal. Statements are numbered by SQLite's own boundaries, so a gate
+/// that prepares each statement with SQLite itself (#426) can say the same.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SqliteRefusal {
+    /// The statement does not parse. `near` says where it stops: a keyword,
+    /// identifier or symbol in backticks, or what else stands there.
+    Syntax {
+        statement: usize,
+        near: Option<String>,
+    },
+    /// The script passes the parser's token limit inside this statement.
+    TokenLimit { statement: usize, limit: usize },
+    /// An authored PRAGMA, by name.
+    Pragma { statement: usize, name: String },
+    /// A statement the subset does not include, by its leading keywords.
+    Unsupported { statement: usize, construct: String },
+}
+
+/// The first refusal of the SQLite parser gate in `sql`, or `None` when the
+/// gate replays it.
+pub(crate) fn sqlite_refusal(sql: &str) -> Option<SqliteRefusal> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let dialect = sqlparser::dialect::SQLiteDialect {};
+    let tokens = match Tokenizer::new(&dialect, sql).tokenize_with_location() {
+        Ok(tokens) => tokens,
+        // Text that does not tokenize is in the statement after every one
+        // that ends before it.
+        Err(error) => {
+            let end = offset(sql, error.location.line, error.location.column);
+            let statement = Tokenizer::new(&dialect, &sql[..end])
+                .tokenize_with_location()
+                .map_or(1, |tokens| sqlite_statements(&tokens).ended + 1);
+            return Some(SqliteRefusal::Syntax {
+                statement,
+                near: None,
+            });
+        }
+    };
+    let split = sqlite_statements(&tokens);
+    if tokens.len() > PARSER_TOKEN_LIMIT {
+        return Some(SqliteRefusal::TokenLimit {
+            statement: split.statement_of(PARSER_TOKEN_LIMIT),
+            limit: PARSER_TOKEN_LIMIT,
+        });
+    }
+    for (index, range) in split.ranges.iter().enumerate() {
+        let statement = index + 1;
+        let piece = &tokens[range.clone()];
+        let words: Vec<&Token> = piece
+            .iter()
+            .map(|t| &t.token)
+            .filter(|t| !matches!(t, Token::Whitespace(_)))
+            .collect();
+        if matches!(words.first(), Some(Token::Word(w)) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("PRAGMA"))
+        {
+            let name: String = words[1..]
+                .iter()
+                .map_while(|t| match t {
+                    Token::Word(w) => Some(w.to_string()),
+                    Token::Period => Some(".".to_owned()),
+                    _ => None,
+                })
+                .collect();
+            return Some(SqliteRefusal::Pragma {
+                statement,
+                name: visible(&name),
+            });
+        }
+        let parsed = match Parser::new(&dialect)
+            .with_recursion_limit(64)
+            .with_tokens_with_locations(piece.to_vec())
+            .parse_statements()
+        {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let near = if statement == 1 && sql.starts_with('\u{feff}') {
+                    Some("a UTF-8 byte order mark (BOM) at the start of the file".to_owned())
+                } else {
+                    near(&error.to_string(), piece)
+                };
+                return Some(SqliteRefusal::Syntax { statement, near });
+            }
+        };
+        for s in &parsed {
+            let mut probe = Analysis {
+                replay_supported: true,
+                operations: vec![],
+                hazards: vec![],
+                unknowns: vec![],
+                locks: vec![],
+                lock_warnings: vec![],
+                non_transactional: false,
+            };
+            classify(&mut probe, s, "sqlite");
+            let cascade = probe.hazards.iter().any(|h| h == "CASCADE_DEPENDENCIES");
+            if sqlite_kind_supported(s) && !cascade {
+                continue;
+            }
+            let leading: Vec<String> = words
+                .iter()
+                .map_while(|t| match t {
+                    Token::Word(w)
+                        if w.quote_style.is_none()
+                            && w.keyword != sqlparser::keywords::Keyword::NoKeyword =>
+                    {
+                        Some(w.value.to_ascii_uppercase())
+                    }
+                    _ => None,
+                })
+                .take(3)
+                .collect();
+            let construct = match s {
+                Statement::CreateTable(table) if table.query.is_some() => {
+                    "CREATE TABLE ... AS SELECT".to_owned()
+                }
+                _ if cascade => format!("{} ... CASCADE", leading.join(" ")),
+                _ => leading.join(" "),
+            };
+            return Some(SqliteRefusal::Unsupported {
+                statement,
+                construct,
+            });
+        }
+    }
+    None
+}
+
+/// The byte offset in `sql` of 1-based `line` and `column` (in characters),
+/// as the tokenizer counts them.
+fn offset(sql: &str, line: u64, column: u64) -> usize {
+    let (mut at_line, mut at_column) = (1, 1);
+    for (index, c) in sql.char_indices() {
+        if (at_line, at_column) == (line, column) {
+            return index;
+        }
+        if c == '\n' {
+            at_line += 1;
+            at_column = 1;
+        } else {
+            at_column += 1;
+        }
+    }
+    sql.len()
+}
+
+/// Statement boundaries in a tokenized SQLite script, by SQLite's own rule
+/// (`sqlite3_complete`): a semicolon ends a statement, except inside a
+/// CREATE TRIGGER body, which ends at `END;`. Statements of only whitespace
+/// and comments are skipped, as SQLite skips them.
+struct Split {
+    /// Each statement's tokens, with the semicolon that ends it.
+    ranges: Vec<std::ops::Range<usize>>,
+    /// How many of them a semicolon ends.
+    ended: usize,
+}
+impl Split {
+    /// The 1-based statement that holds token `index`.
+    fn statement_of(&self, index: usize) -> usize {
+        self.ranges
+            .iter()
+            .position(|range| index < range.end)
+            .map_or(self.ranges.len().max(1), |i| i + 1)
+    }
+}
+fn sqlite_statements(tokens: &[sqlparser::tokenizer::TokenWithSpan]) -> Split {
+    use sqlparser::tokenizer::Token;
+    // sqlite3_complete's transitions: the state (row) after a token of each
+    // class (column): SEMI, WS, OTHER, EXPLAIN, CREATE, TEMP, TRIGGER, END.
+    // State 1 follows a complete statement.
+    const NEXT: [[u8; 8]; 8] = [
+        [1, 0, 2, 3, 4, 2, 2, 2],
+        [1, 1, 2, 3, 4, 2, 2, 2],
+        [1, 2, 2, 2, 2, 2, 2, 2],
+        [1, 3, 3, 2, 4, 2, 2, 2],
+        [1, 4, 2, 2, 2, 4, 5, 2],
+        [6, 5, 5, 5, 5, 5, 5, 5],
+        [6, 6, 5, 5, 5, 5, 5, 7],
+        [1, 7, 5, 5, 5, 5, 5, 5],
+    ];
+    let significant = |range: &std::ops::Range<usize>| {
+        tokens[range.clone()]
+            .iter()
+            .any(|t| !matches!(t.token, Token::Whitespace(_) | Token::SemiColon))
+    };
+    let mut split = Split {
+        ranges: vec![],
+        ended: 0,
+    };
+    let (mut state, mut start) = (0u8, 0usize);
+    for (index, token) in tokens.iter().enumerate() {
+        let class = match &token.token {
+            Token::SemiColon => 0,
+            Token::Whitespace(_) => 1,
+            Token::Word(w) if w.quote_style.is_none() => {
+                match w.value.to_ascii_uppercase().as_str() {
+                    "EXPLAIN" => 3,
+                    "CREATE" => 4,
+                    "TEMP" | "TEMPORARY" => 5,
+                    "TRIGGER" => 6,
+                    "END" => 7,
+                    _ => 2,
+                }
+            }
+            _ => 2,
+        };
+        state = NEXT[usize::from(state)][class];
+        if class == 0 && state == 1 {
+            let range = start..index + 1;
+            if significant(&range) {
+                split.ranges.push(range);
+                split.ended += 1;
+            }
+            start = index + 1;
+        }
+    }
+    let rest = start..tokens.len();
+    if significant(&rest) {
+        split.ranges.push(rest);
+    }
+    split
+}
+
+/// Where a statement stops parsing, from the position in the parser's
+/// `error`: the keyword, identifier or symbol there, in backticks, or what
+/// else stands there. A literal is never shown.
+fn near(error: &str, tokens: &[sqlparser::tokenizer::TokenWithSpan]) -> Option<String> {
+    use sqlparser::tokenizer::Token;
+    let (_, at) = error.rsplit_once(" at Line: ")?;
+    let (line, column) = at.split_once(", Column: ")?;
+    let (line, column): (u64, u64) = (line.parse().ok()?, column.trim().parse().ok()?);
+    let token = &tokens
+        .iter()
+        .find(|t| t.span.start.line == line && t.span.start.column == column)?
+        .token;
+    Some(match token {
+        Token::Word(w) => format!("`{}`", visible(&w.to_string())),
+        Token::Comma
+        | Token::SemiColon
+        | Token::LParen
+        | Token::RParen
+        | Token::Period
+        | Token::Eq
+        | Token::DoubleEq
+        | Token::Neq
+        | Token::Lt
+        | Token::Gt
+        | Token::LtEq
+        | Token::GtEq
+        | Token::Plus
+        | Token::Minus
+        | Token::Mul
+        | Token::Div
+        | Token::Mod
+        | Token::StringConcat
+        | Token::LBracket
+        | Token::RBracket
+        | Token::Colon
+        | Token::Ampersand
+        | Token::Pipe
+        | Token::Caret => format!("`{token}`"),
+        _ => "a literal".to_owned(),
+    })
+}
+
+/// `text`, at most 64 characters of it, with characters that do not print
+/// (such as a byte order mark) written as escapes.
+fn visible(text: &str) -> String {
+    let mut shown: String = text
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_ascii_graphic() || c == ' ' {
+                c.to_string()
+            } else {
+                c.escape_unicode().to_string()
+            }
+        })
+        .collect();
+    if text.chars().count() > 64 {
+        shown.push_str("...");
+    }
+    shown
 }
 
 /// The literal messages of the `RAISE(ABORT|FAIL|ROLLBACK, '...')` calls in
