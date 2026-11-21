@@ -68,14 +68,8 @@ pub(crate) struct Postgres {
     task: tokio::task::JoinHandle<()>,
     /// sslmode, trust source and the TLS version this client negotiated.
     transport: Value,
-    /// Set once `prepare_scratch` validated this session as scratch: the
-    /// managed scope it replays and what lay outside that scope then.
-    scratch: std::sync::OnceLock<Box<ScratchScope>>,
-}
-/// A prepared scratch database's managed scope and its `OUTSIDE_SCOPE` rows.
-struct ScratchScope {
-    scope: Vec<String>,
-    outside: std::collections::BTreeMap<String, Value>,
+    /// Set once `prepare_scratch` validated this session as scratch.
+    scratch: std::sync::OnceLock<()>,
 }
 /// The managed scope: the managed schema first, then the schemas the
 /// history creates.
@@ -86,8 +80,9 @@ fn scope(schema: &str, extra: &[String]) -> Vec<String> {
 }
 /// Objects a diagnostic lists at most; its message gives the full count.
 const LISTED_OBJECTS: usize = 100;
-/// `DB_OUTSIDE_SCOPE` for `migration`, naming `objects`.
-fn outside_scope(migration: &Migration, message: &str, mut objects: Vec<String>) -> Diagnostic {
+/// `DB_OUTSIDE_SCOPE` for `migration`, naming `objects`: what it would do
+/// in `_ntnt` or a PostgreSQL system schema.
+fn protected_schema(migration: &Migration, message: &str, mut objects: Vec<String>) -> Diagnostic {
     let total = objects.len();
     objects.truncate(LISTED_OBJECTS);
     let count = if total > LISTED_OBJECTS {
@@ -97,7 +92,7 @@ fn outside_scope(migration: &Migration, message: &str, mut objects: Vec<String>)
     };
     let mut d = Diagnostic::new(
         "DB_OUTSIDE_SCOPE",
-        &format!("{message} NTNT inspects only the managed scope: the configured schema and the schemas this history creates with CREATE SCHEMA.{count}"),
+        &format!("{message} The _ntnt schema holds NTNT's migration ledger, and the pg_* and information_schema schemas belong to PostgreSQL, so migrations may not act on them.{count}"),
     )
     .with_objects(&objects);
     d.source = Some(migration.name.clone());
@@ -701,7 +696,6 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         target: &Identity,
         endpoint: &Endpoint,
         schema: &str,
-        extra: &[String],
     ) -> Result<Identity> {
         self.begin_readonly().await?;
         let identity = self.identity(endpoint).await?;
@@ -763,30 +757,12 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             "{create}SET LOCAL search_path=pg_catalog,\"{schema}\";"
         ))
         .await?;
-        // Scratch holds nothing else, so whatever a replayed migration adds
-        // or changes outside the managed scope from here on is its own work.
-        let scope = scope(schema, extra);
-        let outside = self.outside(&scope).await?;
-        self.scratch
-            .set(Box::new(ScratchScope { scope, outside }))
-            .map_err(|_| {
-                Diagnostic::new("DB_SCRATCH_NOT_EMPTY", "Scratch was already prepared.")
-            })?;
+        // Scratch has no _ntnt: a replayed migration that creates one is
+        // refused (see execute_captured).
+        self.scratch.set(()).map_err(|_| {
+            Diagnostic::new("DB_SCRATCH_NOT_EMPTY", "Scratch was already prepared.")
+        })?;
         Ok(identity)
-    }
-    /// `OUTSIDE_SCOPE` rows: what lies outside `scope`, keyed.
-    async fn outside(&self, scope: &[String]) -> Result<std::collections::BTreeMap<String, Value>> {
-        Ok(self
-            .rows(super::catalog_sql::OUTSIDE_SCOPE, &[&scope])
-            .await?
-            .into_iter()
-            .map(|r| {
-                (
-                    r.get(0),
-                    r.get::<_, Option<Value>>(1).unwrap_or(Value::Null),
-                )
-            })
-            .collect())
     }
     /// Reject unsupported live invocation paths before preparing any authored
     /// check. Names alone and provolatile are not proofs: only builtin base types,
@@ -879,7 +855,6 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         &self,
         migration: &Migration,
         schema: &str,
-        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         // A lone CREATE INDEX CONCURRENTLY replays as the equivalent plain
@@ -904,17 +879,20 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             d.source = Some(migration.name.clone());
             return Err(d);
         }
-        let named = super::analysis::outside_scope(&migration.sql, schema, extra);
-        if !named.is_empty() {
-            let statements = named
+        // Statements on other schemas run as written. Ones that act on NTNT's
+        // ledger schema or a system schema are refused before anything runs:
+        // they can be no-ops in scratch yet act on the target.
+        let protected = super::analysis::protected_targets(&migration.sql);
+        if !protected.is_empty() {
+            let statements = protected
                 .iter()
                 .map(|(number, name)| format!("statement {number} names {name}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(outside_scope(
+            return Err(protected_schema(
                 migration,
-                &format!("Migration creates, changes or drops objects outside the managed scope ({statements})."),
-                named.into_iter().map(|(_, name)| name).collect(),
+                &format!("Migration acts on _ntnt or a PostgreSQL system schema ({statements})."),
+                protected.into_iter().map(|(_, name)| name).collect(),
             ));
         }
         // Replay runs several migrations in one transaction. If an earlier one
@@ -989,23 +967,23 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             self.batch(&format!("SET CONSTRAINTS {} DEFERRED", deferred.join(",")))
                 .await?;
         }
-        // In scratch, compare what lies outside the managed scope with the
-        // state it was prepared in: anything this migration created or
-        // changed there would never be inspected.
-        if let Some(scratch) = self.scratch.get() {
-            let now = self.outside(&scratch.scope).await?;
-            let changed: std::collections::BTreeSet<&String> = now
-                .keys()
-                .chain(scratch.outside.keys())
-                .filter(|key| now.get(*key) != scratch.outside.get(*key))
-                .collect();
-            if !changed.is_empty() {
-                return Err(outside_scope(
-                    migration,
-                    "Replaying this migration created or changed objects outside the managed scope.",
-                    changed.into_iter().cloned().collect(),
-                ));
-            }
+        // Scratch was prepared without _ntnt. One a replayed migration created
+        // (in a DO block, say) would let later statements that resolve there
+        // replay while they act on the target's ledger.
+        if self.scratch.get().is_some()
+            && self
+                .rows(
+                    "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname='_ntnt')",
+                    &[],
+                )
+                .await?[0]
+                .get::<_, bool>(0)
+        {
+            return Err(protected_schema(
+                migration,
+                "Replaying this migration created the schema _ntnt.",
+                vec!["schema:_ntnt".into()],
+            ));
         }
         Ok(())
     }

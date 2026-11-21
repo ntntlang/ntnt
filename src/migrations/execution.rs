@@ -532,7 +532,6 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 db.execute_captured(
                     migration,
                     &inputs.config.schema,
-                    &inputs.history_schemas,
                     inputs.limits().statement(),
                 )
                 .await?;

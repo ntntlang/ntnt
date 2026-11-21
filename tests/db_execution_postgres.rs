@@ -2532,3 +2532,59 @@ fn reconcile_compares_the_schemas_the_history_creates() {
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(f.command("verify")["outcome"], "pass");
 }
+
+/// Josh's decision on #420 (2026-11-21): statements outside the managed
+/// scope run on the target as they did before #420. REVOKE and GRANT on
+/// public, a GRANT on a table the history creates there and a DROP of
+/// another application's table plan, migrate and verify.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn statements_outside_the_managed_scope_migrate_and_verify() {
+    let f = Fixture::new();
+    // Another application's table in public.
+    f.target()
+        .batch_execute("CREATE TABLE public.legacy (id int)")
+        .unwrap();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO PUBLIC;
+CREATE TABLE public.audit_log (id int PRIMARY KEY, account int);
+GRANT SELECT ON public.audit_log TO PUBLIC;
+DROP TABLE IF EXISTS public.legacy;",
+    );
+    migrate_all(&f, "first.json");
+    // Each statement ran on the target as written.
+    assert!(f
+        .target()
+        .query_one(
+            "SELECT to_regclass('public.legacy') IS NULL AND has_table_privilege('public', 'public.audit_log', 'SELECT')",
+            &[]
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+    let verified = f.command("verify");
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["diagnostics"], serde_json::json!([]), "{verified}");
+    // A later migration drops the table it created there.
+    f.sql("0002_retire.sql", "DROP TABLE public.audit_log;");
+    migrate_all(&f, "second.json");
+    let verified = f.command("verify");
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["diagnostics"], serde_json::json!([]), "{verified}");
+}
+
+/// A history applied before #420 that revokes CREATE on public keeps
+/// verifying with no diagnostic. #420 refused the statement when replay
+/// reached it, so verify could no longer replay the applied prefix.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn an_applied_history_that_revokes_create_on_public_keeps_verifying() {
+    let f = Fixture::new();
+    f.seed_first("CREATE TABLE app.t (id int);\nREVOKE CREATE ON SCHEMA public FROM PUBLIC;");
+    let verified = f.command("verify");
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["history"]["applied_count"], 1, "{verified}");
+    assert_eq!(verified["diagnostics"], serde_json::json!([]), "{verified}");
+}

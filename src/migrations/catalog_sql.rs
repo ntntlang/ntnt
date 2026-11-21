@@ -187,30 +187,3 @@ UNION ALL SELECT 'text_search_dictionary.'||d.dictname,jsonb_build_object('kind'
 "#,
     ),
 ];
-
-/// What lies outside the managed scope `$1` (the managed schema and the
-/// schemas the history creates), apart from PostgreSQL's own namespaces:
-/// every other namespace with its owner and privileges, and every object in
-/// one, keyed as it would be in the scope. Scratch records it once prepared;
-/// a replayed migration that changes it acts outside the scope.
-pub(super) const OUTSIDE_SCOPE: &str = r#"
-WITH o AS (SELECT n.oid,n.nspname,n.nspowner,n.nspacl FROM pg_catalog.pg_namespace n
- WHERE n.nspname<>ALL($1) AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND n.nspname !~ '^pg_(toast_)?temp_[0-9]+$')
-SELECT 'schema:'||o.nspname,jsonb_build_object('owner',o.nspowner::text,'acl',o.nspacl::text) FROM o
-UNION ALL SELECT quote_ident(o.nspname)||'.relation:'||c.relname,NULL FROM pg_catalog.pg_class c JOIN o ON o.oid=c.relnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.routine:'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',NULL FROM pg_catalog.pg_proc p JOIN o ON o.oid=p.pronamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.type:'||t.typname,NULL FROM pg_catalog.pg_type t JOIN o ON o.oid=t.typnamespace WHERE t.typrelid=0 AND (t.typelem=0 OR t.typtype<>'b')
-UNION ALL SELECT quote_ident(o.nspname)||'.extension:'||e.extname,NULL FROM pg_catalog.pg_extension e JOIN o ON o.oid=e.extnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:operator.'||x.oprname,NULL FROM pg_catalog.pg_operator x JOIN o ON o.oid=x.oprnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:collation.'||x.collname,NULL FROM pg_catalog.pg_collation x JOIN o ON o.oid=x.collnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:conversion.'||x.conname,NULL FROM pg_catalog.pg_conversion x JOIN o ON o.oid=x.connamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:default_acl.'||pg_get_userbyid(x.defaclrole)||'.'||x.defaclobjtype::text,NULL FROM pg_catalog.pg_default_acl x JOIN o ON o.oid=x.defaclnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:operator_class.'||quote_ident(x.opcname),NULL FROM pg_catalog.pg_opclass x JOIN o ON o.oid=x.opcnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:operator_family.'||quote_ident(x.opfname),NULL FROM pg_catalog.pg_opfamily x JOIN o ON o.oid=x.opfnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:statistics.'||x.stxname,NULL FROM pg_catalog.pg_statistic_ext x JOIN o ON o.oid=x.stxnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_parser.'||quote_ident(x.prsname),NULL FROM pg_catalog.pg_ts_parser x JOIN o ON o.oid=x.prsnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_template.'||quote_ident(x.tmplname),NULL FROM pg_catalog.pg_ts_template x JOIN o ON o.oid=x.tmplnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_config.'||x.cfgname,NULL FROM pg_catalog.pg_ts_config x JOIN o ON o.oid=x.cfgnamespace
-UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_dictionary.'||x.dictname,NULL FROM pg_catalog.pg_ts_dict x JOIN o ON o.oid=x.dictnamespace
-LIMIT 10001
-"#;

@@ -993,39 +993,103 @@ CREATE VIEW app.logged AS SELECT e.id FROM app.entries e JOIN audit.log l ON l.i
     );
 }
 
-/// A migration that would create, change or drop objects outside the
-/// managed scope (in `public`, or in a schema the history did not create)
-/// is refused, and the diagnostic names the object and its schema.
+/// Josh's decision on #420 (2026-11-21): statements that create, change,
+/// drop, grant, revoke or comment on schemas or objects outside the managed
+/// scope run as they did before #420. None is refused, whether it names the
+/// other schema, reaches it through search_path or a DO block, or is SQL
+/// NTNT does not parse, and planning never touches the target.
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
-fn statements_outside_the_managed_scope_are_refused_and_named() {
+fn statements_outside_the_managed_scope_are_not_refused() {
     let f = Fixture::new();
     // A shared schema and a table in public that exist on the target only.
     f.target()
         .batch_execute("CREATE SCHEMA shared; CREATE TABLE public.legacy (id int)")
         .unwrap();
+    for sql in [
+        "CREATE TABLE public.leak (id int);",
+        // No-ops in scratch; on the target they act on public.legacy.
+        "DROP TABLE IF EXISTS public.legacy;",
+        "ALTER TABLE IF EXISTS public.legacy ADD COLUMN note text;",
+        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO PUBLIC;",
+        "REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
+        "GRANT USAGE ON SCHEMA public TO PUBLIC;",
+        "COMMENT ON SCHEMA public IS 'shared';",
+        "CREATE TABLE public.leak (id int); TRUNCATE public.leak; DROP TABLE public.leak;",
+        "DO $$ BEGIN CREATE TABLE public.leak (id int); END $$;",
+        "DO $$ BEGIN GRANT CREATE ON SCHEMA public TO PUBLIC; END $$;",
+        "SET LOCAL search_path = public; CREATE TABLE leak (id int);",
+        "SELECT pg_catalog.set_config('search_path', 'public', true); DROP TABLE IF EXISTS legacy;",
+        // SQL sqlparser does not parse.
+        "ALTER SEQUENCE IF EXISTS public.s RESTART WITH 5;",
+        "DROP ROUTINE IF EXISTS public.cleanup();",
+    ] {
+        f.sql(
+            "0001_initial.sql",
+            &format!("CREATE TABLE app.t (id int);\n{sql}\n"),
+        );
+        let r = f.command("plan");
+        assert_eq!(r["outcome"], "pass", "{sql}: {}", r["diagnostics"]);
+        assert!(!has_code(&r, "DB_OUTSIDE_SCOPE"), "{sql}: {r}");
+    }
+    // A schema that exists only on the target is no refusal either: replay
+    // fails for lack of it in scratch, as it did before #420.
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t (id int);\nCREATE TABLE shared.leak (id int);\n",
+    );
+    let r = f.command("plan");
+    assert!(has_code(&r, "DB_POSTGRES"), "{r}");
+    assert!(!has_code(&r, "DB_OUTSIDE_SCOPE"), "{r}");
+    // Planning never touched the target's objects outside the scope.
+    assert!(f
+        .target()
+        .query_one("SELECT to_regclass('public.legacy') IS NOT NULL AND to_regclass('public.leak') IS NULL AND to_regclass('shared.leak') IS NULL AND (SELECT count(*) FROM pg_attribute WHERE attrelid = 'public.legacy'::regclass AND attnum > 0) = 1", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+}
+
+/// What would break NTNT's own guarantees stays refused: changes to `_ntnt`,
+/// the schema that holds NTNT's ledger, and to PostgreSQL's system schemas.
+/// Each statement is a no-op or fails in scratch, which has no `_ntnt` and
+/// whose unprivileged role cannot change system schemas, yet would act on a
+/// target, so it is refused by name before it runs; replay catches a `_ntnt`
+/// that a DO block creates.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn changes_to_the_ledger_schema_and_system_schemas_are_refused() {
+    let f = Fixture::new();
     for (sql, object) in [
-        ("CREATE TABLE public.leak (id int);", "public.leak"),
-        ("CREATE TABLE shared.leak (id int);", "shared.leak"),
-        // A no-op in scratch, but it would drop a table on the target.
-        ("DROP TABLE IF EXISTS public.legacy;", "public.legacy"),
+        ("CREATE SCHEMA IF NOT EXISTS _ntnt;", "_ntnt"),
         (
-            "GRANT SELECT ON ALL TABLES IN SCHEMA public TO PUBLIC;",
-            "public",
+            "DROP TABLE IF EXISTS _ntnt.schema_migrations_v2;",
+            "_ntnt.schema_migrations_v2",
+        ),
+        (
+            "ALTER TABLE IF EXISTS _ntnt.schema_migrations_v2 ADD COLUMN note text;",
+            "_ntnt.schema_migrations_v2",
+        ),
+        // Unqualified names that resolve in _ntnt.
+        (
+            "SET LOCAL search_path TO _ntnt; ALTER TABLE IF EXISTS schema_migrations_v2 ADD COLUMN note text;",
+            "_ntnt",
+        ),
+        (
+            "SELECT set_config('search_path', '_ntnt', true); ALTER TABLE IF EXISTS schema_migrations_v2 ADD COLUMN note text;",
+            "_ntnt",
+        ),
+        // SQL sqlparser does not parse.
+        (
+            "ALTER SEQUENCE IF EXISTS _ntnt.positions RESTART WITH 5;",
+            "_ntnt.positions",
+        ),
+        ("GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;", "pg_catalog"),
+        (
+            "REVOKE SELECT ON ALL TABLES IN SCHEMA information_schema FROM PUBLIC;",
+            "information_schema",
         ),
         // Statement text the analysis cannot see into: replay observes it.
-        (
-            "DO $$ BEGIN CREATE TABLE public.leak (id int); END $$;",
-            "public.relation:leak",
-        ),
-        (
-            "SET LOCAL search_path = public; CREATE TABLE leak (id int);",
-            "public.relation:leak",
-        ),
-        (
-            "DO $$ BEGIN GRANT CREATE ON SCHEMA public TO PUBLIC; END $$;",
-            "schema:public",
-        ),
+        ("DO $$ BEGIN CREATE SCHEMA _ntnt; END $$;", "schema:_ntnt"),
     ] {
         f.sql(
             "0001_initial.sql",
@@ -1042,12 +1106,6 @@ fn statements_outside_the_managed_scope_are_refused_and_named() {
             "{sql}: {refused}"
         );
     }
-    // Planning never touched the target's objects outside the scope.
-    assert!(f
-        .target()
-        .query_one("SELECT to_regclass('public.legacy') IS NOT NULL AND to_regclass('public.leak') IS NULL AND to_regclass('shared.leak') IS NULL", &[])
-        .unwrap()
-        .get::<_, bool>(0));
 }
 
 /// Two migrations of a single-schema history. It reaches every catalog query

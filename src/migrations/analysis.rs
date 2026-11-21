@@ -1165,8 +1165,8 @@ pub(crate) fn history_schemas<'a>(
 /// What one parsed statement creates, changes or drops, by the schema its
 /// name gives explicitly: (folded schema, name as written). Unqualified names
 /// are not listed: they resolve in the managed schema, the search_path every
-/// migration starts with.
-fn targets(statement: &Statement) -> Vec<(String, String)> {
+/// migration starts with. `None` for a statement kind this does not read.
+fn targets(statement: &Statement) -> Option<Vec<(String, String)>> {
     fn parts(n: &ObjectName) -> Option<Vec<&Ident>> {
         n.0.iter().map(|p| p.as_ident()).collect()
     }
@@ -1216,7 +1216,7 @@ fn targets(statement: &Statement) -> Vec<(String, String)> {
         }
     }
     let one = |n: &ObjectName| object(n).into_iter().collect::<Vec<_>>();
-    match statement {
+    Some(match statement {
         Statement::CreateTable(t) => one(&t.name),
         Statement::CreateView(v) => one(&v.name),
         // An index, trigger or policy lives with its table.
@@ -1265,41 +1265,285 @@ fn targets(statement: &Statement) -> Vec<(String, String)> {
             .collect(),
         Statement::Grant(g) => grants(g.objects.as_ref()),
         Statement::Revoke(r) => grants(r.objects.as_ref()),
-        _ => vec![],
+        _ => return None,
+    })
+}
+
+/// Schemas a migration may never act on: `_ntnt`, which holds NTNT's
+/// ledger, and PostgreSQL's system schemas (`pg_catalog`,
+/// `information_schema`, `pg_toast` and other `pg_*` names). `pg_temp`, the
+/// session's own temporary schema, is not one.
+fn protected_schema(name: &str) -> bool {
+    reserved_schema(name) && name != "pg_temp"
+}
+
+/// How a statement names a schema it may act in (see `schema_names`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Via {
+    /// A qualified name, an `IN SCHEMA` list or `SET SCHEMA` in a statement
+    /// NTNT parses.
+    Name,
+    /// `SET search_path`, `SET SCHEMA '...'` or `set_config('search_path',
+    /// ...)`: later unqualified names resolve there.
+    SearchPath,
+    /// A dotted name, or a name after `SCHEMA`, in a statement NTNT does not
+    /// parse or does not read names from. It may be a column of an alias.
+    Token,
+}
+
+/// Leading words of statements that read or write rows, run code or change
+/// settings rather than create, change, drop, grant or revoke objects: their
+/// dotted names are not read as schemas they act in.
+const ROW_STATEMENTS: &[&str] = &[
+    "SELECT",
+    "WITH",
+    "VALUES",
+    "TABLE",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
+    "CALL",
+    "DO",
+    "SET",
+    "RESET",
+    "SHOW",
+    "EXPLAIN",
+    "LOCK",
+    "ANALYZE",
+    "NOTIFY",
+    "LISTEN",
+    "UNLISTEN",
+    "PREPARE",
+    "EXECUTE",
+    "DEALLOCATE",
+    "DECLARE",
+    "FETCH",
+    "MOVE",
+    "CLOSE",
+];
+
+/// Whether `t` is the unquoted keyword `k`.
+fn keyword(t: Option<&&sqlparser::tokenizer::Token>, k: &str) -> bool {
+    matches!(t, Some(sqlparser::tokenizer::Token::Word(w)) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(k))
+}
+
+/// The names in a list-valued setting such as `search_path`, as
+/// `set_config` reads them: comma-separated, a double-quoted name verbatim
+/// (`""` for `"`), any other lowercased.
+fn setting_list(value: &str) -> Vec<String> {
+    let mut names = vec![];
+    let mut chars = value.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        let mut name = String::new();
+        if chars.next_if_eq(&'"').is_some() {
+            loop {
+                match chars.next() {
+                    Some('"') if chars.next_if_eq(&'"').is_some() => name.push('"'),
+                    Some('"') | None => break,
+                    Some(c) => name.push(c),
+                }
+            }
+            while chars.next_if(|c| *c != ',').is_some() {}
+        } else {
+            while let Some(c) = chars.next_if(|c| *c != ',') {
+                name.push(c);
+            }
+            name = name.trim_end().to_ascii_lowercase();
+        }
+        if !name.is_empty() {
+            names.push(name);
+        }
+        if chars.next().is_none() {
+            return names;
+        }
     }
 }
 
-/// Top-level statements that name an object to create, change or drop in a
-/// schema outside the managed scope (`schema` and the schemas the history
-/// creates), as (statement number, name as written). `pg_temp` is not
-/// outside. Such a statement can be a no-op in empty scratch yet act on the
-/// target (`DROP TABLE IF EXISTS public.t`), or fail there only for lack of
-/// the schema, so it is refused by name before replay. Statements that do not
-/// parse, and DO and routine bodies, are opaque here: replay observes what
-/// they create outside the scope.
-pub(crate) fn outside_scope(sql: &str, schema: &str, extra: &[String]) -> Vec<(usize, String)> {
+/// The schemas one statement's significant tokens put on the search path:
+/// `SET [SESSION | LOCAL] search_path {TO | =} a, b` (a string literal is one
+/// name, verbatim), `SET [SESSION | LOCAL] SCHEMA 'a'`, and each
+/// `set_config('search_path', 'a, b', ...)` call with literal arguments.
+/// `DEFAULT` names none.
+fn search_path_schemas(t: &[&sqlparser::tokenizer::Token]) -> Vec<String> {
+    use sqlparser::tokenizer::Token;
+    let mut schemas = vec![];
+    if keyword(t.first(), "SET") {
+        let mut i = 1;
+        while keyword(t.get(i), "SESSION") || keyword(t.get(i), "LOCAL") {
+            i += 1;
+        }
+        let list = if keyword(t.get(i), "search_path")
+            && (keyword(t.get(i + 1), "TO") || matches!(t.get(i + 1), Some(Token::Eq)))
+        {
+            Some(i + 2)
+        } else if keyword(t.get(i), "SCHEMA") {
+            Some(i + 1)
+        } else {
+            None
+        };
+        if let Some(mut i) = list.filter(|i| !keyword(t.get(*i), "DEFAULT")) {
+            loop {
+                match t.get(i) {
+                    Some(Token::Word(w)) => schemas.push(folded(&w.value, w.quote_style.is_some())),
+                    Some(Token::SingleQuotedString(s)) => schemas.push(s.clone()),
+                    _ => break,
+                }
+                if !matches!(t.get(i + 1), Some(Token::Comma)) {
+                    break;
+                }
+                i += 2;
+            }
+        }
+    }
+    for (i, token) in t.iter().enumerate() {
+        if keyword(Some(token), "set_config")
+            && matches!(t.get(i + 1), Some(Token::LParen))
+            && matches!(t.get(i + 2), Some(Token::SingleQuotedString(s)) if s.eq_ignore_ascii_case("search_path"))
+            && matches!(t.get(i + 3), Some(Token::Comma))
+        {
+            if let Some(Token::SingleQuotedString(list)) = t.get(i + 4) {
+                schemas.extend(setting_list(list));
+            }
+        }
+    }
+    schemas
+}
+
+/// The name after `SCHEMA` at `i`, skipping `IF [NOT] EXISTS`, and any
+/// further names a comma-separated `IN SCHEMA a, b` list gives, as (folded,
+/// as written). An unqualified name only; `AUTHORIZATION` names none.
+fn names_after_schema(t: &[&sqlparser::tokenizer::Token], mut i: usize) -> Vec<(String, String)> {
+    use sqlparser::tokenizer::Token;
+    if keyword(t.get(i), "IF") {
+        i += if keyword(t.get(i + 1), "NOT") { 3 } else { 2 };
+    }
+    let mut names = vec![];
+    while let Some(Token::Word(w)) = t.get(i) {
+        if matches!(t.get(i + 1), Some(Token::Period))
+            || (w.quote_style.is_none() && w.value.eq_ignore_ascii_case("AUTHORIZATION"))
+        {
+            break;
+        }
+        names.push((folded(&w.value, w.quote_style.is_some()), t[i].to_string()));
+        if !matches!(t.get(i + 1), Some(Token::Comma)) {
+            break;
+        }
+        i += 2;
+    }
+    names
+}
+
+/// Schemas a statement names by token shape, as (folded, as written): the
+/// first part of each dotted name (`public.cleanup`, `"Audit".log.id`) and
+/// each name after the keyword `SCHEMA` (`IN SCHEMA public`, `SCHEMA public`).
+fn token_schemas(t: &[&sqlparser::tokenizer::Token]) -> Vec<(String, String)> {
+    use sqlparser::tokenizer::Token;
+    let mut found = vec![];
+    for i in 0..t.len() {
+        let Token::Word(w) = t[i] else { continue };
+        if matches!(t.get(i + 1), Some(Token::Period))
+            && matches!(t.get(i + 2), Some(Token::Word(_)))
+            && !(i > 0 && matches!(t[i - 1], Token::Period))
+        {
+            found.push((
+                folded(&w.value, w.quote_style.is_some()),
+                format!("{}.{}", t[i], t[i + 2]),
+            ));
+        }
+        if keyword(Some(&t[i]), "SCHEMA") {
+            found.extend(names_after_schema(t, i + 1));
+        }
+    }
+    found
+}
+
+/// The schemas each top-level statement may create, change, drop, grant or
+/// revoke objects in, as (statement number, folded schema, name as written,
+/// how it is named):
+/// - a statement NTNT parses: each target it names with a schema
+///   (`targets`), such as `public.legacy` in `DROP TABLE public.legacy` or
+///   `public` in `GRANT ... ON ALL TABLES IN SCHEMA public`, and the schema
+///   an `ALTER ... SET SCHEMA` moves an object to;
+/// - in any statement: each schema `SET search_path`, `SET SCHEMA '...'` or
+///   `set_config('search_path', ...)` puts on the search path, where later
+///   unqualified names resolve;
+/// - any other statement, one sqlparser does not parse included, unless it
+///   only reads or writes rows (`ROW_STATEMENTS`): the schemas its tokens
+///   name (`token_schemas`).
+///
+/// Text inside DO and routine bodies is opaque.
+fn schema_names(sql: &str) -> Vec<(usize, String, String, Via)> {
+    use sqlparser::tokenizer::Token;
     let dialect = PostgreSqlDialect {};
     let mut found = vec![];
     for (index, tokens) in statements(sql).unwrap_or_default().into_iter().enumerate() {
-        if tokens.len() > 4096 {
-            continue;
+        let number = index + 1;
+        let t: Vec<&Token> = tokens
+            .iter()
+            .map(|t| &t.token)
+            .filter(|t| !matches!(t, Token::Whitespace(_)))
+            .collect();
+        for schema in search_path_schemas(&t) {
+            found.push((number, schema.clone(), schema, Via::SearchPath));
         }
-        let Ok(parsed) = Parser::new(&dialect)
-            .with_recursion_limit(64)
-            .with_tokens_with_locations(tokens)
-            .parse_statements()
-        else {
-            continue;
+        let rows = matches!(t.first(), Some(Token::Word(w)) if w.quote_style.is_none() && ROW_STATEMENTS.iter().any(|k| w.value.eq_ignore_ascii_case(k)));
+        let moved: Vec<(String, String)> = (0..t.len())
+            .filter(|&i| i > 0 && keyword(t.get(i), "SET") && keyword(t.get(i + 1), "SCHEMA"))
+            .flat_map(|i| names_after_schema(&t, i + 2))
+            .collect();
+        let shapes = if rows { vec![] } else { token_schemas(&t) };
+        let parsed = (tokens.len() <= 4096)
+            .then(|| {
+                Parser::new(&dialect)
+                    .with_recursion_limit(64)
+                    .with_tokens_with_locations(tokens)
+                    .parse_statements()
+                    .ok()
+            })
+            .flatten();
+        let named = match parsed.as_deref() {
+            Some([statement]) => targets(statement),
+            _ => None,
         };
-        for statement in &parsed {
-            for (named, written) in targets(statement) {
-                if named != "pg_temp" && named != schema && !extra.contains(&named) {
-                    found.push((index + 1, written));
+        match named {
+            Some(named) => {
+                for (schema, written) in named.into_iter().chain(moved) {
+                    found.push((number, schema, written, Via::Name));
+                }
+            }
+            None => {
+                for (schema, written) in shapes {
+                    found.push((number, schema, written, Via::Token));
                 }
             }
         }
     }
+    found.dedup();
     found
+}
+
+/// Top-level statements that act on `_ntnt`, the schema holding NTNT's
+/// ledger, or on a PostgreSQL system schema (`protected_schema`), as
+/// (statement number, name as written): a statement that names its target
+/// there (`DROP TABLE IF EXISTS _ntnt.schema_migrations_v2`, `GRANT ... ON
+/// SCHEMA pg_catalog`), one that puts `_ntnt` on the search path, and a
+/// `_ntnt.<name>` in a statement NTNT does not parse. Such a statement can be
+/// a no-op in scratch, which has no `_ntnt` and whose role cannot change
+/// system schemas, yet act on the target, so it is refused by name before
+/// it runs. `pg_catalog` on the search path or in SQL NTNT does not parse is
+/// a reference, not a change. DO and routine bodies are opaque here: replay
+/// refuses a `_ntnt` they create.
+pub(crate) fn protected_targets(sql: &str) -> Vec<(usize, String)> {
+    schema_names(sql)
+        .into_iter()
+        .filter(|(_, schema, _, via)| match via {
+            Via::Name => protected_schema(schema),
+            Via::SearchPath | Via::Token => schema == "_ntnt",
+        })
+        .map(|(number, _, written, _)| (number, written))
+        .collect()
 }
 /// Checks use a separate closed query grammar, not a SELECT/volatility heuristic.
 /// Live relation/type/operator resolution still requires the adapter purity gate
@@ -1858,48 +2102,106 @@ mod tests {
         );
     }
     #[test]
-    fn statements_naming_schemas_outside_the_scope_are_listed() {
-        let extra = ["audit".to_string()];
-        let named = |sql: &str| outside_scope(sql, "app", &extra);
+    fn statements_acting_on_the_ledger_or_a_system_schema_are_listed() {
+        // Other schemas however they are reached, pg_temp, references to
+        // pg_catalog, rows read from _ntnt and DO bodies are not listed.
         for sql in [
-            "CREATE TABLE app.t (id int); CREATE TABLE t2 (id int); CREATE TABLE audit.log (id int)",
-            "CREATE INDEX i ON audit.log (id); DROP TABLE IF EXISTS app.t, audit.log",
+            "CREATE TABLE app.t (id int); CREATE TABLE public.leak (id int); DROP TABLE IF EXISTS public.legacy",
+            "GRANT SELECT ON ALL TABLES IN SCHEMA public TO PUBLIC; REVOKE CREATE ON SCHEMA public FROM PUBLIC",
             "CREATE TEMP TABLE scratch (id int); CREATE TABLE pg_temp.x (id int)",
-            "GRANT SELECT ON ALL TABLES IN SCHEMA audit TO PUBLIC; GRANT USAGE ON SCHEMA app TO PUBLIC",
-            "ALTER SCHEMA audit RENAME TO audit_archive; DROP SCHEMA audit",
-            "CREATE FUNCTION audit.f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
-            "INSERT INTO app.t SELECT id FROM public.legacy",
-            "DO $$ BEGIN CREATE TABLE public.leak (id int); END $$",
+            "SET LOCAL search_path TO pg_catalog, public; SELECT pg_catalog.set_config('search_path', 'public', true)",
+            "ALTER SEQUENCE IF EXISTS public.s RESTART WITH 5; DROP ROUTINE IF EXISTS public.cleanup()",
+            "CREATE TABLE app.t (id pg_catalog.int4 DEFAULT pg_catalog.length('x'))",
+            "SELECT pg_catalog.now(); INSERT INTO app.t SELECT id FROM _ntnt.schema_migrations_v2",
+            "DO $$ BEGIN DROP TABLE IF EXISTS _ntnt.schema_migrations_v2; END $$",
+            "CREATE SCHEMA audit; CREATE SCHEMA IF NOT EXISTS \"_NTNT\"; SET search_path TO DEFAULT",
         ] {
-            assert!(named(sql).is_empty(), "{sql}: {:?}", named(sql));
+            assert!(protected_targets(sql).is_empty(), "{sql}: {:?}", protected_targets(sql));
         }
         for (sql, expected) in [
-            ("CREATE TABLE app.t (id int); CREATE TABLE public.leak (id int)", vec![(2, "public.leak")]),
-            ("CREATE TABLE Shared.leak (id int)", vec![(1, "Shared.leak")]),
-            ("CREATE TABLE mydb.public.leak (id int)", vec![(1, "mydb.public.leak")]),
-            ("DROP TABLE IF EXISTS public.legacy, app.t", vec![(1, "public.legacy")]),
-            ("ALTER TABLE IF EXISTS public.legacy ADD COLUMN x int", vec![(1, "public.legacy")]),
-            ("TRUNCATE public.legacy", vec![(1, "public.legacy")]),
-            ("CREATE INDEX i ON public.legacy (id)", vec![(1, "public.legacy")]),
-            ("CREATE TRIGGER tr BEFORE INSERT ON public.legacy FOR EACH ROW EXECUTE FUNCTION app.f()", vec![(1, "public.legacy")]),
-            ("CREATE POLICY p ON public.legacy USING (true)", vec![(1, "public.legacy")]),
-            ("CREATE VIEW public.v AS SELECT 1", vec![(1, "public.v")]),
-            ("CREATE SEQUENCE public.s", vec![(1, "public.s")]),
-            ("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS 'SELECT 1'", vec![(1, "public.f")]),
-            // sqlparser reads only the WITH form; replay sees the other.
-            ("CREATE EXTENSION pgcrypto WITH SCHEMA public", vec![(1, "public")]),
-            ("GRANT CREATE ON SCHEMA public TO PUBLIC", vec![(1, "public")]),
-            ("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC", vec![(1, "public")]),
-            ("GRANT SELECT ON public.legacy TO PUBLIC", vec![(1, "public.legacy")]),
-            ("DROP SCHEMA IF EXISTS shared", vec![(1, "shared")]),
-            ("ALTER SCHEMA shared RENAME TO mine", vec![(1, "shared")]),
-            ("CREATE SCHEMA _ntnt", vec![(1, "_ntnt")]),
-            ("DROP FUNCTION IF EXISTS public.f()", vec![(1, "public.f")]),
+            (
+                "CREATE TABLE app.t (id int); CREATE SCHEMA _ntnt",
+                vec![(2, "_ntnt")],
+            ),
+            ("CREATE SCHEMA IF NOT EXISTS _NTNT", vec![(1, "_NTNT")]),
+            (
+                "DROP TABLE IF EXISTS _ntnt.schema_migrations_v2",
+                vec![(1, "_ntnt.schema_migrations_v2")],
+            ),
+            (
+                "ALTER TABLE IF EXISTS \"_ntnt\".schema_migrations_v2 ADD COLUMN x int",
+                vec![(1, "\"_ntnt\".schema_migrations_v2")],
+            ),
+            ("ALTER TABLE app.t SET SCHEMA _ntnt", vec![(1, "_ntnt")]),
+            ("SET LOCAL search_path TO app, _ntnt", vec![(1, "_ntnt")]),
+            ("SET search_path = '_ntnt'", vec![(1, "_ntnt")]),
+            ("SET LOCAL SCHEMA '_ntnt'", vec![(1, "_ntnt")]),
+            (
+                "SELECT set_config('search_path', 'app, \"_ntnt\"', true)",
+                vec![(1, "_ntnt")],
+            ),
+            // Not parsed by sqlparser: read from tokens.
+            (
+                "ALTER SEQUENCE IF EXISTS _ntnt.positions RESTART WITH 5",
+                vec![(1, "_ntnt.positions")],
+            ),
+            (
+                "GRANT EXECUTE ON ALL ROUTINES IN SCHEMA app, _ntnt TO PUBLIC",
+                vec![(1, "_ntnt")],
+            ),
+            (
+                "GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC",
+                vec![(1, "pg_catalog")],
+            ),
+            (
+                "REVOKE SELECT ON ALL TABLES IN SCHEMA information_schema FROM PUBLIC",
+                vec![(1, "information_schema")],
+            ),
+            (
+                "CREATE FUNCTION pg_catalog.f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+                vec![(1, "pg_catalog.f")],
+            ),
+            (
+                "CREATE EXTENSION pgcrypto WITH SCHEMA pg_catalog",
+                vec![(1, "pg_catalog")],
+            ),
+            ("CREATE TABLE pg_toast.t (id int)", vec![(1, "pg_toast.t")]),
         ] {
-            let expected: Vec<(usize, String)> =
-                expected.into_iter().map(|(n, s)| (n, s.to_string())).collect();
-            assert_eq!(named(sql), expected, "{sql}");
+            let expected: Vec<(usize, String)> = expected
+                .into_iter()
+                .map(|(n, s)| (n, s.to_string()))
+                .collect();
+            assert_eq!(protected_targets(sql), expected, "{sql}");
         }
+    }
+    #[test]
+    fn search_path_settings_are_read_like_postgresql() {
+        let t = |sql: &str| {
+            let tokens = statements(sql).unwrap().remove(0);
+            let t: Vec<&sqlparser::tokenizer::Token> = tokens
+                .iter()
+                .map(|t| &t.token)
+                .filter(|t| !matches!(t, sqlparser::tokenizer::Token::Whitespace(_)))
+                .collect();
+            search_path_schemas(&t)
+        };
+        assert_eq!(
+            t("SET search_path TO Public, \"Mixed Case\", 'Quoted'"),
+            ["public", "Mixed Case", "Quoted"]
+        );
+        assert_eq!(t("set session search_path = app"), ["app"]);
+        assert_eq!(t("SET SCHEMA 'audit'"), ["audit"]);
+        assert!(t("SET search_path TO DEFAULT").is_empty());
+        assert!(t("SET statement_timeout = 5").is_empty());
+        assert_eq!(
+            t("SELECT pg_catalog.set_config('search_path', ' Public , \"A\"\"B\", app', true), set_config('search_path', 'x', false)"),
+            ["public", "A\"B", "app", "x"]
+        );
+        // A value that is not a literal names nothing NTNT can read.
+        assert!(t("SELECT set_config('search_path', current_setting('x'), true)").is_empty());
+        assert!(t("SELECT set_config('work_mem', 'public', true)").is_empty());
+        assert_eq!(setting_list(""), Vec::<String>::new());
+        assert_eq!(setting_list("a,,b"), ["a", "b"]);
     }
     #[test]
     fn statement_splitting_keeps_its_bounds_and_boundaries() {

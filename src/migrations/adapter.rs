@@ -245,11 +245,10 @@ impl Adapter {
         target: &Identity,
         endpoint: &Endpoint,
         schema: &str,
-        extra: &[String],
     ) -> Result<Identity> {
         match (self, target) {
             (Self::Postgres(pg), Identity::Postgres(target)) => pg
-                .prepare_scratch(target, endpoint, schema, extra)
+                .prepare_scratch(target, endpoint, schema)
                 .await
                 .map(Identity::Postgres),
             (Self::Sqlite(db), Identity::Sqlite(target)) => {
@@ -263,16 +262,14 @@ impl Adapter {
     }
     /// `limit` bounds the migration on a target: each PostgreSQL statement, or
     /// the whole SQLite script. Scratch replay keeps SQLite's fixed bound.
-    /// `extra` lists the schemas the history creates (PostgreSQL; empty for SQLite).
     pub async fn execute_captured(
         &self,
         migration: &Migration,
         schema: &str,
-        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.execute_captured(migration, schema, extra, limit).await,
+            Self::Postgres(pg) => pg.execute_captured(migration, schema, limit).await,
             Self::Sqlite(db) => db.execute_captured(migration, limit).await,
         }
     }

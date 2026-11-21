@@ -207,13 +207,12 @@ async fn replay_prefix(
         if let Some(migration) = migration {
             // Configured limits size work on the target's data. Replay
             // runs on an empty database and keeps the default limit. A
-            // PostgreSQL scratch also refuses a migration that acts outside
-            // the managed scope here (DB_OUTSIDE_SCOPE).
+            // PostgreSQL scratch also refuses a migration that acts on _ntnt
+            // or a system schema here (DB_OUTSIDE_SCOPE).
             scratch
                 .execute_captured(
                     migration,
                     schema,
-                    extra,
                     super::inventory::Limits::default().statement(),
                 )
                 .await?;
@@ -407,12 +406,7 @@ async fn inspect_observed(
             .await?;
             let work = async {
                 let scratch_identity = scratch
-                    .prepare_scratch(
-                        &identity,
-                        &scratch_config.endpoint,
-                        &inputs.config.schema,
-                        &inputs.history_schemas,
-                    )
+                    .prepare_scratch(&identity, &scratch_config.endpoint, &inputs.config.schema)
                     .await?;
                 report["scratch"] = json!({"identity":scratch_identity,"disposable":true});
                 let count = if let Some(action) = &adoption {
@@ -615,7 +609,7 @@ mod tests {
         .await
         .unwrap();
         scratch
-            .prepare_scratch(&identity, scratch_endpoint, "main", &[])
+            .prepare_scratch(&identity, scratch_endpoint, "main")
             .await
             .unwrap();
         (identity, scratch)
@@ -652,7 +646,7 @@ mod tests {
             // status and verify replay the same states without fingerprinting them.
             let scratch_endpoint = &inputs.config.scratch.as_ref().unwrap().endpoint;
             scratch
-                .prepare_scratch(&identity, scratch_endpoint, "main", &[])
+                .prepare_scratch(&identity, scratch_endpoint, "main")
                 .await
                 .unwrap();
             let mut replayed = Replayed::default();
@@ -852,7 +846,7 @@ mod tests {
                     scratch.rollback().await.unwrap();
                     let scratch_endpoint = &inputs.config.scratch.as_ref().unwrap().endpoint;
                     scratch
-                        .prepare_scratch(&identity, scratch_endpoint, "main", &[])
+                        .prepare_scratch(&identity, scratch_endpoint, "main")
                         .await
                         .unwrap();
                 }
@@ -860,7 +854,6 @@ mod tests {
                     .execute_captured(
                         migration,
                         "main",
-                        &[],
                         super::super::inventory::Limits::default().statement(),
                     )
                     .await;

@@ -596,35 +596,38 @@ the scratch role in replay; both map to the managed-role marker. `requires`,
 predictions, `progress[].locks` and `CREATE INDEX CONCURRENTLY` cover managed-schema
 tables only.
 
-Anything a migration would create, change or drop outside the managed scope would
-never be inspected, so it is refused with `DB_OUTSIDE_SCOPE`. Its `source` names
-the migration and `objects` names what lies outside the scope:
+Statements outside the managed scope run as written; NTNT does not refuse them. A
+migration may create, change, drop, grant, revoke or comment on schemas and objects
+elsewhere, for example `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, `DROP TABLE IF
+EXISTS public.legacy` or `GRANT USAGE ON SCHEMA public` while the managed schema is
+`app`, whether it names them, reaches them through `SET search_path`, a `DO` block or
+a function, or uses SQL NTNT does not parse. NTNT does not inspect those schemas.
+Replay runs the statements in scratch, which holds nothing but an empty `public`: a
+statement that needs a schema or object the history does not create there (`CREATE
+TABLE shared.t` while only the target has `shared`) fails in replay, and an `IF
+EXISTS` form is a no-op in scratch while it acts on the target.
 
-- **Before the script runs**, in replay and on the target: a top-level statement
-  that creates, alters, drops, truncates or grants on an object named with a schema
-  outside the scope (`CREATE TABLE public.audit_log`, `DROP TABLE IF EXISTS
-  public.legacy`, `CREATE INDEX ... ON shared.t`), or that creates, alters, drops
-  or grants on such a schema itself (`DROP SCHEMA IF EXISTS shared`, `GRANT USAGE
-  ON SCHEMA public`, `GRANT ... ON ALL TABLES IN SCHEMA public`, `CREATE EXTENSION
-  ... WITH SCHEMA public`). The message gives the statement number; `objects` lists
-  the names as written (`public.legacy`). `pg_temp` is not outside the scope. These
-  statements can be no-ops in empty scratch or fail there for lack of the schema,
-  so they are refused by name before replay.
-- **After each replayed migration**: scratch must hold nothing outside the scope
-  that it was not provisioned with: no other schema, no object in `public` (unless
-  `public` is the managed schema or the history creates it), and `public`'s owner
-  and privileges unchanged. `objects` lists catalog-style keys such as
-  `public.relation:audit_log` or `schema:reporting`. This catches what statement
-  analysis cannot see: `DO` blocks and function bodies, `SET search_path`,
-  `ALTER ... SET SCHEMA`, and extensions that install objects in `public`.
+Two kinds of change stay refused with `DB_OUTSIDE_SCOPE`, because they would break
+NTNT's own guarantees: changes to `_ntnt`, the schema that holds NTNT's ledger, and to
+PostgreSQL's system schemas (`pg_catalog`, `information_schema`, `pg_toast` and other
+`pg_*` names; `pg_temp`, the session's temporary schema, is allowed). Its `source`
+names the migration and `objects` names what it would change:
 
-Keep shared objects, such as extensions installed in `public` for several
-applications, out of migrations and provision them separately, or install an
-extension in the managed schema. A statement inside a `DO` block or function body
-that acts outside the scope only on the target (for example dropping a `public`
-table if it exists) is not detected; keep such SQL out of migrations. Database-wide
-objects without a schema, such as publications and large objects, remain outside
-inspection.
+- **Before the script runs**, in replay and on the target: a top-level statement that
+  creates, alters, drops, truncates, grants or revokes on an object or schema named
+  there (`DROP TABLE IF EXISTS _ntnt.schema_migrations_v2`, `GRANT USAGE ON SCHEMA
+  pg_catalog`), a `SET search_path`, `SET SCHEMA` or `set_config('search_path', ...)`
+  that puts `_ntnt` on the search path, and a `_ntnt.<name>` in a statement NTNT does
+  not parse. The message gives the statement numbers; `objects` lists the names as
+  written. Such a statement can be a no-op in scratch, which has no `_ntnt` and whose
+  unprivileged role cannot change system schemas, yet act on the target.
+- **After each replayed migration**: scratch must not have gained a schema `_ntnt`
+  (`objects`: `schema:_ntnt`), as a `DO` block can create one.
+
+A `DO` block or function body that changes `_ntnt` only on the target (for example
+behind an `IF` that finds the ledger) is not detected; keep such SQL out of migrations.
+Database-wide objects without a schema, such as publications and large objects, remain
+outside inspection.
 
 ### Scoped execution ledger and legacy inspection
 
@@ -928,4 +931,4 @@ cargo test --locked --lib migrations::postgres::tests::target_transaction_is_rea
 
 The shared conformance suite executes the same history/drift, approval/stale/wrong-target, contract failure and committed-prefix recovery scenarios on both native adapters. It also exercises populated baseline adoption, exact multi-file coverage, required check failures, unknown ledgers and later upgrades. PostgreSQL cases import only recognized immutable legacy history and reject unsafe ledger definitions. Adoption commit-fault tests distinguish baseline/import records from SQL execution; SQLite cases cover competing adopters, cancellation/timeout and busy-COMMIT recovery. SQLite-only tests also cover physical file aliases/replacement, read-only nonmutation, WAL, bounded busy waits, competing CLI processes, forced process death before commit and after an acknowledged-to-SQLite prefix, busy-COMMIT fresh reconciliation, timeout/discard, ledger tampering, redaction and populated rebuild preservation. `tests/db_sqlite_indexes.rs` covers partial (including partial unique) and expression indexes through plan, migrate and verify, out-of-band predicate and expression drift, a rebuild that must recreate a partial index unchanged, the function allowlist for predicates and expressions, and coverage diagnostics that name the uncovered objects. Native SQLite fixtures provision disposable local files only; no service is needed.
 
-PostgreSQL fixtures create/drop databases and roles. They test schemas the history creates (drift, coverage and grants there, cross-schema foreign keys, renames, `DROP SCHEMA`, adoption and reconciliation), `DB_OUTSIDE_SCOPE` refusals, single-schema fingerprints recorded before the scope was added, real read-only transactions, no target bootstrap, applied-prefix versus pending drift, invalid indexes, constraint validity/grants, immutable SQL/metadata history, malformed/RLS/view ledgers, unknown coverage, physical scratch collisions, low-privilege/empty/matching scratch, redaction, bounded waits, cleanup, source replacement during a blocked inspection, and target/source/authority-bound plans. Execution tests additionally cover fresh construction, populated upgrade preservation, exact authority, stale plans, partial commits and reruns, false/NULL/shape/type/error/timeout checks, native/advisory contention, configured statement and migrator-wait limits (scaled to seconds), snapshots after lock acquisition, process cancellation, unsafe/scoped ledgers, unsupported effects and source replacement. A test-only wire proxy drops connections before COMMIT, after durable COMMIT but before acknowledgement, during rollback, and during reconciliation. It is not linked into release code and exposes no authorization bypass. These executed fixture checks are not evidence about arbitrary application business behavior or real deployment compatibility.
+PostgreSQL fixtures create/drop databases and roles. They test schemas the history creates (drift, coverage and grants there, cross-schema foreign keys, renames, `DROP SCHEMA`, adoption and reconciliation), statements outside the managed scope that run as written and the `DB_OUTSIDE_SCOPE` refusals that protect `_ntnt` and system schemas, single-schema fingerprints recorded before the scope was added, real read-only transactions, no target bootstrap, applied-prefix versus pending drift, invalid indexes, constraint validity/grants, immutable SQL/metadata history, malformed/RLS/view ledgers, unknown coverage, physical scratch collisions, low-privilege/empty/matching scratch, redaction, bounded waits, cleanup, source replacement during a blocked inspection, and target/source/authority-bound plans. Execution tests additionally cover fresh construction, populated upgrade preservation, exact authority, stale plans, partial commits and reruns, false/NULL/shape/type/error/timeout checks, native/advisory contention, configured statement and migrator-wait limits (scaled to seconds), snapshots after lock acquisition, process cancellation, unsafe/scoped ledgers, unsupported effects and source replacement. A test-only wire proxy drops connections before COMMIT, after durable COMMIT but before acknowledgement, during rollback, and during reconciliation. It is not linked into release code and exposes no authorization bypass. These executed fixture checks are not evidence about arbitrary application business behavior or real deployment compatibility.
