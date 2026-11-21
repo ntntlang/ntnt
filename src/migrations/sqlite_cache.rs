@@ -292,8 +292,6 @@ struct Compiled {
     /// Foreign-key enforcement.
     enforced: bool,
     signature: [u8; 32],
-    /// Hash of the certifiers' keys.
-    certifiers: [u8; 32],
 }
 
 /// What the last plan found for a group's programs, and every group it read
@@ -303,7 +301,6 @@ struct Planned {
     /// Groups whose programs must compile now for these to be reused after a
     /// change below them, sorted.
     certifiers: Vec<String>,
-    certified_by: [u8; 32],
     reads: Vec<String>,
 }
 
@@ -326,10 +323,9 @@ struct Group {
     /// The groups its names and its triggers' names resolve to, until one of
     /// those names may resolve differently.
     resolved: Option<(Vec<String>, Vec<String>)>,
-    /// The foreign keys into it as of the last plan: the child, the key's
-    /// position in the child's output, and whether the key names this group
-    /// (and not only another object of its name).
-    into: Vec<(String, usize, bool)>,
+    /// The foreign keys into it as of the last plan: the child and the key's
+    /// position in the child's output.
+    into: Vec<(String, usize)>,
     planned: Option<Planned>,
 }
 
@@ -592,8 +588,9 @@ impl Cache {
     /// that certify each other, every certifier's unit before the units it
     /// certifies. Call once every group has its output.
     pub fn plan(&mut self) -> Vec<Vec<String>> {
-        // The foreign keys into each group.
-        let mut into: HashMap<&str, Vec<(String, usize, bool)>> = HashMap::new();
+        // The foreign keys into each group. SQLite finds a table's children
+        // by its name, so a key into P is a key into P's group only.
+        let mut into: HashMap<String, Vec<(String, usize)>> = HashMap::new();
         for (child, group) in &self.groups {
             for (i, key) in group
                 .output
@@ -601,19 +598,14 @@ impl Cache {
                 .flat_map(|o| &o.foreign_keys)
                 .enumerate()
             {
-                let parent = group_key(&key.parent);
-                for target in self.resolve.get(&parent).into_iter().flatten() {
-                    into.entry(target.as_str()).or_default().push((
-                        child.clone(),
-                        i,
-                        *target == parent,
-                    ));
-                }
+                into.entry(group_key(&key.parent))
+                    .or_default()
+                    .push((child.clone(), i));
             }
         }
         let mut changed = Vec::new();
         for (key, group) in &self.groups {
-            let mut now = into.remove(key.as_str()).unwrap_or_default();
+            let mut now = into.remove(key).unwrap_or_default();
             now.sort_unstable();
             if now != group.into {
                 changed.push((key.clone(), now));
@@ -671,13 +663,8 @@ impl Cache {
                     readers.remove(&key);
                 }
             }
-            for read in self
-                .groups
-                .get(&key)
-                .and_then(|g| g.planned.as_ref())
-                .iter()
-                .flat_map(|p| &p.reads)
-            {
+            let reads = self.groups.get(&key).and_then(|g| g.planned.as_ref());
+            for read in reads.iter().flat_map(|p| &p.reads) {
                 self.readers
                     .entry(read.clone())
                     .or_default()
@@ -691,13 +678,13 @@ impl Cache {
             .map(|(k, _)| k)
             .collect();
         keys.sort_unstable();
-        let certified = |key: &str| {
+        let certifiers = |key: &str| -> &[String] {
             self.groups[key]
                 .planned
                 .as_ref()
-                .map_or(&[][..], |p| &p.certifiers[..])
+                .map_or(&[], |p| &p.certifiers)
         };
-        if keys.iter().all(|k| certified(k).is_empty()) {
+        if keys.iter().all(|k| certifiers(k).is_empty()) {
             return keys.into_iter().map(|k| vec![k.clone()]).collect();
         }
         let at: HashMap<&str, usize> = keys
@@ -708,7 +695,7 @@ impl Cache {
         let edges: Vec<Vec<usize>> = keys
             .iter()
             .map(|k| {
-                certified(k)
+                certifiers(k)
                     .iter()
                     .filter_map(|c| at.get(c.as_str()).copied())
                     .collect()
@@ -743,16 +730,15 @@ impl Cache {
         let mut failures = Vec::new();
         for unit in units {
             let planned = |key: &str| self.groups[key].planned.as_ref().unwrap();
+            // The last verdict was for this signature and enforcement.
             let same = |key: &str| {
                 self.groups[key].compiled.is_some_and(|c| {
                     Some(c.enforced) == enforced && c.signature == planned(key).signature
                 })
             };
+            // And every certifier outside the unit kept its tree too.
             let unchanged = |key: &str| {
                 same(key)
-                    && self.groups[key]
-                        .compiled
-                        .is_some_and(|c| c.certifiers == planned(key).certified_by)
                     && planned(key).certifiers.iter().all(|c| {
                         unit.contains(c)
                             || verdicts
@@ -762,44 +748,32 @@ impl Cache {
             };
             let first = unit[0].as_str();
             let cyclic = unit.len() > 1 || planned(first).certifiers.iter().any(|c| c == first);
-            let (reuse, changed) = if !cyclic {
-                if unchanged(first) {
-                    (true, false)
-                } else if same(first)
-                    && planned(first)
-                        .certifiers
-                        .iter()
-                        .all(|c| verdicts.get(c.as_str()).is_some_and(|&(ok, _)| ok))
-                    && depths.get_or_insert_with(|| self.depths())[first] <= depth_limit
-                {
-                    (true, true)
-                } else {
-                    (false, true)
-                }
+            let (reuse, changed) = if cyclic {
+                // Groups that certify each other are compiled again together
+                // unless none of their trees changed.
+                let unchanged = unit.iter().all(|k| unchanged(k));
+                (unchanged, !unchanged)
+            } else if unchanged(first) {
+                (true, false)
+            } else if same(first)
+                && planned(first)
+                    .certifiers
+                    .iter()
+                    .all(|c| verdicts.get(c.as_str()).is_some_and(|&(ok, _)| ok))
+                && depths.get_or_insert_with(|| self.depths())[first] <= depth_limit
+            {
+                (true, true)
             } else {
-                (
-                    unit.iter().all(|k| unchanged(k)),
-                    !unit.iter().all(|k| unchanged(k)),
-                )
+                (false, true)
             };
             for key in unit {
                 if reuse {
-                    let certified_by = self.groups[key.as_str()]
-                        .planned
-                        .as_ref()
-                        .unwrap()
-                        .certified_by;
-                    let group = self.groups.get_mut(key.as_str()).unwrap();
-                    if let Some(compiled) = group.compiled.as_mut() {
-                        compiled.certifiers = certified_by;
-                    }
                     verdicts.insert(key, (true, changed));
                     continue;
                 }
                 let group = &self.groups[key.as_str()];
                 let programs = group.output.as_ref().unwrap().programs.clone();
-                let planned = group.planned.as_ref().unwrap();
-                let (signature, certified_by) = (planned.signature, planned.certified_by);
+                let signature = group.planned.as_ref().unwrap().signature;
                 self.stats.programs_compiled += programs.len() as u64;
                 let failed = compile(&programs);
                 let ok = failed.is_empty();
@@ -808,7 +782,6 @@ impl Cache {
                     enforced.filter(|_| ok).map(|enforced| Compiled {
                         enforced,
                         signature,
-                        certifiers: certified_by,
                     });
                 verdicts.insert(key, (ok, true));
             }
@@ -822,7 +795,7 @@ impl Cache {
         let (names, triggers) = self.group(key).resolved.as_ref().unwrap();
         (names, triggers)
     }
-    /// The key into `parent` at this position of `child`'s foreign keys.
+    /// The key at this position of `child`'s foreign keys.
     fn key(&self, child: &str, position: usize) -> &ForeignKey {
         &self.group(child).output.as_ref().unwrap().foreign_keys[position]
     }
@@ -842,42 +815,33 @@ impl Cache {
             return false;
         };
         let mut leaf = group.triggers == 0;
-        for (grandchild, position, names) in &group.into {
+        for (grandchild, position) in &group.into {
             reads.insert(grandchild);
             let key = self.key(grandchild, *position);
-            if *names
-                && key.on_update != Action::NoAction
-                && key.changed_by(columns, &output.primary_key)
-            {
+            if key.on_update != Action::NoAction && key.changed_by(columns, &output.primary_key) {
                 leaf = false;
             }
         }
         leaf
     }
-    /// Whether `key` of `child` into `parent` is certified by the child's
-    /// own programs (see the module documentation).
+    /// Whether `key` of `child` into the group being planned is certified
+    /// by the child's own programs (see the module documentation).
     fn simple<'a>(
         &'a self,
-        parent: &str,
         child: &'a str,
         key: &ForeignKey,
-        names: bool,
         reads: &mut BTreeSet<&'a str>,
     ) -> bool {
         let mut leaf = || self.leaf(child, &key.from, reads);
-        names
-            && child != parent
-            && Self::has_programs(self.group(child))
-            && match key.on_delete {
-                Action::NoAction | Action::Restrict | Action::Cascade => true,
-                Action::SetNull => leaf(),
-                _ => false,
-            }
-            && match key.on_update {
-                Action::NoAction | Action::Restrict => true,
-                Action::Cascade | Action::SetNull => leaf(),
-                _ => false,
-            }
+        (match key.on_delete {
+            Action::NoAction | Action::Restrict | Action::Cascade => true,
+            Action::SetNull => leaf(),
+            _ => false,
+        }) && match key.on_update {
+            Action::NoAction | Action::Restrict => true,
+            Action::Cascade | Action::SetNull => leaf(),
+            _ => false,
+        }
     }
     /// The signature of what `root`'s programs read outside certified
     /// subtrees, the certifiers of those subtrees, and every group read.
@@ -911,18 +875,12 @@ impl Cache {
             for named in triggers {
                 visit((Use::Written, named));
             }
-            for (child, position, names) in &self.group(group).into {
-                let (child, names) = (child.as_str(), *names);
+            for (child, position) in &self.group(group).into {
+                let child = child.as_str();
                 reads.insert(child);
                 let key = self.key(child, *position);
-                if group == root && self.simple(root, child, key, names, &mut reads) {
+                if group == root && self.simple(child, key, &mut reads) {
                     certifiers.insert(child);
-                    continue;
-                }
-                if !names {
-                    // The key names another object of this group's name:
-                    // these programs never process the child.
-                    visit((Use::Read, child));
                     continue;
                 }
                 let updates = |action| {
@@ -931,12 +889,11 @@ impl Cache {
                         Action::SetNull | Action::SetDefault | Action::Cascade | Action::Unknown
                     )
                 };
-                let descend = matches!(
+                if matches!(
                     key.on_delete,
                     Action::SetNull | Action::SetDefault | Action::Unknown
                 ) || updates(key.on_update)
-                    || (key.on_delete == Action::Cascade && !Self::has_programs(self.group(child)));
-                if descend {
+                {
                     visit((Use::Written, child));
                 } else {
                     visit((Use::Read, child));
@@ -955,15 +912,9 @@ impl Cache {
             hash.update(key.as_bytes());
             hash.update(self.group(key).hash);
         }
-        let mut certified_by = Sha256::new();
-        for certifier in &certifiers {
-            certified_by.update((certifier.len() as u64).to_be_bytes());
-            certified_by.update(certifier.as_bytes());
-        }
         Planned {
             signature: hash.finalize().into(),
             certifiers: certifiers.into_iter().map(str::to_owned).collect(),
-            certified_by: certified_by.finalize().into(),
             reads: reads.into_iter().map(str::to_owned).collect(),
         }
     }
@@ -993,11 +944,9 @@ impl Cache {
                     .iter()
                     .filter_map(|t| at.get(t.as_str())),
             );
-            for (child, position, names) in &group.into {
+            for (child, position) in &group.into {
                 let key = self.key(child, *position);
-                if !names
-                    || (key.on_delete == Action::NoAction && key.on_update == Action::NoAction)
-                {
+                if key.on_delete == Action::NoAction && key.on_update == Action::NoAction {
                     continue;
                 }
                 programs[index] += 2;

@@ -1279,11 +1279,23 @@ mod tests {
             ("CREATE UNIQUE INDEX c2_c ON c2(c_id); CREATE TABLE c3(id INTEGER PRIMARY KEY, c2_c INTEGER REFERENCES c2(c_id) ON UPDATE CASCADE);".into(), &[]),
             (gone("c3", "UPDATE"), &["c", "c2", "c3"]),
             (undo("c3"), &[]),
-            // Children dropped, a parent changed, and a cascade four levels deep.
+            // Children dropped, a parent changed, and a cascade four levels
+            // deep, which a trigger on another table also reaches.
             ("DROP TABLE e; DROP TABLE wc;".into(), &[]),
             ("ALTER TABLE b ADD COLUMN note TEXT;".into(), &[]),
-            (format!("CREATE TABLE deep(id INTEGER PRIMARY KEY, d_id INTEGER REFERENCES d(id) ON DELETE CASCADE); {}", gone("deep", "DELETE")), &["a", "b", "c", "d", "deep"]),
+            ("CREATE TABLE tz(id INTEGER); CREATE TRIGGER tz_del AFTER INSERT ON tz BEGIN DELETE FROM b WHERE id = 0; END;".into(), &[]),
+            (format!("CREATE TABLE deep(id INTEGER PRIMARY KEY, d_id INTEGER REFERENCES d(id) ON DELETE CASCADE); {}", gone("deep", "DELETE")), &["a", "b", "c", "d", "deep", "tz"]),
             (undo("deep"), &[]),
+            // A trigger reaches a SET NULL whose UPDATE later cascades on to a
+            // new grandchild.
+            ("CREATE TABLE sp(id INTEGER PRIMARY KEY); CREATE TABLE sc(id INTEGER PRIMARY KEY, sp_id INTEGER UNIQUE REFERENCES sp(id) ON DELETE SET NULL); CREATE TABLE sw(id INTEGER); CREATE TRIGGER sw_del AFTER INSERT ON sw BEGIN DELETE FROM sp WHERE id = 0; END;".into(), &[]),
+            (format!("CREATE TABLE sg(id INTEGER PRIMARY KEY, sc_sp INTEGER REFERENCES sc(sp_id) ON UPDATE CASCADE); {}", gone("sg", "UPDATE")), &["sc", "sg", "sp", "sw"]),
+            (undo("sg"), &[]),
+            // A view of a view of a table: rebuilding the table without the
+            // column the views read takes both outside coverage.
+            ("CREATE TABLE vt(id INTEGER PRIMARY KEY, x INTEGER); CREATE VIEW vv1 AS SELECT id, x FROM vt; CREATE VIEW vv2 AS SELECT x FROM vv1;".into(), &[]),
+            ("DROP TABLE vt; CREATE TABLE vt(id INTEGER PRIMARY KEY);".into(), &["view:\"vv1\"", "view:\"vv2\""]),
+            ("DROP TABLE vt; CREATE TABLE vt(id INTEGER PRIMARY KEY, x INTEGER);".into(), &[]),
         ];
         let scripts: Vec<(String, Option<&str>)> =
             steps.iter().map(|(sql, _)| (sql.clone(), None)).collect();
