@@ -540,14 +540,21 @@ mod tests {
         assert!(outcome.is_ok() && cleanup.is_none());
     }
 
-    /// Replay `n` migrations, `migration(i)` the SQL of the i-th, on a fresh
-    /// SQLite scratch as a plan does and return the inspection work its
-    /// session did.
-    fn replay_work(
-        n: usize,
-        migration: impl Fn(usize) -> String,
-    ) -> super::super::sqlite_cache::Stats {
-        use crate::interpreter::SecretValue;
+    /// A SQLite project whose migrations are `scripts`, in order, with empty
+    /// target and scratch files.
+    struct Project {
+        _dir: tempfile::TempDir,
+        inputs: CapturedInputs,
+        target: std::path::PathBuf,
+        scratch: std::path::PathBuf,
+    }
+    fn sqlite_project(scripts: &[String]) -> Project {
+        let scripts: Vec<_> = scripts.iter().map(|sql| (sql.clone(), None)).collect();
+        sqlite_project_with(&scripts)
+    }
+    /// The same, where a migration may name the table it rebuilds
+    /// (`sqlite_rebuild`).
+    fn sqlite_project_with(scripts: &[(String, Option<&str>)]) -> Project {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         std::fs::create_dir(root.join("migrations")).unwrap();
@@ -559,44 +566,80 @@ mod tests {
              [secrets.DB_TARGET]\n[secrets.DB_SCRATCH]\n",
         )
         .unwrap();
-        for i in 1..=n {
-            let name = format!("{i:04}_step.sql");
-            std::fs::write(root.join("migrations").join(name), migration(i)).unwrap();
+        for (i, (sql, rebuild)) in scripts.iter().enumerate() {
+            let migrations = root.join("migrations");
+            std::fs::write(migrations.join(format!("{:04}_step.sql", i + 1)), sql).unwrap();
+            if let Some(table) = rebuild {
+                let sidecar = format!("sqlite_rebuild = \"{table}\"\n");
+                std::fs::write(migrations.join(format!("{:04}_step.toml", i + 1)), sidecar)
+                    .unwrap();
+            }
         }
         let inputs = CapturedInputs::load(&root.join("ntnt.toml"), "test", None).unwrap();
         let (target, scratch) = (root.join("target.sqlite"), root.join("scratch.sqlite"));
         for path in [&target, &scratch] {
             std::fs::File::create(path).unwrap();
         }
+        Project {
+            _dir: dir,
+            inputs,
+            target,
+            scratch,
+        }
+    }
+    /// The target's identity and a scratch session prepared for replay, as
+    /// plan has them.
+    async fn prepared_scratch(project: &Project) -> (Identity, Adapter) {
+        use crate::interpreter::SecretValue;
         let secret = |path: &std::path::Path| {
             SecretValue::new("FIXTURE", path.to_str().unwrap().to_owned()).unwrap()
         };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let endpoint = &inputs.endpoint;
-            let target = Adapter::connect(&secret(&target), endpoint, "sqlite", Access::Inspect)
-                .await
-                .unwrap();
-            let identity = target.identity(endpoint).await.unwrap();
-            drop(target);
-            let scratch_endpoint = &inputs.config.scratch.as_ref().unwrap().endpoint;
-            let scratch = Adapter::connect(
-                &secret(&scratch),
-                scratch_endpoint,
-                "sqlite",
-                Access::Scratch(json!(&identity)),
-            )
+        let endpoint = &project.inputs.endpoint;
+        let target = Adapter::connect(
+            &secret(&project.target),
+            endpoint,
+            "sqlite",
+            Access::Inspect,
+        )
+        .await
+        .unwrap();
+        let identity = target.identity(endpoint).await.unwrap();
+        drop(target);
+        let scratch_endpoint = &project.inputs.config.scratch.as_ref().unwrap().endpoint;
+        let scratch = Adapter::connect(
+            &secret(&project.scratch),
+            scratch_endpoint,
+            "sqlite",
+            Access::Scratch(json!(&identity)),
+        )
+        .await
+        .unwrap();
+        scratch
+            .prepare_scratch(&identity, scratch_endpoint, "main", &[])
             .await
             .unwrap();
-            scratch
-                .prepare_scratch(&identity, scratch_endpoint, "main", &[])
-                .await
-                .unwrap();
+        (identity, scratch)
+    }
+    fn current_thread() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// Replay `n` migrations, `migration(i)` the SQL of the i-th, on a fresh
+    /// SQLite scratch as a plan does and return the inspection work its
+    /// session did.
+    fn replay_work(
+        n: usize,
+        migration: impl Fn(usize) -> String,
+    ) -> super::super::sqlite_cache::Stats {
+        let project = sqlite_project(&(1..=n).map(migration).collect::<Vec<_>>());
+        let inputs = &project.inputs;
+        current_thread().block_on(async {
+            let (identity, scratch) = prepared_scratch(&project).await;
             let mut replayed = Replayed::default();
-            replay_prefix(&scratch, &inputs, "", (n, n, true), &mut replayed)
+            replay_prefix(&scratch, inputs, "", (n, n, true), &mut replayed)
                 .await
                 .unwrap();
             assert_eq!(replayed.fingerprints.len(), n + 1);
@@ -607,12 +650,13 @@ mod tests {
             let work = db.stats().await.unwrap();
             scratch.rollback().await.unwrap();
             // status and verify replay the same states without fingerprinting them.
+            let scratch_endpoint = &inputs.config.scratch.as_ref().unwrap().endpoint;
             scratch
                 .prepare_scratch(&identity, scratch_endpoint, "main", &[])
                 .await
                 .unwrap();
             let mut replayed = Replayed::default();
-            replay_prefix(&scratch, &inputs, "", (n, n, false), &mut replayed)
+            replay_prefix(&scratch, inputs, "", (n, n, false), &mut replayed)
                 .await
                 .unwrap();
             assert!(replayed.fingerprints.is_empty() && replayed.candidate.is_none());
@@ -652,6 +696,290 @@ mod tests {
             assert_eq!(work.programs_compiled, 7 * n, "{work:?}");
             assert_eq!(work.allowlists, n, "{work:?}");
         }
+    }
+
+    /// A small deterministic pseudo-random generator (xorshift64*), so the
+    /// generated history is the same on every run.
+    struct Rng(u64);
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33) as usize % n
+        }
+        fn pick<'a>(&mut self, names: &[&'a str]) -> &'a str {
+            names[self.below(names.len())]
+        }
+        /// A name as a later statement may spell it: SQLite compares names
+        /// ASCII case-insensitively.
+        fn spell(&mut self, name: &str) -> String {
+            match self.below(3) {
+                0 => name.to_ascii_uppercase(),
+                _ => name.to_owned(),
+            }
+        }
+    }
+
+    /// `steps` migrations over a few names that collide across kinds:
+    /// tables, views, indexes and triggers created, changed, renamed and
+    /// dropped in any order, triggers that write other tables, foreign keys
+    /// with and without actions, and now and then a trigger that writes the
+    /// ledger. Each migration is one an in-memory SQLite database with
+    /// foreign keys on accepted after the ones before it (its foreign-key
+    /// check included), so most of them also run in replay; what they leave
+    /// behind (a view of a dropped table, a trigger writing a renamed one)
+    /// is often outside coverage.
+    fn generated_history(steps: usize) -> Vec<String> {
+        const TABLES: &[&str] = &["a", "b", "c", "Dd"];
+        const VIEWS: &[&str] = &["va", "vb", "a"];
+        const TRIGGERS: &[&str] = &["a", "b", "ta", "tb", "va"];
+        const INDEXES: &[&str] = &["ia", "ib", "b"];
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON;")
+            .unwrap();
+        let accepted = |db: &rusqlite::Connection, script: &str| -> bool {
+            let check = || -> rusqlite::Result<bool> {
+                db.execute_batch(script)?;
+                let mut statement = db.prepare("PRAGMA foreign_key_check")?;
+                let clean = statement.query([])?.next()?.is_none();
+                Ok(clean)
+            };
+            db.execute_batch("SAVEPOINT candidate").unwrap();
+            let ok = check().unwrap_or(false);
+            let end = if ok {
+                "RELEASE candidate"
+            } else {
+                "ROLLBACK TO candidate; RELEASE candidate"
+            };
+            db.execute_batch(end).unwrap();
+            ok
+        };
+        let mut history = Vec::new();
+        while history.len() < steps {
+            let mut script = String::new();
+            for _ in 0..=rng.below(2) {
+                let t = rng.pick(TABLES);
+                let other = rng.pick(TABLES);
+                let other = rng.spell(other);
+                let v = rng.pick(VIEWS);
+                let statement = match rng.below(19) {
+                    0..=4 => {
+                        let fk = match rng.below(4) {
+                            0 => format!(", r INTEGER REFERENCES {other}(id) ON DELETE CASCADE"),
+                            1 => format!(", r INTEGER REFERENCES {other}(id) ON DELETE SET NULL"),
+                            2 => format!(", r INTEGER REFERENCES {other}"),
+                            _ => String::new(),
+                        };
+                        format!("CREATE TABLE {t}(id INTEGER PRIMARY KEY, x INTEGER, y TEXT{fk})")
+                    }
+                    5 => format!("DROP TABLE {t}"),
+                    6 => format!("ALTER TABLE {t} ADD COLUMN z{} INTEGER", rng.below(3)),
+                    7 => format!("ALTER TABLE {t} RENAME TO {}", rng.pick(TABLES)),
+                    8 => match rng.below(3) {
+                        0 => format!("ALTER TABLE {t} RENAME COLUMN x TO w"),
+                        1 => format!("ALTER TABLE {t} RENAME COLUMN w TO x"),
+                        _ => format!("ALTER TABLE {t} DROP COLUMN y"),
+                    },
+                    9 | 10 => format!(
+                        "CREATE {}INDEX {} ON {t}(x){}",
+                        ["", "UNIQUE "][rng.below(2)],
+                        rng.pick(INDEXES),
+                        ["", " WHERE x > 0"][rng.below(2)]
+                    ),
+                    11 => format!("DROP INDEX {}", rng.pick(INDEXES)),
+                    12 | 13 => match rng.below(3) {
+                        0 => format!("CREATE VIEW {v} AS SELECT id, x FROM {other}"),
+                        1 => format!("CREATE VIEW {v} AS SELECT * FROM {}", rng.pick(VIEWS)),
+                        _ => format!(
+                            "CREATE VIEW {v} AS SELECT {t}.id FROM {t} JOIN {other} USING (id)"
+                        ),
+                    },
+                    14 => format!("DROP VIEW {v}"),
+                    15..=17 => {
+                        let body = match rng.below(12) {
+                            0 | 1 => format!("INSERT INTO {other}(x) VALUES (1)"),
+                            2 | 3 => format!("DELETE FROM {other} WHERE id = 0"),
+                            4 | 5 => format!("UPDATE {other} SET x = x WHERE id = 0"),
+                            6 => format!("SELECT x FROM {}", rng.pick(VIEWS)),
+                            7 => format!("INSERT INTO {other}(w) VALUES (1)"),
+                            8 => "DELETE FROM _ntnt_schema_migrations_v2".to_owned(),
+                            _ => "SELECT abs(1)".to_owned(),
+                        };
+                        let event = ["INSERT", "DELETE", "UPDATE OF x"][rng.below(3)];
+                        format!(
+                            "CREATE TRIGGER {} AFTER {event} ON {t} BEGIN {body}; END",
+                            rng.pick(TRIGGERS)
+                        )
+                    }
+                    _ => format!("DROP TRIGGER {}", rng.pick(TRIGGERS)),
+                };
+                script.push_str(&statement);
+                script.push_str(";\n");
+            }
+            if accepted(&db, &script) {
+                history.push(script);
+            }
+        }
+        history
+    }
+
+    /// Run `scripts` one at a time on a SQLite scratch, as replay does,
+    /// rolling the scratch back to empty once after `restart` of them, and
+    /// after each one require the session's inspection to report exactly
+    /// what an inspection that reuses nothing reports: the same catalog, the
+    /// same coverage and json_digest of that catalog as the fingerprint, or
+    /// the same error. The first inspection after a migration goes through
+    /// `catalog`, `fingerprint` and `coverage` in turn. A failed migration's
+    /// state is inspected too. Returns the migrations that failed and how
+    /// many states were outside coverage.
+    fn assert_incremental_inspection_is_exact(
+        scripts: &[(String, Option<&str>)],
+        restart: usize,
+    ) -> (Vec<String>, usize) {
+        let project = sqlite_project_with(scripts);
+        let inputs = &project.inputs;
+        current_thread().block_on(async {
+            let (identity, scratch) = prepared_scratch(&project).await;
+            let Adapter::Sqlite(db) = &scratch else {
+                unreachable!("a SQLite scratch")
+            };
+            let (mut failed, mut uncovered_states) = (Vec::new(), 0);
+            for (index, migration) in inputs.migrations.iter().enumerate() {
+                if index == restart {
+                    // A rolled-back replay leaves the session's cache behind.
+                    scratch.rollback().await.unwrap();
+                    let scratch_endpoint = &inputs.config.scratch.as_ref().unwrap().endpoint;
+                    scratch
+                        .prepare_scratch(&identity, scratch_endpoint, "main", &[])
+                        .await
+                        .unwrap();
+                }
+                let outcome = scratch
+                    .execute_captured(
+                        migration,
+                        "main",
+                        &[],
+                        super::super::inventory::Limits::default().statement(),
+                    )
+                    .await;
+                if let Err(d) = &outcome {
+                    failed.push(format!("{} {}: {}", migration.name, d.code, d.message));
+                }
+                let fresh = db.fresh_catalog().await;
+                let at = format!("after {} ({outcome:?})", migration.name);
+                let expect = |fresh: &Result<Catalog>| match fresh {
+                    Ok(catalog) => Ok((
+                        json!(catalog),
+                        catalog.uncovered.clone(),
+                        json_digest(catalog),
+                    )),
+                    Err(d) => Err((d.code.clone(), d.message.clone())),
+                };
+                let error = |d: Diagnostic| (d.code, d.message);
+                for call in 0..3 {
+                    let reported = match (index + call) % 3 {
+                        0 => scratch.catalog("main", &[], "").await.map(|catalog| {
+                            let digest = json_digest(&catalog);
+                            (json!(catalog), catalog.uncovered.clone(), digest)
+                        }),
+                        1 => scratch
+                            .fingerprint("main", &[], "", &mut CatalogDigests::default())
+                            .await
+                            .map(|(uncovered, fingerprint)| {
+                                let catalog = fresh.as_ref().map_or(Value::Null, |c| json!(c));
+                                (catalog, uncovered, fingerprint)
+                            }),
+                        _ => scratch.coverage("main", &[], "").await.map(|uncovered| {
+                            let catalog = fresh.as_ref().map_or(Value::Null, |c| json!(c));
+                            let digest = fresh.as_ref().map_or(String::new(), json_digest);
+                            (catalog, uncovered, digest)
+                        }),
+                    };
+                    assert_eq!(reported.map_err(error), expect(&fresh), "{at}, call {call}");
+                }
+                if fresh.is_ok_and(|catalog| !catalog.uncovered.is_empty()) {
+                    uncovered_states += 1;
+                }
+            }
+            scratch.rollback().await.unwrap();
+            (failed, uncovered_states)
+        })
+    }
+
+    /// #421: what a session reuses from its earlier inspections never
+    /// changes what an inspection reports. Hand-written histories aim at each
+    /// dependency a compiled program has (trigger bodies, views, foreign keys
+    /// in both directions, names shared across kinds, definitions changed
+    /// under the same name, metadata over its bounds, a table rebuild); a
+    /// generated history covers their combinations.
+    #[test]
+    fn incremental_inspection_reports_what_a_fresh_inspection_does() {
+        let ledger = "_ntnt_schema_migrations_v2";
+        let long = "x".repeat(300);
+        let written: Vec<(String, Option<&str>)> = [
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); CREATE TABLE audit(id INTEGER, at TEXT);".to_owned(),
+            "CREATE TRIGGER t_audit AFTER UPDATE OF v ON t BEGIN INSERT INTO audit(id, at) VALUES(new.id, 'x'); END;".to_owned(),
+            "DROP TABLE audit; CREATE TABLE audit(id INTEGER);".to_owned(),
+            "ALTER TABLE audit ADD COLUMN at TEXT;".to_owned(),
+            "CREATE TABLE u(y INTEGER); CREATE TABLE t2(x INTEGER); CREATE TRIGGER t2 AFTER INSERT ON u BEGIN SELECT 1; END; CREATE VIEW v2 AS SELECT x FROM t2;".to_owned(),
+            "DROP TABLE t2;".to_owned(),
+            "CREATE TABLE t2(x INTEGER);".to_owned(),
+            "CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE q(id INTEGER); CREATE TRIGGER p AFTER INSERT ON q BEGIN SELECT 1; END;".to_owned(),
+            "CREATE TABLE c(id INTEGER PRIMARY KEY, p_id INTEGER REFERENCES p(id) ON DELETE CASCADE);".to_owned(),
+            format!("CREATE TRIGGER c_gone AFTER DELETE ON c BEGIN DELETE FROM {ledger}; END;"),
+            "DROP TRIGGER c_gone;".to_owned(),
+            "CREATE TABLE m(id INTEGER PRIMARY KEY, k INTEGER REFERENCES n(k));".to_owned(),
+            "CREATE TABLE n(k INTEGER);".to_owned(),
+            "CREATE UNIQUE INDEX n_k ON n(k);".to_owned(),
+            "DROP INDEX n_k;".to_owned(),
+            "CREATE UNIQUE INDEX n_k ON n(k); CREATE VIEW w1 AS SELECT id FROM t; CREATE VIEW w2 AS SELECT id FROM w1;".to_owned(),
+            "DROP VIEW w1;".to_owned(),
+            "CREATE VIEW w1 AS SELECT id, v FROM T;".to_owned(),
+            "CREATE TABLE mid(id INTEGER); CREATE TABLE sink(id INTEGER); CREATE TRIGGER mid_sink AFTER INSERT ON mid BEGIN INSERT INTO sink VALUES(new.id); END; CREATE TRIGGER t_mid AFTER INSERT ON t BEGIN INSERT INTO mid VALUES(new.id); END;".to_owned(),
+            "DROP TABLE sink;".to_owned(),
+            "CREATE TABLE sink(id INTEGER);".to_owned(),
+            "ALTER TABLE sink RENAME TO sink3;".to_owned(),
+            format!("CREATE TABLE wide(\"{long}\" INTEGER);"),
+            "DROP TABLE wide;".to_owned(),
+            "CREATE TABLE kv(k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID; CREATE TABLE s(id INTEGER PRIMARY KEY, n INTEGER) STRICT; CREATE TRIGGER kv_touch AFTER UPDATE OF v ON kv BEGIN UPDATE s SET n = n + 1 WHERE id = 1; END;".to_owned(),
+            "CREATE TABLE g(a INTEGER, b INTEGER GENERATED ALWAYS AS (a + 1));".to_owned(),
+            "DROP TABLE g;".to_owned(),
+            "CREATE TABLE accounts(id INTEGER PRIMARY KEY, email TEXT); CREATE TABLE children(id INTEGER PRIMARY KEY, account_id INTEGER REFERENCES accounts(id) ON DELETE CASCADE); CREATE INDEX email_idx ON accounts(email); CREATE TRIGGER email_changed AFTER UPDATE OF email ON accounts BEGIN INSERT INTO audit(id) VALUES(new.id); END;".to_owned(),
+            "CREATE TABLE replacement(id INTEGER PRIMARY KEY, email TEXT NOT NULL); INSERT INTO replacement SELECT id, lower(email) FROM accounts; DROP TABLE accounts; ALTER TABLE replacement RENAME TO accounts; CREATE INDEX email_idx ON accounts(email); CREATE TRIGGER email_changed AFTER UPDATE OF email ON accounts BEGIN INSERT INTO audit(id) VALUES(new.id); END;".to_owned(),
+            "CREATE TABLE Foo(x INTEGER); CREATE TRIGGER foo_t AFTER INSERT ON foo BEGIN SELECT 1; END;".to_owned(),
+            "DROP TRIGGER foo_t;".to_owned(),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, sql)| (sql, (i == 28).then_some("accounts")))
+        .collect();
+        let (failed, uncovered) = assert_incremental_inspection_is_exact(&written, 29);
+        // Only the two that leave m's foreign key without a unique parent key
+        // fail, at the foreign-key check, and several states are outside
+        // coverage.
+        let mismatch = "DB_SQLITE: SQLite operation failed (code 1). Details suppressed.";
+        assert_eq!(
+            failed,
+            [
+                format!("0013_step.sql {mismatch}"),
+                format!("0015_step.sql {mismatch}")
+            ]
+        );
+        assert!(uncovered >= 8, "{uncovered}");
+        let generated: Vec<_> = generated_history(240)
+            .into_iter()
+            .map(|sql| (sql, None))
+            .collect();
+        let (failed, uncovered) = assert_incremental_inspection_is_exact(&generated, 120);
+        // Most of the generated history runs (replay refuses some drops that
+        // would run ON DELETE actions, and what follows them can fail), and
+        // both covered and uncovered states occur.
+        assert!(
+            failed.len() <= 60 && (24..=216).contains(&uncovered),
+            "{failed:?} {uncovered}"
+        );
     }
 
     #[test]

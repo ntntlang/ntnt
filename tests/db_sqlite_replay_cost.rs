@@ -108,6 +108,48 @@ fn dropping_a_table_a_view_reads_uncovers_the_view() {
     );
 }
 
+/// A dependency that keeps its name but changes its definition: t's trigger
+/// writes audit's `at` column, and a later migration rebuilds audit without it.
+#[test]
+fn rebuilding_the_table_a_trigger_writes_uncovers_the_triggering_table() {
+    plan_stops_at(
+        &[
+            ("0001_initial.sql", "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT); CREATE TABLE audit(id INTEGER, at TEXT); CREATE TRIGGER t_audit AFTER UPDATE OF v ON t BEGIN INSERT INTO audit(id, at) VALUES(new.id, 'x'); END;"),
+            ("0002_rebuild_audit.sql", "DROP TABLE audit; CREATE TABLE audit(id INTEGER);"),
+        ],
+        "0002_rebuild_audit.sql",
+        json!(["table:\"t\""]),
+    );
+}
+
+/// A name belongs to every object that has it. A trigger on u may share the
+/// name of table t, and the view that reads t still depends on t.
+#[test]
+fn a_view_depends_on_its_table_when_a_trigger_shares_the_table_name() {
+    plan_stops_at(
+        &[
+            ("0001_initial.sql", "CREATE TABLE t(x INTEGER); CREATE TABLE u(y INTEGER); CREATE TRIGGER t AFTER INSERT ON u BEGIN SELECT 1; END; CREATE VIEW v AS SELECT x FROM t;"),
+            ("0002_drop.sql", "DROP TABLE t;"),
+        ],
+        "0002_drop.sql",
+        json!(["view:\"v\""]),
+    );
+}
+
+/// The same for foreign keys: a trigger named like the parent table does not
+/// hide the parent from a new table that references it.
+#[test]
+fn a_new_referencing_table_uncovers_a_parent_whose_name_a_trigger_shares() {
+    plan_stops_at(
+        &[
+            ("0001_initial.sql", "CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE q(id INTEGER); CREATE TRIGGER p AFTER INSERT ON q BEGIN SELECT 1; END;"),
+            ("0002_child.sql", "CREATE TABLE c(id INTEGER PRIMARY KEY, p_id INTEGER REFERENCES p(id) ON DELETE CASCADE); CREATE TRIGGER c_gone AFTER DELETE ON c BEGIN DELETE FROM _ntnt_schema_migrations_v2; END;"),
+        ],
+        "0002_child.sql",
+        json!(["table:\"c\"", "table:\"p\""]),
+    );
+}
+
 /// The per-migration guarantee itself: an object outside coverage that a
 /// later migration removes is still found, attributed to the migration that
 /// made it.

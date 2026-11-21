@@ -836,9 +836,10 @@ impl State {
                     compiled = false;
                 }
             }
-            if let (true, Some(enforced)) = (compiled, enforced) {
-                self.cache.mark_compiled(&group, enforced, signature);
-            }
+            let compiled = enforced
+                .filter(|_| compiled)
+                .map(|enforced| (enforced, signature));
+            self.cache.mark_compiled(&group, compiled);
         }
         drop(active);
         self.cache.finish(Some(failures));
@@ -1282,6 +1283,18 @@ impl Sqlite {
     #[cfg(test)]
     pub async fn stats(&self) -> Result<Stats> {
         self.run(|s| Ok(s.cache.stats)).await
+    }
+    /// The catalog as an inspection that reuses nothing reports it. The
+    /// session keeps what it had for later inspections.
+    #[cfg(test)]
+    pub async fn fresh_catalog(&self) -> Result<Catalog> {
+        self.run(|s| {
+            let cache = std::mem::take(&mut s.cache);
+            let fresh = s.catalog();
+            s.cache = cache;
+            fresh
+        })
+        .await
     }
     pub async fn history(&self, database: Option<&str>) -> Result<History> {
         let database = database.map(str::to_owned);

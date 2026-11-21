@@ -341,9 +341,12 @@ impl Cache {
         }
         pending
     }
-    pub fn mark_compiled(&mut self, group: &str, enforced: bool, signature: [u8; 32]) {
+    /// Record how a group's programs last compiled: the foreign-key
+    /// enforcement and signature if every one compiled, else `None`, so that
+    /// a failure is compiled again at the next inspection.
+    pub fn mark_compiled(&mut self, group: &str, compiled: Option<(bool, [u8; 32])>) {
         if let Some(group) = self.groups.get_mut(group) {
-            group.compiled = Some((enforced, signature));
+            group.compiled = compiled;
         }
     }
     /// Record what this inspection found outside coverage: the objects
@@ -378,20 +381,24 @@ impl Cache {
     /// The dependency signature of each group, given each object's name and
     /// group key. Call once every group has its output.
     pub fn signatures(&self, objects: &[(String, String)]) -> HashMap<String, [u8; 32]> {
-        // A name resolves to the group of its object.
-        let mut resolve: HashMap<&str, &str> = HashMap::new();
+        // A name resolves to every group with an object of that name, and to
+        // the group it is the key of. Names are not unique across kinds: a
+        // trigger on one table may share its name with another table.
+        let mut resolve: HashMap<&str, Vec<&str>> = HashMap::new();
         for (name, group) in objects {
             if let Some((key, _)) = self.groups.get_key_value(group) {
-                resolve.insert(name.as_str(), key.as_str());
+                resolve.entry(name.as_str()).or_default().push(key.as_str());
             }
         }
         for key in self.groups.keys() {
-            resolve.entry(key.as_str()).or_insert(key.as_str());
+            resolve.entry(key.as_str()).or_default().push(key.as_str());
         }
         let resolved = |names: &HashSet<String>| -> Vec<&str> {
             let mut groups: Vec<&str> = names
                 .iter()
-                .filter_map(|name| resolve.get(name.as_str()).copied())
+                .filter_map(|name| resolve.get(name.as_str()))
+                .flatten()
+                .copied()
                 .collect();
             groups.sort_unstable();
             groups.dedup();
@@ -412,9 +419,14 @@ impl Cache {
         // Tables whose foreign keys reference each table.
         for (key, group) in &self.groups {
             for parent in group.output.iter().flat_map(|output| &output.parents) {
-                let parent = resolve.get(group_key(parent).as_str()).copied();
-                if let Some(edges) = parent.and_then(|p| graph.get_mut(p)) {
-                    edges.referencing.push(key.as_str());
+                for parent in resolve
+                    .get(group_key(parent).as_str())
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(edges) = graph.get_mut(parent) {
+                        edges.referencing.push(key.as_str());
+                    }
                 }
             }
         }
