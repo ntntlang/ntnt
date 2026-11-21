@@ -662,11 +662,14 @@ names the migration and `objects` names what it would change:
 
 - **Before the script runs**, in replay and on the target: a top-level statement that
   creates, alters, drops, truncates, grants or revokes on an object or schema named
-  there (`DROP TABLE IF EXISTS _ntnt.schema_migrations_v2`, `GRANT USAGE ON SCHEMA
-  pg_catalog`), a `SET search_path`, `SET SCHEMA` or `set_config('search_path', ...)`
-  that puts `_ntnt` on the search path, and a `_ntnt.<name>` in a statement NTNT does
-  not parse. The message gives the statement numbers; `objects` lists the names as
-  written. Such a statement can be a no-op in scratch, which has no `_ntnt` and whose
+  there, or moves an object there with `ALTER ... SET SCHEMA` (`DROP TABLE IF EXISTS
+  _ntnt.schema_migrations_v2`, `GRANT USAGE ON SCHEMA pg_catalog`), a `SET
+  search_path`, `SET SCHEMA` or `set_config('search_path', ...)` that puts `_ntnt` on
+  the search path, and a `_ntnt.<name>` or `SCHEMA _ntnt` in a statement NTNT does not
+  parse or does not read names from (`COMMENT ON TABLE _ntnt.schema_migrations_v2`),
+  other than one that reads or writes rows, runs code or changes settings (`INSERT`,
+  `DO`, `SET` and the like). The message gives the statement numbers; `objects` lists
+  the names as written. Such a statement can be a no-op in scratch, which has no `_ntnt` and whose
   unprivileged role cannot change system schemas, yet act on the target.
 - **After each replayed migration**: scratch must not have gained a schema `_ntnt`
   (`objects`: `schema:_ntnt`), as a `DO` block can create one.

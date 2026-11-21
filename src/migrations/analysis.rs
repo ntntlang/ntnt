@@ -1554,8 +1554,9 @@ fn schema_names(sql: &str) -> Vec<(usize, String, String, Via)> {
 /// ledger, or on a PostgreSQL system schema (`protected_schema`), as
 /// (statement number, name as written): a statement that names its target
 /// there (`DROP TABLE IF EXISTS _ntnt.schema_migrations_v2`, `GRANT ... ON
-/// SCHEMA pg_catalog`), one that puts `_ntnt` on the search path, and a
-/// `_ntnt.<name>` in a statement NTNT does not parse. Such a statement can be
+/// SCHEMA pg_catalog`) or moves an object there, one that puts `_ntnt` on the
+/// search path, and a `_ntnt.<name>` or `SCHEMA _ntnt` in a statement NTNT
+/// does not parse or read names from (`schema_names`). Such a statement can be
 /// a no-op in scratch, which has no `_ntnt` and whose role cannot change
 /// system schemas, yet act on the target, so it is refused by name before
 /// it runs. `pg_catalog` on the search path or in SQL NTNT does not parse is
@@ -2243,6 +2244,11 @@ mod tests {
             (
                 "SELECT * INTO _ntnt.copy FROM app.t",
                 vec![(1, "_ntnt.copy")],
+            ),
+            // Parsed, but its names are read from tokens.
+            (
+                "COMMENT ON TABLE _ntnt.schema_migrations_v2 IS 'x'",
+                vec![(1, "_ntnt.schema_migrations_v2")],
             ),
         ] {
             let expected: Vec<(usize, String)> = expected
