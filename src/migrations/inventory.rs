@@ -43,6 +43,90 @@ pub(crate) fn json_digest(value: &impl Serialize) -> String {
     digest(&[&serde_json::to_vec(&value).expect("serializable migration model")])
 }
 
+/// `json_digest` of successive catalogs that reuses each object's serialized
+/// form while the object is unchanged. Replay fingerprints the whole catalog
+/// after every migration; serializing every object again each time made that
+/// quadratic in serialization work. Hashing still reads every byte.
+#[derive(Default)]
+pub(crate) struct CatalogDigests {
+    objects: std::collections::HashMap<String, (serde_json::Value, Vec<u8>)>,
+}
+impl CatalogDigests {
+    /// Exactly `json_digest(catalog)`.
+    pub fn digest(&mut self, catalog: &super::model::Catalog) -> String {
+        // `json_digest` sorts object keys; `serde_json` maps already iterate in
+        // key order, as does the catalog's own map, so each object serializes
+        // to the same bytes on its own.
+        let mut previous = std::mem::take(&mut self.objects);
+        for (key, value) in &catalog.objects {
+            let entry = match previous.remove(key) {
+                Some(entry) if entry.0 == *value => entry,
+                _ => {
+                    let mut bytes = serde_json::to_vec(key).expect("catalog keys serialize");
+                    bytes.push(b':');
+                    serde_json::to_writer(&mut bytes, value).expect("catalog values serialize");
+                    (value.clone(), bytes)
+                }
+            };
+            self.objects.insert(key.clone(), entry);
+        }
+        catalog_digest(
+            catalog
+                .objects
+                .keys()
+                .map(|key| self.objects[key].1.as_slice()),
+            &catalog.uncovered,
+        )
+    }
+}
+
+/// `json_digest` of a catalog given each object's serialized `"key":value`
+/// form, in key order, and its uncovered keys.
+pub(crate) fn catalog_digest<'a>(
+    objects: impl Iterator<Item = &'a [u8]> + Clone,
+    uncovered: &[String],
+) -> String {
+    const OBJECTS: &[u8] = b"{\"objects\":{";
+    const UNCOVERED: &[u8] = b"},\"uncovered\":[";
+    const END: &[u8] = b"]}";
+    let uncovered: Vec<Vec<u8>> = uncovered
+        .iter()
+        .map(|key| serde_json::to_vec(key).expect("catalog keys serialize"))
+        .collect();
+    let separated = |lengths: &mut dyn Iterator<Item = usize>| {
+        lengths.fold((0usize, 0usize), |(total, n), length| {
+            (total + length, n + 1)
+        })
+    };
+    let (objects_length, objects_count) = separated(&mut objects.clone().map(<[u8]>::len));
+    let (uncovered_length, uncovered_count) = separated(&mut uncovered.iter().map(Vec::len));
+    let length = OBJECTS.len()
+        + objects_length
+        + objects_count.saturating_sub(1)
+        + UNCOVERED.len()
+        + uncovered_length
+        + uncovered_count.saturating_sub(1)
+        + END.len();
+    let mut hash = Sha256::new();
+    hash.update((length as u64).to_be_bytes());
+    hash.update(OBJECTS);
+    for (i, object) in objects.enumerate() {
+        if i > 0 {
+            hash.update(b",");
+        }
+        hash.update(object);
+    }
+    hash.update(UNCOVERED);
+    for (i, key) in uncovered.iter().enumerate() {
+        if i > 0 {
+            hash.update(b",");
+        }
+        hash.update(key);
+    }
+    hash.update(END);
+    hex::encode(hash.finalize())
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Endpoint {
@@ -913,6 +997,61 @@ role="target_role"
             "{}",
             d.message
         );
+    }
+    #[test]
+    fn catalog_digests_equal_json_digest_as_objects_change() {
+        use super::super::model::Catalog;
+        use serde_json::json;
+        let mut digests = CatalogDigests::default();
+        let mut catalog = Catalog::default();
+        // An empty catalog, then objects and uncovered keys added, changed and
+        // removed, with keys and values that need escaping or are not ASCII.
+        assert_eq!(digests.digest(&catalog), json_digest(&catalog));
+        let steps: Vec<Box<dyn Fn(&mut Catalog)>> = vec![
+            Box::new(|c| {
+                c.objects
+                    .insert("schema:main".into(), json!({"engine":"sqlite"}));
+            }),
+            Box::new(|c| {
+                c.objects.insert(
+                    "table:\"t \\\"q\\\"\"".into(),
+                    json!({"z":1,"a":[1.5,null,true,{"y":"\u{1}\n","b":"é"}],"m":{"k":-3}}),
+                );
+                c.objects.insert(
+                    "column:\"t\".\"x\"".into(),
+                    json!([0, "x", "TEXT", 0, null, 0, 0]),
+                );
+            }),
+            Box::new(|c| c.uncovered.push("table:\"t\"".into())),
+            Box::new(|c| {
+                c.objects.insert(
+                    "column:\"t\".\"x\"".into(),
+                    json!([0, "x", "TEXT", 1, null, 0, 0]),
+                );
+                c.uncovered.push("view:\"v\"".into());
+            }),
+            Box::new(|c| {
+                c.objects.remove("schema:main");
+                c.uncovered.clear();
+            }),
+            Box::new(|c| {
+                c.objects.insert(
+                    "index:\"ü\"".into(),
+                    json!({"table":"t","columns":[[0,1,"x",0,"BINARY",1]]}),
+                );
+            }),
+            Box::new(|c| c.objects.clear()),
+        ];
+        for step in steps {
+            step(&mut catalog);
+            assert_eq!(
+                digests.digest(&catalog),
+                json_digest(&catalog),
+                "{catalog:?}"
+            );
+            // Digesting the same catalog again reuses every object.
+            assert_eq!(digests.digest(&catalog), json_digest(&catalog));
+        }
     }
     #[test]
     fn json_identity_uses_sorted_object_keys_not_rust_field_order() {

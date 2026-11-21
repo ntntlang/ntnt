@@ -13,6 +13,7 @@ pub(crate) mod postgres_tls;
 mod report;
 mod scaffold;
 mod sqlite;
+mod sqlite_cache;
 mod sqlite_file;
 use serde::Serialize;
 use std::path::PathBuf;

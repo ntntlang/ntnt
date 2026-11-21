@@ -3,6 +3,7 @@
 use super::adapter::Access;
 use super::inventory::{json_digest, Migration};
 use super::model::{Catalog, History, HistoryEntry};
+use super::sqlite_cache::{group_key, Cache, Output, Stats};
 use super::sqlite_file::FileBinding;
 use super::{Diagnostic, Result};
 use rusqlite::{
@@ -14,6 +15,7 @@ use rusqlite::{
 };
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -549,12 +551,109 @@ fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// One table's columns and foreign keys, as the catalog reports them.
+fn table_metadata(
+    conn: &Connection,
+    stats: &mut Stats,
+    name: &str,
+) -> Result<super::sqlite_cache::Table> {
+    stats.metadata_queries += 1;
+    let columns = rows(
+        conn,
+        "SELECT cid,name,type,\"notnull\",dflt_value,pk,hidden FROM pragma_table_xinfo(?1,'main')",
+        &[&name],
+    )?;
+    let column_names = columns
+        .iter()
+        .map(|column| column[1].as_str().unwrap().to_owned())
+        .collect();
+    let mut entries = Vec::with_capacity(columns.len());
+    let mut visible = true;
+    for mut column in columns {
+        let column_name = column[1].as_str().unwrap().to_owned();
+        if column_name.len() > 255 || column[2].as_str().is_none_or(|t| t.len() > 255) {
+            return Err(Diagnostic::new(
+                "DB_CATALOG_LIMIT",
+                "SQLite column metadata exceeds inspection bounds.",
+            ));
+        }
+        visible &= column[6] == 0;
+        if !column[4].is_null() {
+            column[4] = json!({"sha256":json_digest(&column[4]),"redacted":true});
+        }
+        entries.push((
+            format!("column:{}.{}", quote(name), quote(&column_name)),
+            json!(column),
+        ));
+    }
+    stats.metadata_queries += 1;
+    let foreign_keys = json!(rows(
+        conn,
+        r#"SELECT id,seq,"table","from","to",on_update,on_delete,"match" FROM pragma_foreign_key_list(?1,'main') ORDER BY id,seq"#,
+        &[&name]
+    )?);
+    let foreign_keys_supported = foreign_keys
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|fk| fk[2].as_str().is_some_and(|n| !reserved(n) && !internal(n)));
+    Ok(super::sqlite_cache::Table {
+        columns: entries,
+        column_names,
+        visible,
+        foreign_keys,
+        foreign_keys_supported,
+    })
+}
+
+/// One index's key columns and properties, as the catalog reports them.
+fn index_metadata(
+    conn: &Connection,
+    stats: &mut Stats,
+    table: &str,
+    name: &str,
+) -> Result<super::sqlite_cache::Index> {
+    // A key column is a table column (cid >= 0), the rowid (-1) or an
+    // expression (-2). Expressions and a partial index's WHERE predicate are
+    // in the definition hash. SQLite resolves them when it loads the schema,
+    // without the authorizer, so the function allowlist applies when a
+    // migration's CREATE INDEX compiles; a target index that differs from the
+    // replayed one is drift. The table's DML programs still compile them.
+    stats.metadata_queries += 1;
+    let columns = rows(
+        conn,
+        "SELECT seqno,cid,name,\"desc\",coll,key FROM pragma_index_xinfo(?1,'main') ORDER BY seqno",
+        &[&name],
+    )?;
+    let columns_supported = columns.iter().all(|r| {
+        r[1].as_i64().is_some_and(|v| v >= -2)
+            && r[4]
+                .as_str()
+                .is_none_or(|v| matches!(v, "BINARY" | "NOCASE" | "RTRIM"))
+    });
+    stats.metadata_queries += 1;
+    let properties = json!(rows(
+        conn,
+        "SELECT \"unique\",origin,partial FROM pragma_index_list(?1,'main') WHERE name=?2",
+        &[&table, &name]
+    )?);
+    let properties_supported = properties.as_array().is_some_and(|p| p.len() == 1);
+    Ok(super::sqlite_cache::Index {
+        columns: json!(columns),
+        columns_supported,
+        properties,
+        properties_supported,
+    })
+}
+
 struct State {
     // Drop SQLite before the Windows pathname guard.
     conn: Connection,
     file: FileBinding,
     writable: bool,
     auth: Authorizer,
+    /// What earlier catalog inspections on this session can lend later ones.
+    cache: Cache,
 }
 impl State {
     fn identity(&self) -> Result<Identity> {
@@ -582,23 +681,91 @@ impl State {
             authority,
         })
     }
-    fn catalog(&self) -> Result<Catalog> {
+    /// The catalog. See `inspect`.
+    fn catalog(&mut self) -> Result<Catalog> {
+        self.inspect()?;
+        Ok(self.cache.catalog())
+    }
+    /// What the catalog has outside coverage, and its fingerprint, without
+    /// building it: exactly `catalog().uncovered` and `json_digest(&catalog())`.
+    fn fingerprint(&mut self) -> Result<(Vec<String>, String)> {
+        self.inspect()?;
+        Ok((self.cache.uncovered().to_vec(), self.cache.fingerprint()))
+    }
+    /// Bring this session's view of the catalog up to date. Every object is
+    /// checked against `sqlite_schema` and `pragma_table_list`; only groups
+    /// of objects whose definitions or facts changed are read and compiled
+    /// again (see `sqlite_cache`).
+    fn inspect(&mut self) -> Result<()> {
         self.file.check_connection(&self.conn)?;
         self.history(None)?;
-        let mut catalog = Catalog::default();
-        let mut programs = Vec::new();
-        catalog.objects.insert(
-            "schema:main".into(),
-            json!({"engine":"sqlite","scope":"entire_main_file"}),
-        );
+        self.cache.stats.catalogs += 1;
         let table_info = rows(
             &self.conn,
             "SELECT name,type,wr,strict FROM pragma_table_list WHERE schema='main'",
             &[],
         )?;
+        // The first row of each name, as a search of the list finds it.
+        let mut details: HashMap<&str, &Vec<Value>> = HashMap::new();
+        for row in &table_info {
+            if let Some(name) = row[0].as_str() {
+                details.entry(name).or_insert(row);
+            }
+        }
+        let tables: HashSet<&str> = table_info
+            .iter()
+            .filter(|r| r[1] == "table")
+            .filter_map(|r| r[0].as_str())
+            .collect();
         let objects=rows(&self.conn,"SELECT type,name,tbl_name,CASE WHEN length(sql)<=1048576 THEN sql ELSE NULL END,coalesce(length(sql),0)<=1048576 AND length(name)<=255 AND length(tbl_name)<=255 FROM main.sqlite_schema ORDER BY type,name LIMIT 10001",&[])?;
-        for object in objects {
-            let kind = object[0]
+        let positions = self.cache.refresh(&objects);
+        // What an object uses from pragma_table_list: a table's row, or
+        // whether a trigger's table is an ordinary table.
+        let fact = |object: &[Value]| -> Value {
+            match object[0].as_str() {
+                Some("table") => object[1]
+                    .as_str()
+                    .and_then(|name| details.get(name))
+                    .map_or(Value::Null, |row| json!(row)),
+                Some("trigger") => json!(object[2].as_str().is_some_and(|t| tables.contains(t))),
+                _ => Value::Null,
+            }
+        };
+        let unchanged = |stored: &Value, object: &[Value]| -> bool {
+            match object[0].as_str() {
+                Some("table") => match object[1].as_str().and_then(|name| details.get(name)) {
+                    Some(row) => stored.as_array() == Some(*row),
+                    None => stored.is_null(),
+                },
+                Some("trigger") => {
+                    stored.as_bool() == Some(object[2].as_str().is_some_and(|t| tables.contains(t)))
+                }
+                _ => stored.is_null(),
+            }
+        };
+        let stale: HashSet<&str> = objects
+            .iter()
+            .zip(&positions)
+            .filter(|(object, (group, position))| {
+                self.cache
+                    .output(group)
+                    .is_some_and(|output| !unchanged(&output.facts[*position], object))
+            })
+            .map(|(_, (group, _))| group.as_str())
+            .collect();
+        self.cache.forget(&stale);
+        // The facts of each group to build, in row order.
+        let mut facts: HashMap<&str, Vec<Value>> = HashMap::new();
+        for (object, (group, _)) in objects.iter().zip(&positions) {
+            if self.cache.output(group).is_none() {
+                facts.entry(group.as_str()).or_default().push(fact(object));
+            }
+        }
+        let mut built: HashMap<&str, Output> = HashMap::new();
+        // `schema:main`, then each object with the columns it adds.
+        let mut count = 1usize;
+        for (object, (group, position)) in objects.iter().zip(&positions) {
+            object[0]
                 .as_str()
                 .ok_or_else(|| Diagnostic::new("DB_SQLITE", "Invalid catalog kind."))?;
             let name = object[1].as_str().unwrap();
@@ -612,138 +779,165 @@ impl State {
                     "SQLite definition or object name exceeds inspection bounds.",
                 ));
             }
-            let key = format!("{kind}:{}", quote(name));
-            let mut item = json!({"table":table,"definition":{"sha256":json_digest(&object[3]),"redacted":true}});
-            let mut supported = !internal(name) || name.starts_with("sqlite_autoindex_");
-            match kind {
-                "table" => {
-                    let detail = table_info.iter().find(|r| r[0] == name).ok_or_else(|| {
-                        Diagnostic::new("DB_CATALOG_AMBIGUOUS", "Missing SQLite table metadata.")
-                    })?;
-                    supported &= detail[1] == "table";
-                    item["without_rowid"] = detail[2].clone();
-                    item["strict"] = detail[3].clone();
-                    let columns=rows(&self.conn,"SELECT cid,name,type,\"notnull\",dflt_value,pk,hidden FROM pragma_table_xinfo(?1,'main')",&[&name])?;
-                    let assignment = columns
-                        .iter()
-                        .map(|column| {
-                            let name = column[1].as_str().unwrap();
-                            format!("{}={}", quote(name), quote(name))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    for query in [
-                        format!("EXPLAIN INSERT INTO main.{} DEFAULT VALUES", quote(name)),
-                        format!("EXPLAIN UPDATE main.{} SET {assignment}", quote(name)),
-                        format!("EXPLAIN DELETE FROM main.{}", quote(name)),
-                    ] {
-                        programs.push((key.clone(), query));
-                    }
-                    if detail[2] == 0 {
-                        // UPDATE OF can name SQLite's hidden row identifiers,
-                        // absent from table_xinfo. Each spelling has its own
-                        // trigger event match, even when aliases share storage.
-                        // WITHOUT ROWID tables have only the declared columns.
-                        for alias in ["rowid", "_rowid_", "oid"] {
-                            programs.push((
-                                key.clone(),
-                                format!(
-                                    "EXPLAIN UPDATE main.{} SET {}={}",
-                                    quote(name),
-                                    quote(alias),
-                                    quote(alias)
-                                ),
-                            ));
-                        }
-                    }
-                    for mut column in columns {
-                        let column_name = column[1].as_str().unwrap().to_owned();
-                        if column_name.len() > 255
-                            || column[2].as_str().is_none_or(|t| t.len() > 255)
-                        {
-                            return Err(Diagnostic::new(
-                                "DB_CATALOG_LIMIT",
-                                "SQLite column metadata exceeds inspection bounds.",
-                            ));
-                        }
-                        supported &= column[6] == 0;
-                        if !column[4].is_null() {
-                            column[4] = json!({"sha256":json_digest(&column[4]),"redacted":true});
-                        }
-                        catalog.objects.insert(
-                            format!("column:{}.{}", quote(name), quote(&column_name)),
-                            json!(column),
-                        );
-                    }
-                    item["foreign_keys"] = json!(rows(
-                        &self.conn,
-                        r#"SELECT id,seq,"table","from","to",on_update,on_delete,"match" FROM pragma_foreign_key_list(?1,'main') ORDER BY id,seq"#,
-                        &[&name]
-                    )?);
-                    supported &= item["foreign_keys"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .all(|fk| fk[2].as_str().is_some_and(|n| !reserved(n) && !internal(n)));
+            let contributed = match self.cache.output(group) {
+                Some(output) => output.contributions[*position],
+                None => {
+                    let output = built
+                        .entry(group.as_str())
+                        .or_insert_with(|| Output::new(facts.remove(group.as_str()).unwrap()));
+                    let contributed = self.object(output, object, &details, &tables)?;
+                    output.contributions[*position] = contributed;
+                    contributed
                 }
-                "index" => {
-                    // A key column is a table column (cid >= 0), the rowid
-                    // (-1) or an expression (-2). Expressions and a partial
-                    // index's WHERE predicate are in the definition hash.
-                    // SQLite resolves them when it loads the schema, without
-                    // the authorizer, so the function allowlist applies when
-                    // a migration's CREATE INDEX compiles; a target index
-                    // that differs from the replayed one is drift. The
-                    // table's DML programs below still compile them.
-                    let columns=rows(&self.conn,"SELECT seqno,cid,name,\"desc\",coll,key FROM pragma_index_xinfo(?1,'main') ORDER BY seqno",&[&name])?;
-                    supported &= columns.iter().all(|r| {
-                        r[1].as_i64().is_some_and(|v| v >= -2)
-                            && r[4]
-                                .as_str()
-                                .is_none_or(|v| matches!(v, "BINARY" | "NOCASE" | "RTRIM"))
-                    });
-                    item["columns"] = json!(columns);
-                    item["properties"]=json!(rows(&self.conn,"SELECT \"unique\",origin,partial FROM pragma_index_list(?1,'main') WHERE name=?2",&[&table,&name])?);
-                    supported &= item["properties"].as_array().is_some_and(|p| p.len() == 1);
-                }
-                "view" => programs.push((
-                    key.clone(),
-                    format!("EXPLAIN SELECT * FROM main.{}", quote(name)),
-                )),
-                "trigger" => {
-                    supported &= table_info.iter().any(|r| r[0] == table && r[1] == "table")
-                }
-                _ => supported = false,
-            }
-            if !supported {
-                catalog.uncovered.push(key.clone());
-            }
-            catalog.objects.insert(key, item);
-            if catalog.objects.len() > 10000 {
+            };
+            count += contributed;
+            if count > 10000 {
                 return Err(Diagnostic::new(
                     "DB_CATALOG_LIMIT",
                     "SQLite catalog exceeds 10,000 objects.",
                 ));
             }
         }
-        if catalog.uncovered.is_empty() {
-            // Compile only: never step an application query during inspection.
-            // Native authorization covers trigger/view/default programs as well
-            // as their resolved base relations; SQL definitions remain opaque.
+        for (group, output) in built {
+            self.cache.install(group, output);
+        }
+        if !self.cache.within_metadata_coverage() {
+            self.cache.finish(None);
+            return Ok(());
+        }
+        // Compile only: never step an application query during inspection.
+        // Native authorization covers trigger/view/default programs as well
+        // as their resolved base relations; SQL definitions remain opaque.
+        let names: Vec<(String, String)> = objects
+            .iter()
+            .filter_map(|o| Some((group_key(o[1].as_str()?), group_key(o[2].as_str()?))))
+            .collect();
+        let signatures = self.cache.signatures(&names);
+        // Foreign-key enforcement changes what DML programs compile to;
+        // rebuild migrations inspect with it off. If it cannot be read,
+        // nothing is reused.
+        let enforced = self
+            .conn
+            .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY)
+            .ok();
+        let mut failures = Vec::new();
+        // One allowlist serves every program: inspection changes no schema.
+        let mut active = None;
+        for (group, signature, programs) in self.cache.pending(&signatures, enforced) {
+            let mut compiled = true;
             for (key, sql) in programs {
-                if authored(self, Policy::Definition, |conn| {
-                    conn.prepare(&sql).map_err(sql_error)?;
-                    Ok(())
-                })
-                .is_err()
-                {
-                    catalog.uncovered.push(key);
+                let active = active.get_or_insert_with(|| {
+                    self.cache.stats.allowlists += 1;
+                    self.auth.activate(&self.conn, Policy::Definition)
+                });
+                self.cache.stats.programs_compiled += 1;
+                if !(active.is_ok() && self.conn.prepare(&sql).is_ok()) {
+                    failures.push(key);
+                    compiled = false;
                 }
             }
-            catalog.uncovered.sort();
-            catalog.uncovered.dedup();
+            if let (true, Some(enforced)) = (compiled, enforced) {
+                self.cache.mark_compiled(&group, enforced, signature);
+            }
         }
-        Ok(catalog)
+        drop(active);
+        self.cache.finish(Some(failures));
+        Ok(())
+    }
+    /// Add one object (and a table's columns) to `output`; returns how many
+    /// catalog objects it adds.
+    fn object(
+        &mut self,
+        output: &mut Output,
+        object: &[Value],
+        details: &HashMap<&str, &Vec<Value>>,
+        tables: &HashSet<&str>,
+    ) -> Result<usize> {
+        let (kind, name, table, sql) = (
+            object[0].as_str().unwrap(),
+            object[1].as_str().unwrap(),
+            object[2].as_str().unwrap(),
+            &object[3],
+        );
+        let key = format!("{kind}:{}", quote(name));
+        let mut item =
+            json!({"table":table,"definition":{"sha256":json_digest(sql),"redacted":true}});
+        let mut supported = !internal(name) || name.starts_with("sqlite_autoindex_");
+        let mut contributed = 1;
+        match kind {
+            "table" => {
+                let detail = details.get(name).ok_or_else(|| {
+                    Diagnostic::new("DB_CATALOG_AMBIGUOUS", "Missing SQLite table metadata.")
+                })?;
+                supported &= detail[1] == "table";
+                item["without_rowid"] = detail[2].clone();
+                item["strict"] = detail[3].clone();
+                let metadata = table_metadata(&self.conn, &mut self.cache.stats, name)?;
+                let assignment = metadata
+                    .column_names
+                    .iter()
+                    .map(|name| format!("{}={}", quote(name), quote(name)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                for query in [
+                    format!("EXPLAIN INSERT INTO main.{} DEFAULT VALUES", quote(name)),
+                    format!("EXPLAIN UPDATE main.{} SET {assignment}", quote(name)),
+                    format!("EXPLAIN DELETE FROM main.{}", quote(name)),
+                ] {
+                    output.programs.push((key.clone(), query));
+                }
+                if detail[2] == 0 {
+                    // UPDATE OF can name SQLite's hidden row identifiers,
+                    // absent from table_xinfo. Each spelling has its own
+                    // trigger event match, even when aliases share storage.
+                    // WITHOUT ROWID tables have only the declared columns.
+                    for alias in ["rowid", "_rowid_", "oid"] {
+                        output.programs.push((
+                            key.clone(),
+                            format!(
+                                "EXPLAIN UPDATE main.{} SET {}={}",
+                                quote(name),
+                                quote(alias),
+                                quote(alias)
+                            ),
+                        ));
+                    }
+                }
+                contributed += metadata.columns.len();
+                output.entries.extend(metadata.columns);
+                output.parents.extend(
+                    metadata
+                        .foreign_keys
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|fk| fk[2].as_str().map(str::to_owned)),
+                );
+                supported &= metadata.visible;
+                item["foreign_keys"] = metadata.foreign_keys;
+                supported &= metadata.foreign_keys_supported;
+            }
+            "index" => {
+                let metadata = index_metadata(&self.conn, &mut self.cache.stats, table, name)?;
+                supported &= metadata.columns_supported;
+                item["columns"] = metadata.columns;
+                item["properties"] = metadata.properties;
+                supported &= metadata.properties_supported;
+            }
+            "view" => output.programs.push((
+                key.clone(),
+                format!("EXPLAIN SELECT * FROM main.{}", quote(name)),
+            )),
+            "trigger" => supported &= tables.contains(table),
+            _ => supported = false,
+        }
+        if !supported {
+            output
+                .outside
+                .push(((kind.to_owned(), name.to_owned()), key.clone()));
+        }
+        output.entries.push((key, item));
+        Ok(contributed)
     }
     fn history(&self, database: Option<&str>) -> Result<History> {
         let bad = || {
@@ -883,7 +1077,7 @@ impl RebuildGuard {
         }
         Ok(counts)
     }
-    fn capture(state: &State, table: &str) -> Result<Self> {
+    fn capture(state: &mut State, table: &str) -> Result<Self> {
         let catalog = state.catalog()?;
         if !catalog.uncovered.is_empty() {
             return Err(Diagnostic::new(
@@ -915,7 +1109,7 @@ impl RebuildGuard {
             .collect();
         Ok(Self { required, counts })
     }
-    fn verify(self, state: &State) -> Result<()> {
+    fn verify(self, state: &mut State) -> Result<()> {
         let catalog = state.catalog()?;
         if !catalog.uncovered.is_empty()
             || self
@@ -969,7 +1163,7 @@ impl Sqlite {
             conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML,false).map_err(sql_error)?;
             conn.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON; PRAGMA ignore_check_constraints=OFF; PRAGMA legacy_alter_table=OFF; PRAGMA synchronous=FULL;").map_err(sql_error)?;
             let auth=Authorizer::install(&mut conn)?;
-            Ok::<_,Diagnostic>(State{conn,file,writable,auth})
+            Ok::<_,Diagnostic>(State{conn,file,writable,auth,cache:Cache::default()})
         })).await.map_err(|_|Diagnostic::new("DB_TIMEOUT","SQLite connection deadline exceeded."))?
             .map_err(|_|Diagnostic::new("DB_RUNTIME","SQLite connection worker failed."))??;
         let interrupt = state.conn.get_interrupt_handle();
@@ -1071,6 +1265,23 @@ impl Sqlite {
     }
     pub async fn catalog(&self) -> Result<Catalog> {
         self.run(|s| s.catalog()).await
+    }
+    /// `catalog().uncovered` and `json_digest(&catalog())`, without the catalog.
+    pub async fn fingerprint(&self) -> Result<(Vec<String>, String)> {
+        self.run(|s| s.fingerprint()).await
+    }
+    /// `catalog().uncovered`, without the catalog.
+    pub async fn coverage(&self) -> Result<Vec<String>> {
+        self.run(|s| {
+            s.inspect()?;
+            Ok(s.cache.uncovered().to_vec())
+        })
+        .await
+    }
+    /// Inspection work done on this session so far.
+    #[cfg(test)]
+    pub async fn stats(&self) -> Result<Stats> {
+        self.run(|s| Ok(s.cache.stats)).await
     }
     pub async fn history(&self, database: Option<&str>) -> Result<History> {
         let database = database.map(str::to_owned);
@@ -1194,7 +1405,8 @@ impl Sqlite {
     }
     pub async fn check_purity(&self) -> Result<()> {
         self.run(|s| {
-            if !s.catalog()?.uncovered.is_empty() {
+            s.inspect()?;
+            if !s.cache.uncovered().is_empty() {
                 return Err(Diagnostic::new(
                     "DB_CHECK_UNSUPPORTED",
                     "SQLite catalog exceeds contract coverage.",

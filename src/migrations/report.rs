@@ -1,7 +1,7 @@
 //! Shared report construction: authored history, observed target, expected prefix.
 use super::adapter::{self, Access, Adapter, Identity};
 use super::analysis::analyze_for;
-use super::inventory::{json_digest, CapturedInputs};
+use super::inventory::{json_digest, CapturedInputs, CatalogDigests};
 use super::model::{Catalog, History};
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
@@ -174,6 +174,85 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
     json!({"outcome":outcome,"differences":differences,"expected_fingerprint":json_digest(expected),"observed_fingerprint":json_digest(observed)})
 }
 
+/// What replaying a prefix of the history in scratch established. A replay
+/// that fails keeps what it established before the failure.
+#[derive(Default)]
+struct Replayed {
+    /// Fingerprint of the catalog before the first and after each replayed
+    /// migration; only plans record them.
+    fingerprints: Vec<String>,
+    /// The catalog after `reference` migrations.
+    expected: Option<Catalog>,
+    /// For plans, the catalog after the last replayed migration.
+    candidate: Option<Catalog>,
+}
+
+/// Replay the first `count` migrations on a prepared scratch, inspecting the
+/// catalog before the first and after each one: an object outside coverage
+/// that exists only between two migrations is reported against the migration
+/// that made it. Each state is inspected once and fingerprinted only for a
+/// plan; the catalog itself is kept only at `reference` and, for a plan, at
+/// the end.
+async fn replay_prefix(
+    scratch: &Adapter,
+    inputs: &CapturedInputs,
+    role: &str,
+    (count, reference, plan): (usize, usize, bool),
+    replayed: &mut Replayed,
+) -> Result<()> {
+    let (schema, extra) = (&inputs.config.schema, &inputs.history_schemas);
+    let mut digests = CatalogDigests::default();
+    for index in 0..=count {
+        let migration = index.checked_sub(1).map(|i| &inputs.migrations[i]);
+        if let Some(migration) = migration {
+            // Configured limits size work on the target's data. Replay
+            // runs on an empty database and keeps the default limit. A
+            // PostgreSQL scratch also refuses a migration that acts outside
+            // the managed scope here (DB_OUTSIDE_SCOPE).
+            scratch
+                .execute_captured(
+                    migration,
+                    schema,
+                    extra,
+                    super::inventory::Limits::default().statement(),
+                )
+                .await?;
+        }
+        let keep = index == reference || (plan && index == count);
+        let (uncovered, catalog, fingerprint) = if keep {
+            let catalog = scratch.catalog(schema, extra, role).await?;
+            let fingerprint = plan.then(|| digests.digest(&catalog));
+            (catalog.uncovered.clone(), Some(catalog), fingerprint)
+        } else if plan {
+            let (uncovered, fingerprint) = scratch
+                .fingerprint(schema, extra, role, &mut digests)
+                .await?;
+            (uncovered, None, Some(fingerprint))
+        } else {
+            (scratch.coverage(schema, extra, role).await?, None, None)
+        };
+        if let (Some(migration), false) = (migration, uncovered.is_empty()) {
+            // The target's catalog.uncovered cannot name these:
+            // they exist only in the replayed intermediate catalog.
+            let mut d = Diagnostic::new(
+                "DB_COVERAGE_INCOMPLETE",
+                "Intermediate catalog exceeds execution coverage.",
+            )
+            .with_objects(&uncovered);
+            d.source = Some(migration.name.clone());
+            return Err(d);
+        }
+        replayed.fingerprints.extend(fingerprint);
+        if index == reference {
+            replayed.expected = catalog.clone();
+        }
+        if plan && index == count {
+            replayed.candidate = catalog;
+        }
+    }
+    Ok(())
+}
+
 /// Capture target facts in a read-only snapshot and release that session before replay.
 /// Scratch work uses separate identity/credentials; the result is schema evidence, not
 /// data-preservation proof, executed SQL assertions, or permission to migrate.
@@ -305,9 +384,7 @@ async fn inspect_observed(
     if !catalog.uncovered.is_empty() {
         diagnostic(&mut report,Diagnostic::new("DB_COVERAGE_INCOMPLETE","Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted.").with_objects(&catalog.uncovered));
     }
-    let mut expected = None;
-    let mut candidate = None;
-    let mut fingerprints = Vec::new();
+    let mut replayed = Replayed::default();
     if let Some(scratch_config) = &inputs.config.scratch {
         let mut cleanup_failure = None;
         let replay = async {
@@ -338,26 +415,6 @@ async fn inspect_observed(
                     )
                     .await?;
                 report["scratch"] = json!({"identity":scratch_identity,"disposable":true});
-                fingerprints.push(json_digest(
-                    &scratch
-                        .catalog(
-                            &inputs.config.schema,
-                            &inputs.history_schemas,
-                            &scratch_config.endpoint.role,
-                        )
-                        .await?,
-                ));
-                if reference == 0 {
-                    expected = Some(
-                        scratch
-                            .catalog(
-                                &inputs.config.schema,
-                                &inputs.history_schemas,
-                                &scratch_config.endpoint.role,
-                            )
-                            .await?,
-                    );
-                }
                 let count = if let Some(action) = &adoption {
                     action.count
                 } else if command == "plan" {
@@ -365,67 +422,21 @@ async fn inspect_observed(
                 } else {
                     applied
                 };
-                for (index, migration) in inputs.migrations.iter().take(count).enumerate() {
-                    // Configured limits size work on the target's data. Replay
-                    // runs on an empty database and keeps the default limit.
-                    scratch
-                        .execute_captured(
-                            migration,
-                            &inputs.config.schema,
-                            &inputs.history_schemas,
-                            super::inventory::Limits::default().statement(),
-                        )
-                        .await?;
-                    let step = scratch
-                        .catalog(
-                            &inputs.config.schema,
-                            &inputs.history_schemas,
-                            &scratch_config.endpoint.role,
-                        )
-                        .await?;
-                    if !step.uncovered.is_empty() {
-                        // The target's catalog.uncovered cannot name these:
-                        // they exist only in the replayed intermediate catalog.
-                        let mut d = Diagnostic::new(
-                            "DB_COVERAGE_INCOMPLETE",
-                            "Intermediate catalog exceeds execution coverage.",
-                        )
-                        .with_objects(&step.uncovered);
-                        d.source = Some(migration.name.clone());
-                        return Err(d);
-                    }
-                    fingerprints.push(json_digest(&step));
-                    if index + 1 == reference {
-                        expected = Some(
-                            scratch
-                                .catalog(
-                                    &inputs.config.schema,
-                                    &inputs.history_schemas,
-                                    &scratch_config.endpoint.role,
-                                )
-                                .await?,
-                        );
-                    }
-                }
-                if command == "plan" {
-                    candidate = Some(
-                        scratch
-                            .catalog(
-                                &inputs.config.schema,
-                                &inputs.history_schemas,
-                                &scratch_config.endpoint.role,
-                            )
-                            .await?,
-                    );
-                }
-                Ok::<_, Diagnostic>(())
+                replay_prefix(
+                    &scratch,
+                    inputs,
+                    &scratch_config.endpoint.role,
+                    (count, reference, command == "plan"),
+                    &mut replayed,
+                )
+                .await
             }
             .await;
             let cleanup = scratch.rollback().await;
             report["scratch"]["cleanup"] = json!(if cleanup.is_ok() { "pass" } else { "unknown" });
             if cleanup.is_err() {
-                expected = None;
-                candidate = None;
+                replayed.expected = None;
+                replayed.candidate = None;
             }
             let (outcome, failed_cleanup) = replay_outcome(work, cleanup);
             cleanup_failure = failed_cleanup;
@@ -436,6 +447,11 @@ async fn inspect_observed(
     } else {
         diagnostic(&mut report,Diagnostic::new("DB_REFERENCE_UNAVAILABLE","No explicitly disposable matching scratch database/file is configured; expected state is unverified."));
     }
+    let Replayed {
+        fingerprints,
+        expected,
+        candidate,
+    } = replayed;
     if let Some(expected) = &expected {
         report["drift"] = compare(&catalog, expected);
         if adoption.is_some() {
@@ -522,6 +538,120 @@ mod tests {
         assert!(cleanup.is_none());
         let (outcome, cleanup) = replay_outcome(Ok(()), Ok(()));
         assert!(outcome.is_ok() && cleanup.is_none());
+    }
+
+    /// Replay `n` migrations, `migration(i)` the SQL of the i-th, on a fresh
+    /// SQLite scratch as a plan does and return the inspection work its
+    /// session did.
+    fn replay_work(
+        n: usize,
+        migration: impl Fn(usize) -> String,
+    ) -> super::super::sqlite_cache::Stats {
+        use crate::interpreter::SecretValue;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("migrations")).unwrap();
+        std::fs::write(
+            root.join("ntnt.toml"),
+            "[databases.app]\nengine = \"sqlite\"\nschema = \"main\"\nmigrations_dir = \"migrations\"\n\
+             [databases.app.targets.test]\nconnection_secret = \"DB_TARGET\"\n\
+             [databases.app.scratch]\nconnection_secret = \"DB_SCRATCH\"\ndisposable = true\n\
+             [secrets.DB_TARGET]\n[secrets.DB_SCRATCH]\n",
+        )
+        .unwrap();
+        for i in 1..=n {
+            let name = format!("{i:04}_step.sql");
+            std::fs::write(root.join("migrations").join(name), migration(i)).unwrap();
+        }
+        let inputs = CapturedInputs::load(&root.join("ntnt.toml"), "test", None).unwrap();
+        let (target, scratch) = (root.join("target.sqlite"), root.join("scratch.sqlite"));
+        for path in [&target, &scratch] {
+            std::fs::File::create(path).unwrap();
+        }
+        let secret = |path: &std::path::Path| {
+            SecretValue::new("FIXTURE", path.to_str().unwrap().to_owned()).unwrap()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let endpoint = &inputs.endpoint;
+            let target = Adapter::connect(&secret(&target), endpoint, "sqlite", Access::Inspect)
+                .await
+                .unwrap();
+            let identity = target.identity(endpoint).await.unwrap();
+            drop(target);
+            let scratch_endpoint = &inputs.config.scratch.as_ref().unwrap().endpoint;
+            let scratch = Adapter::connect(
+                &secret(&scratch),
+                scratch_endpoint,
+                "sqlite",
+                Access::Scratch(json!(&identity)),
+            )
+            .await
+            .unwrap();
+            scratch
+                .prepare_scratch(&identity, scratch_endpoint, "main", &[])
+                .await
+                .unwrap();
+            let mut replayed = Replayed::default();
+            replay_prefix(&scratch, &inputs, "", (n, n, true), &mut replayed)
+                .await
+                .unwrap();
+            assert_eq!(replayed.fingerprints.len(), n + 1);
+            assert!(replayed.expected.is_some() && replayed.candidate.is_some());
+            let Adapter::Sqlite(db) = &scratch else {
+                unreachable!("a SQLite scratch")
+            };
+            let work = db.stats().await.unwrap();
+            scratch.rollback().await.unwrap();
+            // status and verify replay the same states without fingerprinting them.
+            scratch
+                .prepare_scratch(&identity, scratch_endpoint, "main", &[])
+                .await
+                .unwrap();
+            let mut replayed = Replayed::default();
+            replay_prefix(&scratch, &inputs, "", (n, n, false), &mut replayed)
+                .await
+                .unwrap();
+            assert!(replayed.fingerprints.is_empty() && replayed.candidate.is_none());
+            assert!(replayed.expected.is_some());
+            scratch.rollback().await.unwrap();
+            work
+        })
+    }
+
+    /// #421: replaying n migrations inspects n + 1 states, and reads each
+    /// object's metadata and compiles its programs once, when the migration
+    /// that creates it runs, not again after every later migration. The work
+    /// is exact for n and 2n; it used to grow with the square of n.
+    #[test]
+    fn replay_inspection_work_grows_linearly_with_history() {
+        const N: u64 = 8;
+        let tables = |i: usize| format!("CREATE TABLE t{i}(id INTEGER PRIMARY KEY);");
+        // An index and a view per table as well.
+        let views = |i: usize| {
+            format!("CREATE TABLE t{i}(id INTEGER PRIMARY KEY, v TEXT); CREATE INDEX t{i}_v ON t{i}(v); CREATE VIEW v{i} AS SELECT id, v FROM t{i};")
+        };
+        for n in [N, 2 * N] {
+            let work = replay_work(n as usize, tables);
+            // The state before the first migration and after each one.
+            assert_eq!(work.catalogs, n + 1, "{work:?}");
+            // A table's columns and foreign keys.
+            assert_eq!(work.metadata_queries, 2 * n, "{work:?}");
+            // INSERT, UPDATE, DELETE and the three rowid UPDATEs of a table.
+            assert_eq!(work.programs_compiled, 6 * n, "{work:?}");
+            // One allowlist for each inspection that compiles anything.
+            assert_eq!(work.allowlists, n, "{work:?}");
+            let work = replay_work(n as usize, views);
+            assert_eq!(work.catalogs, n + 1, "{work:?}");
+            // The index's columns and properties too.
+            assert_eq!(work.metadata_queries, 4 * n, "{work:?}");
+            // The view's SELECT too.
+            assert_eq!(work.programs_compiled, 7 * n, "{work:?}");
+            assert_eq!(work.allowlists, n, "{work:?}");
+        }
     }
 
     #[test]

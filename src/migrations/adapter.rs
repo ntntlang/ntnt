@@ -1,6 +1,6 @@
 //! Two concrete native adapters, one plan/history/authorization/execution core.
 //! This is intentionally not a plugin or portable-SQL framework.
-use super::inventory::{Endpoint, Migration};
+use super::inventory::{CatalogDigests, Endpoint, Migration};
 use super::model::{Catalog, History};
 use super::postgres::{self, Postgres, RelationalAdapter};
 use super::sqlite::{self, Sqlite};
@@ -77,6 +77,37 @@ impl Adapter {
         match self {
             Self::Postgres(pg) => pg.catalog(schema, extra, role).await,
             Self::Sqlite(db) => db.catalog().await,
+        }
+    }
+    /// `catalog().uncovered` and `json_digest(&catalog())`, without keeping
+    /// the catalog. SQLite fingerprints the catalog it maintains itself and
+    /// leaves `digests` unused.
+    pub async fn fingerprint(
+        &self,
+        schema: &str,
+        extra: &[String],
+        role: &str,
+        digests: &mut CatalogDigests,
+    ) -> Result<(Vec<String>, String)> {
+        match self {
+            Self::Postgres(pg) => {
+                let catalog = pg.catalog(schema, extra, role).await?;
+                let fingerprint = digests.digest(&catalog);
+                Ok((catalog.uncovered, fingerprint))
+            }
+            Self::Sqlite(db) => db.fingerprint().await,
+        }
+    }
+    /// `catalog().uncovered`, without keeping the catalog.
+    pub async fn coverage(
+        &self,
+        schema: &str,
+        extra: &[String],
+        role: &str,
+    ) -> Result<Vec<String>> {
+        match self {
+            Self::Postgres(pg) => Ok(pg.catalog(schema, extra, role).await?.uncovered),
+            Self::Sqlite(db) => db.coverage().await,
         }
     }
     pub async fn history(&self) -> Result<History> {
