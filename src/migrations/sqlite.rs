@@ -263,11 +263,17 @@ type AuthScope = Option<(Policy, std::collections::HashSet<String>)>;
 struct Authorizer {
     scope: Arc<Mutex<AuthScope>>,
     denied: Arc<Mutex<Option<String>>>,
+    /// Tables the authored statement compiled since the last activation drops.
+    dropped: Arc<Mutex<Vec<String>>>,
 }
 impl Authorizer {
     fn install(conn: &mut Connection) -> Result<Self> {
         let authorizer = Self::default();
-        let (scope, denied) = (authorizer.scope.clone(), authorizer.denied.clone());
+        let (scope, denied, dropped) = (
+            authorizer.scope.clone(),
+            authorizer.denied.clone(),
+            authorizer.dropped.clone(),
+        );
         conn.authorizer(Some(move |context: AuthContext<'_>| match scope.lock() {
             Ok(mut scope) => match scope.as_mut() {
                 None => Authorization::Allow,
@@ -276,6 +282,11 @@ impl Authorizer {
                     if matches!(decision, Authorization::Deny) {
                         if let Ok(mut denied) = denied.lock() {
                             denied.get_or_insert_with(|| denial(&context.action));
+                        }
+                    }
+                    if let AuthAction::DropTable { table_name } = &context.action {
+                        if let Ok(mut dropped) = dropped.lock() {
+                            dropped.push(table_name.to_string());
                         }
                     }
                     decision
@@ -300,12 +311,33 @@ impl Authorizer {
         if let Ok(mut denied) = self.denied.lock() {
             *denied = None;
         }
+        if let Ok(mut dropped) = self.dropped.lock() {
+            dropped.clear();
+        }
         self.set(Some((policy, tables)))?;
         Ok(AuthGuard(self))
     }
     /// What the authored statement compiled since the last activation was refused.
     fn take_denial(&self) -> Option<String> {
         self.denied.lock().ok().and_then(|mut denied| denied.take())
+    }
+    /// The tables the authored statement compiled since the last activation drops.
+    fn take_dropped(&self) -> Vec<String> {
+        self.dropped
+            .lock()
+            .map(|mut dropped| std::mem::take(&mut *dropped))
+            .unwrap_or_default()
+    }
+    /// Lift the authored policy so adapter SQL can run between compiling an
+    /// authored statement and running it; `resume` restores it first.
+    fn suspend(&self) -> Result<AuthScope> {
+        let mut scope = self.scope.lock().map_err(|_| {
+            Diagnostic::new("DB_RUNTIME", "SQLite authorizer state is unavailable.")
+        })?;
+        Ok(scope.take())
+    }
+    fn resume(&self, scope: AuthScope) -> Result<()> {
+        self.set(scope)
     }
 }
 struct AuthGuard<'a>(&'a Authorizer);
@@ -353,6 +385,7 @@ fn execute_script(state: &State, sql: &str) -> Result<()> {
     loop {
         let active = state.auth.activate(conn, Policy::Migration)?;
         statement += 1;
+        let number = statement;
         let result = (|| {
             let Some(mut statement) = batch.next().map_err(sql_error)? else {
                 return Ok(false);
@@ -362,6 +395,10 @@ fn execute_script(state: &State, sql: &str) -> Result<()> {
                     "DB_SQL_UNSUPPORTED",
                     "Migration SQL cannot contain uncaptured bind parameters.",
                 ));
+            }
+            let dropped = state.auth.take_dropped();
+            if !dropped.is_empty() {
+                refuse_on_delete_drops(state, number, &dropped)?;
             }
             let mut output = statement.raw_query();
             while output.next().map_err(sql_error)?.is_some() {}
@@ -381,14 +418,77 @@ fn execute_script(state: &State, sql: &str) -> Result<()> {
                         "Statement {statement} uses {refused}, which SQLite migrations cannot use."
                     ),
                     ),
+                    // This refusal already names its statement.
+                    None if error.code == "DB_REBUILD_REQUIRED" => error,
                     None => {
                         error.message = format!("Statement {statement}: {}", error.message);
                         error
                     }
-                })
+                });
             }
         }
     }
+}
+
+/// SQLite's DROP TABLE deletes every row first, which runs the ON DELETE
+/// actions of the tables that reference the dropped one (#419). Outside
+/// sqlite_rebuild mode those actions are on, so a drop that would run them is
+/// refused before the statement runs, naming each child table and its action.
+fn refuse_on_delete_drops(state: &State, number: usize, dropped: &[String]) -> Result<()> {
+    // sqlite_rebuild mode turns foreign-key actions off for the migration.
+    if !state
+        .conn
+        .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY)
+        .map_err(sql_error)?
+    {
+        return Ok(());
+    }
+    let scope = state.auth.suspend()?;
+    let found = dropped
+        .iter()
+        .map(|table| on_delete_children(&state.conn, table).map(|children| (table, children)))
+        .find(|found| !matches!(found, Ok((_, children)) if children.is_empty()));
+    state.auth.resume(scope)?;
+    let Some((table, children)) = found.transpose()? else {
+        return Ok(());
+    };
+    let named: Vec<String> = children
+        .iter()
+        .map(|(child, action)| format!("`{child}` (ON DELETE {action})"))
+        .collect();
+    let named = match named.as_slice() {
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        [] => unreachable!("only a non-empty set of children is refused"),
+    };
+    Err(Diagnostic::new(
+        "DB_REBUILD_REQUIRED",
+        &format!(
+            "Statement {number} drops table `{table}`, which {named} reference{s}. SQLite deletes every row of a dropped table first, which would run those actions.",
+            s = if children.len() == 1 { "s" } else { "" }
+        ),
+    ))
+}
+
+/// The tables whose foreign keys reference `table` with an ON DELETE action
+/// that changes their rows, with that action, in name order.
+fn on_delete_children(conn: &Connection, table: &str) -> Result<Vec<(String, String)>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT m.name, f.on_delete FROM main.sqlite_schema AS m, \
+             pragma_foreign_key_list(m.name) AS f \
+             WHERE m.type = 'table' AND m.name <> ?1 COLLATE NOCASE \
+             AND f.\"table\" = ?1 COLLATE NOCASE \
+             AND f.on_delete IN ('CASCADE', 'SET NULL', 'SET DEFAULT') \
+             ORDER BY m.name, f.on_delete",
+        )
+        .map_err(sql_error)?;
+    let children = statement
+        .query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(sql_error)?
+        .collect::<rusqlite::Result<Vec<(String, String)>>>()
+        .map_err(sql_error)?;
+    Ok(children)
 }
 
 fn rows(conn: &Connection, sql: &str, args: &[&dyn rusqlite::ToSql]) -> Result<Vec<Vec<Value>>> {

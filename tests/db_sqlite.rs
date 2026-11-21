@@ -1514,3 +1514,80 @@ fn sqlite_refusals_are_named_where_the_statement_compiles_them() {
         );
     }
 }
+
+/// #419: SQLite's DROP TABLE deletes every row first, which runs the ON DELETE
+/// actions of the tables that reference it. Outside sqlite_rebuild mode a
+/// migration that drops such a table is refused before it runs, naming each
+/// child table and its action; the target keeps every row.
+#[test]
+fn sqlite_dropping_a_table_with_on_delete_children_requires_rebuild_mode() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_base.sql",
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL); \
+         CREATE TABLE posts(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE); \
+         CREATE TABLE comments(id INTEGER PRIMARY KEY, account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL); \
+         CREATE TABLE tags(id INTEGER PRIMARY KEY, account_id INTEGER REFERENCES accounts(id));",
+    );
+    let base = f.plan("base.json");
+    assert_eq!(
+        f.apply("base.json", base["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("INSERT INTO accounts VALUES(1, 'A@example.com'); INSERT INTO posts VALUES(1, 1); INSERT INTO comments VALUES(1, 1);")
+        .unwrap();
+    f.sql(
+        "0002_rebuild.sql",
+        "CREATE TABLE accounts_new(id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE); \
+         INSERT INTO accounts_new SELECT id, lower(email) FROM accounts; \
+         DROP TABLE accounts; \
+         ALTER TABLE accounts_new RENAME TO accounts;",
+    );
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_REBUILD_REQUIRED");
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Statement 3 drops table `accounts`"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`comments` (ON DELETE SET NULL)"),
+        "{message}"
+    );
+    assert!(message.contains("`posts` (ON DELETE CASCADE)"), "{message}");
+    assert!(!message.contains("tags"), "{message}");
+    assert_eq!(d["source"], "0002_rebuild.sql", "{d}");
+    let kept: i64 = f
+        .target()
+        .query_row("SELECT (SELECT count(*) FROM posts) + (SELECT count(*) FROM comments WHERE account_id = 1)", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 2);
+}
+
+/// #419: the refusal is only for drops that would run ON DELETE actions. A
+/// parent dropped after its children, a child without an action, and a
+/// self-reference stay allowed.
+#[test]
+fn sqlite_drops_that_run_no_on_delete_actions_stay_allowed() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_base.sql",
+        "CREATE TABLE parents(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id) ON DELETE CASCADE); \
+         CREATE TABLE children(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id) ON DELETE CASCADE); \
+         CREATE TABLE others(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id));",
+    );
+    let base = f.plan("base.json");
+    assert_eq!(
+        f.apply("base.json", base["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0002_drop.sql",
+        "DROP TABLE others; DROP TABLE children; DROP TABLE parents;",
+    );
+    let plan = f.plan("drop.json");
+    let applied = f.apply("drop.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
