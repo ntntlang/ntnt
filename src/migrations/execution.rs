@@ -110,6 +110,7 @@ pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> 
         || b["target_name"] != inputs.target_name
         || b["managed_schema"] != inputs.config.schema
         || !limits_match(inputs, plan)
+        || outside_objects(saved).is_err()
         || plan["pending"] != json!(pending)
         || inputs.migrations.iter().take(end).any(|m| {
             !super::analysis::analyze_for(&inputs.config.engine, &m.sql, &inputs.config.schema)
@@ -119,6 +120,33 @@ pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> 
         return Err(stale());
     }
     Ok(base)
+}
+
+/// The objects outside the managed scope a plan inspects on the target, by
+/// catalog key: everything its replay found the history creates there
+/// (`report::Replayed::outside`). A plan without the field inspects none:
+/// its history creates nothing there, or it was saved before plans recorded
+/// them and inspected none either.
+fn outside_objects(saved: &Value) -> Result<Vec<String>> {
+    let Some(list) = saved["plan"]["execution"].get("outside_objects") else {
+        return Ok(vec![]);
+    };
+    let keys: Option<Vec<String>> = list
+        .as_array()
+        .filter(|keys| !keys.is_empty() && keys.len() <= 10_000)
+        .and_then(|keys| {
+            keys.iter()
+                .map(|key| {
+                    key.as_str()
+                        .filter(|key| !key.is_empty() && key.len() <= 1024)
+                        .map(str::to_owned)
+                })
+                .collect()
+        });
+    match keys {
+        Some(keys) if keys.windows(2).all(|pair| pair[0] < pair[1]) => Ok(keys),
+        _ => Err(stale()),
+    }
 }
 
 /// A plan binds the effective limits. One saved before plans recorded them
@@ -192,10 +220,12 @@ async fn locked_prefix(
             .await?
     };
     let applied = super::report::prefix(&history, inputs)?;
+    let outside = outside_objects(saved)?;
     let (uncovered, fingerprint) = db
         .fingerprint(
             &inputs.config.schema,
             &inputs.history_schemas,
+            &outside,
             &inputs.endpoint.role,
             digests,
         )
@@ -227,7 +257,7 @@ async fn locked_prefix(
         }
         false
     };
-    db.validate_execution_scope(&inputs.config.schema, &inputs.history_schemas)
+    db.validate_execution_scope(&inputs.config.schema, &inputs.history_schemas, &outside)
         .await?;
     Ok((applied, history, identity, adopted))
 }
@@ -443,6 +473,7 @@ fn lock_backoff(attempt: u32) -> std::time::Duration {
 async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
     let action = Adoption::from_plan(inputs, saved)?;
     let base = validate(inputs, saved)?;
+    let outside = outside_objects(saved)?;
     let db = connect(inputs, saved).await?;
     db.own_migrations(inputs.limits().migrator_wait()).await?;
     let mut digests = CatalogDigests::default();
@@ -552,6 +583,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 .fingerprint(
                     &inputs.config.schema,
                     &inputs.history_schemas,
+                    &outside,
                     &inputs.endpoint.role,
                     &mut digests,
                 )
@@ -759,6 +791,7 @@ async fn locked_attempt(
         .catalog(
             &inputs.config.schema,
             &inputs.history_schemas,
+            &outside_objects(saved)?,
             &inputs.endpoint.role,
         )
         .await?;
@@ -834,7 +867,12 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
         return Err(d);
     }
     let mut catalog = db
-        .catalog(schema, &inputs.history_schemas, &inputs.endpoint.role)
+        .catalog(
+            schema,
+            &inputs.history_schemas,
+            &outside_objects(saved)?,
+            &inputs.endpoint.role,
+        )
         .await?;
     if !catalog.uncovered.is_empty() {
         return Err(mismatch(&index.name));

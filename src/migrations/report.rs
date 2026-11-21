@@ -185,6 +185,10 @@ struct Replayed {
     expected: Option<Catalog>,
     /// For plans, the catalog after the last replayed migration.
     candidate: Option<Catalog>,
+    /// PostgreSQL: every object the replayed migrations created outside the
+    /// managed scope, at any step, by catalog key. The target is inspected
+    /// for these (`outside` in `catalog`), and a plan records them.
+    outside: std::collections::BTreeSet<String>,
 }
 
 /// Replay the first `count` migrations on a prepared scratch, inspecting the
@@ -192,7 +196,8 @@ struct Replayed {
 /// that exists only between two migrations is reported against the migration
 /// that made it. Each state is inspected once and fingerprinted only for a
 /// plan; the catalog itself is kept only at `reference` and, for a plan, at
-/// the end.
+/// the end. Each state's inspection includes the objects the history has
+/// created outside the managed scope by then, as replay finds them.
 async fn replay_prefix(
     scratch: &Adapter,
     inputs: &CapturedInputs,
@@ -217,18 +222,32 @@ async fn replay_prefix(
                 )
                 .await?;
         }
+        // Scratch holds nothing outside the managed scope it was not prepared
+        // with, so what is there now is this history's work, however it got
+        // there (a qualified name, search_path, a DO block, SQL NTNT cannot
+        // parse). Nothing before the first migration.
+        let outside = if migration.is_some() {
+            scratch.outside_objects(schema, extra).await?
+        } else {
+            vec![]
+        };
+        replayed.outside.extend(outside.iter().cloned());
         let keep = index == reference || (plan && index == count);
         let (uncovered, catalog, fingerprint) = if keep {
-            let catalog = scratch.catalog(schema, extra, role).await?;
+            let catalog = scratch.catalog(schema, extra, &outside, role).await?;
             let fingerprint = plan.then(|| digests.digest(&catalog));
             (catalog.uncovered.clone(), Some(catalog), fingerprint)
         } else if plan {
             let (uncovered, fingerprint) = scratch
-                .fingerprint(schema, extra, role, &mut digests)
+                .fingerprint(schema, extra, &outside, role, &mut digests)
                 .await?;
             (uncovered, None, Some(fingerprint))
         } else {
-            (scratch.coverage(schema, extra, role).await?, None, None)
+            (
+                scratch.coverage(schema, extra, &outside, role).await?,
+                None,
+                None,
+            )
         };
         if let (Some(migration), false) = (migration, uncovered.is_empty()) {
             // The target's catalog.uncovered cannot name these:
@@ -273,8 +292,31 @@ pub(super) async fn inspect(
             "Cannot resolve declared target connection secret; provider details suppressed.",
         )
     })?;
-    let target = Adapter::connect(
+    let (identity, catalog, history) = observe(&inputs, &secret, &[]).await?;
+    inspect_observed(
+        &inputs,
+        command,
+        identity,
+        catalog,
+        history,
+        adopt_through,
         &secret,
+    )
+    .await
+}
+/// One read-only snapshot of the target: its identity, the catalog of the
+/// managed scope and of the `outside` objects (see `Adapter::catalog`), and
+/// its history, kept as a result so that a history error becomes a report
+/// diagnostic alongside the catalog. The session is closed before this
+/// returns: no target lock or idle transaction survives into scratch replay,
+/// and an idle-session disconnect cannot erase a completed report.
+async fn observe(
+    inputs: &CapturedInputs,
+    secret: &crate::interpreter::SecretValue,
+    outside: &[String],
+) -> Result<(Identity, Catalog, Result<History>)> {
+    let target = Adapter::connect(
+        secret,
         &inputs.endpoint,
         &inputs.config.engine,
         Access::Inspect,
@@ -287,34 +329,34 @@ pub(super) async fn inspect(
             .catalog(
                 &inputs.config.schema,
                 &inputs.history_schemas,
+                outside,
                 &inputs.endpoint.role,
             )
             .await?;
-        // Retain a history error as a report diagnostic alongside the catalog.
         let history = target.history().await;
         Ok::<_, Diagnostic>((identity, catalog, history))
     }
     .await;
     let cleanup = target.rollback().await;
-    // No target lock or idle transaction survives into scratch replay. Closing
-    // now also avoids an idle-session disconnect erasing a completed report.
     drop(target);
-    let (identity, catalog, history) = match (observed, cleanup) {
-        (Ok(observed), Ok(())) => observed,
-        (Err(d), _) | (_, Err(d)) => return Err(d),
-    };
-    inspect_observed(&inputs, command, identity, catalog, history, adopt_through).await
+    match (observed, cleanup) {
+        (Ok(observed), Ok(())) => Ok(observed),
+        (Err(d), _) | (_, Err(d)) => Err(d),
+    }
 }
 /// Combine captured target facts with applied-prefix and optional candidate replay.
 /// Plan bindings retain logical labels, physical identity and exact source/policy digests.
 /// Missing or incomplete evidence stays unknown; no target connection remains open here.
+/// When replay finds objects the history creates outside the managed scope,
+/// a second snapshot through `target_secret` inspects them on the target.
 async fn inspect_observed(
     inputs: &CapturedInputs,
     command: &str,
     identity: Identity,
-    catalog: Catalog,
+    mut catalog: Catalog,
     history: Result<History>,
     adopt_through: Option<u64>,
+    target_secret: &crate::interpreter::SecretValue,
 ) -> Result<Value> {
     let inventory: Vec<_> = inputs
         .migrations
@@ -381,9 +423,9 @@ async fn inspect_observed(
         diagnostic(&mut report,Diagnostic::new("DB_UNRECOGNIZED_HISTORY","Nonempty managed scope has no recognized ledger. No baseline is inferred or adopted."));
         return Ok(report);
     }
-    if !catalog.uncovered.is_empty() {
-        diagnostic(&mut report,Diagnostic::new("DB_COVERAGE_INCOMPLETE","Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted.").with_objects(&catalog.uncovered));
-    }
+    // The target's coverage diagnostic goes here, before replay's, once its
+    // catalog is final (below).
+    let coverage_at = report["diagnostics"].as_array().map_or(0, Vec::len);
     let mut replayed = Replayed::default();
     if let Some(scratch_config) = &inputs.config.scratch {
         let mut cleanup_failure = None;
@@ -442,10 +484,41 @@ async fn inspect_observed(
     } else {
         diagnostic(&mut report,Diagnostic::new("DB_REFERENCE_UNAVAILABLE","No explicitly disposable matching scratch database/file is configured; expected state is unverified."));
     }
+    // Inspect on the target what replay found the history creates outside
+    // the managed scope. The first snapshot could not know these objects, so
+    // a second one reads the whole catalog with them; it must show the same
+    // target and history, or nothing is compared.
+    let outside: Vec<String> = replayed.outside.iter().cloned().collect();
+    if !outside.is_empty() {
+        report["target"]["outside_objects"] = json!(outside);
+        match observe(inputs, target_secret, &outside).await {
+            Ok((again, observed, Ok(later)))
+                if json!(&again) == json!(&identity) && later == history =>
+            {
+                catalog = observed;
+                report["catalog"] = json!(&catalog);
+            }
+            Ok(_) => {
+                diagnostic(&mut report, Diagnostic::new("DB_TARGET_CHANGED", "The target's identity or migration history changed between its two inspections; nothing was compared."));
+                replayed.expected = None;
+            }
+            Err(d) => {
+                diagnostic(&mut report, d);
+                replayed.expected = None;
+            }
+        }
+    }
+    if !catalog.uncovered.is_empty() {
+        report["diagnostics"].as_array_mut().unwrap().insert(
+            coverage_at,
+            json!(Diagnostic::new("DB_COVERAGE_INCOMPLETE","Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted.").with_objects(&catalog.uncovered)),
+        );
+    }
     let Replayed {
         fingerprints,
         expected,
         candidate,
+        outside: _,
     } = replayed;
     if let Some(expected) = &expected {
         report["drift"] = compare(&catalog, expected);
@@ -496,6 +569,11 @@ async fn inspect_observed(
         // The limits migrate will use are part of what is reviewed and approved.
         if let Some(limits) = inputs.plan_limits() {
             execution["limits"] = limits;
+        }
+        // So are the objects outside the managed scope it inspects on the
+        // target: everything replay found the history creates there.
+        if !outside.is_empty() {
+            execution["outside_objects"] = json!(outside);
         }
         let mut plan = json!({"execution":execution,"binding":binding,"pending":pending,"candidate":{"outcome":candidate_outcome,"fingerprint":candidate.as_ref().map(json_digest)},
             "authorized":false,"executable":false,"automatic_safe":false,"classification":if report["outcome"]=="pass" && candidate_outcome=="pass" {"requires_review"} else {"blocked"},"required_authority":"migrate requires this exact digest from the separately protected approval_secret provider, then revalidates under ownership. This digest alone grants no authority.",
@@ -875,22 +953,25 @@ mod tests {
                 let error = |d: Diagnostic| (d.code, d.message);
                 for call in 0..3 {
                     let reported = match (index + call) % 3 {
-                        0 => scratch.catalog("main", &[], "").await.map(|catalog| {
+                        0 => scratch.catalog("main", &[], &[], "").await.map(|catalog| {
                             let digest = json_digest(&catalog);
                             (json!(catalog), catalog.uncovered.clone(), digest)
                         }),
                         1 => scratch
-                            .fingerprint("main", &[], "", &mut CatalogDigests::default())
+                            .fingerprint("main", &[], &[], "", &mut CatalogDigests::default())
                             .await
                             .map(|(uncovered, fingerprint)| {
                                 let catalog = fresh.as_ref().map_or(Value::Null, |c| json!(c));
                                 (catalog, uncovered, fingerprint)
                             }),
-                        _ => scratch.coverage("main", &[], "").await.map(|uncovered| {
-                            let catalog = fresh.as_ref().map_or(Value::Null, |c| json!(c));
-                            let digest = fresh.as_ref().map_or(String::new(), json_digest);
-                            (catalog, uncovered, digest)
-                        }),
+                        _ => scratch
+                            .coverage("main", &[], &[], "")
+                            .await
+                            .map(|uncovered| {
+                                let catalog = fresh.as_ref().map_or(Value::Null, |c| json!(c));
+                                let digest = fresh.as_ref().map_or(String::new(), json_digest);
+                                (catalog, uncovered, digest)
+                            }),
                     };
                     assert_eq!(reported.map_err(error), expect(&fresh), "{at}, call {call}");
                 }

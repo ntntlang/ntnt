@@ -1108,6 +1108,91 @@ fn changes_to_the_ledger_schema_and_system_schemas_are_refused() {
     }
 }
 
+/// Managed objects may refer to objects the history creates outside the
+/// managed scope, as they may to a created schema: such foreign keys,
+/// defaults, checks, indexes, triggers, policies and views are covered, and a
+/// change to what they refer to is drift on the outside object.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn references_to_objects_the_history_creates_outside_are_covered() {
+    let f = Fixture::new();
+    f.seed_first(
+        "CREATE TABLE public.audit_log (id int PRIMARY KEY);
+CREATE FUNCTION public.stamp() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE FUNCTION public.next_id() RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT 1';
+CREATE TABLE app.entries (id int DEFAULT public.next_id() CHECK (public.next_id() > 0), log int REFERENCES public.audit_log (id));
+CREATE INDEX entries_next ON app.entries ((id + public.next_id()));
+CREATE TRIGGER entries_stamp BEFORE INSERT ON app.entries FOR EACH ROW EXECUTE FUNCTION public.stamp();
+ALTER TABLE app.entries ENABLE ROW LEVEL SECURITY;
+CREATE POLICY entries_all ON app.entries USING (public.next_id() = 1);
+CREATE VIEW app.logged AS SELECT e.id FROM app.entries e JOIN public.audit_log l ON l.id = e.log;",
+    );
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["catalog"]["uncovered"], serde_json::json!([]), "{r}");
+    assert_eq!(
+        r["target"]["outside_objects"],
+        serde_json::json!([
+            "public.relation:audit_log",
+            "public.routine:next_id()",
+            "public.routine:stamp()"
+        ]),
+        "{r}"
+    );
+    let objects = r["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "public.relation:audit_log",
+        "public.routine:next_id()",
+        "public.routine:stamp()",
+        "constraint:entries.entries_log_fkey",
+        "index:entries_next",
+        "trigger:entries.entries_stamp",
+        "policy:entries.entries_all",
+        "view:logged",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    f.target()
+        .batch_execute(
+            "CREATE OR REPLACE FUNCTION public.next_id() RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT 2'",
+        )
+        .unwrap();
+    let d = f.command("verify");
+    assert_eq!(d["outcome"], "fail", "{d}");
+    assert!(
+        d["drift"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["object"] == "public.routine:next_id()" && x["change"] == "changed"),
+        "{}",
+        d["drift"]
+    );
+}
+
+/// An extension a migration installs outside the managed scope is not
+/// covered, as before #420, and its members follow it: the diagnostic names
+/// the extension, not each routine and type it put in public.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn an_extension_installed_outside_the_scope_is_uncovered_as_one_object() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t (id int);\nCREATE EXTENSION hstore WITH SCHEMA public;\n",
+    );
+    let r = f.command("plan");
+    assert_eq!(r["plan"]["candidate"]["outcome"], "unknown", "{r}");
+    let coverage = diagnostic(&r, "DB_COVERAGE_INCOMPLETE").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(coverage["source"], "0001_initial.sql", "{coverage}");
+    assert_eq!(
+        names(&coverage["objects"]),
+        ["extension:hstore"],
+        "{coverage}"
+    );
+    assert!(!has_code(&r, "DB_OUTSIDE_SCOPE"), "{r}");
+}
+
 /// Two migrations of a single-schema history. It reaches every catalog query
 /// whose SQL #420 changed.
 const SINGLE_SCHEMA_HISTORY: [(&str, &str); 2] = [

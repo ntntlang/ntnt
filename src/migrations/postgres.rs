@@ -69,7 +69,14 @@ pub(crate) struct Postgres {
     /// sslmode, trust source and the TLS version this client negotiated.
     transport: Value,
     /// Set once `prepare_scratch` validated this session as scratch.
-    scratch: std::sync::OnceLock<()>,
+    scratch: std::sync::OnceLock<Box<ScratchScope>>,
+}
+/// What a prepared scratch database held outside system schemas: the
+/// managed schema and `public`. Objects that appear outside the managed
+/// scope later are the replayed history's (`outside_objects`).
+struct ScratchScope {
+    /// The schemas scratch was prepared with; the history did not create them.
+    schemas: Vec<String>,
 }
 /// The managed scope: the managed schema first, then the schemas the
 /// history creates.
@@ -123,7 +130,15 @@ use super::model::{Catalog, History, HistoryEntry};
 /// capabilities. A driver alone does not confer migration support.
 pub(crate) trait RelationalAdapter {
     /// Inspect `schema` and the `extra` schemas of the managed scope.
-    async fn catalog(&self, schema: &str, extra: &[String], role: &str) -> Result<Catalog>;
+    /// `outside` lists the objects the history creates in other schemas, by
+    /// catalog key; only they are inspected there (see `catalog_sql`).
+    async fn catalog(
+        &self,
+        schema: &str,
+        extra: &[String],
+        outside: &[String],
+        role: &str,
+    ) -> Result<Catalog>;
     fn capabilities(version: i32) -> Value;
 }
 impl Postgres {
@@ -361,7 +376,10 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         if checks.len() != 1 || !checks[0].get::<_, bool>(0) {
             return Err(bad());
         }
-        let ledger_scope = self.catalog("_ntnt", &[], "").await.map_err(|_| bad())?;
+        let ledger_scope = self
+            .catalog("_ntnt", &[], &[], "")
+            .await
+            .map_err(|_| bad())?;
         if ledger_scope.uncovered.iter().any(|key| {
             ledger_scope
                 .objects
@@ -424,11 +442,17 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 .collect(),
         })
     }
-    pub async fn validate_execution_scope(&self, schema: &str, extra: &[String]) -> Result<()> {
+    pub async fn validate_execution_scope(
+        &self,
+        schema: &str,
+        extra: &[String],
+        outside: &[String],
+    ) -> Result<()> {
         // A cross-scope dependent is not an owned object. Even non-cascading changes
         // are conservatively rejected rather than promising a transitive effect bound.
-        // Foreign keys between schemas of the managed scope are inspected.
-        let incoming = self.rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_class c ON c.oid=k.confrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_class f ON f.oid=k.conrelid JOIN pg_catalog.pg_namespace fn ON fn.oid=f.relnamespace WHERE n.nspname=ANY($1) AND fn.nspname<>ALL($1))", &[&scope(schema, extra)]).await?;
+        // Foreign keys between schemas of the managed scope, and from the
+        // tables the history creates elsewhere (`outside`), are inspected.
+        let incoming = self.rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_class c ON c.oid=k.confrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_class f ON f.oid=k.conrelid JOIN pg_catalog.pg_namespace fn ON fn.oid=f.relnamespace WHERE n.nspname=ANY($1) AND fn.nspname<>ALL($1) AND quote_ident(fn.nspname)||'.relation:'||f.relname<>ALL($2))", &[&scope(schema, extra), &outside]).await?;
         if incoming[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_EXTERNAL_DEPENDENCY",
@@ -739,7 +763,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         if !r.get::<_, bool>(0) {
             return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions or default grants."));
         }
-        let public = self.catalog("public", &[], &endpoint.role).await?;
+        let public = self.catalog("public", &[], &[], &endpoint.role).await?;
         if public.objects.len() != 1
             || !public.objects.contains_key("schema:public")
             || !public.uncovered.is_empty()
@@ -757,12 +781,42 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             "{create}SET LOCAL search_path=pg_catalog,\"{schema}\";"
         ))
         .await?;
-        // Scratch has no _ntnt: a replayed migration that creates one is
+        // Scratch holds nothing else, so whatever appears outside the managed
+        // scope from here on is the replayed history's (`outside_objects`).
+        // It has no _ntnt either: a replayed migration that creates one is
         // refused (see execute_captured).
-        self.scratch.set(()).map_err(|_| {
-            Diagnostic::new("DB_SCRATCH_NOT_EMPTY", "Scratch was already prepared.")
-        })?;
+        let schemas = self
+            .rows("SELECT n.nspname::text FROM pg_catalog.pg_namespace n WHERE n.nspname<>'information_schema' AND NOT starts_with(n.nspname,'pg_') ORDER BY 1", &[])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        self.scratch
+            .set(Box::new(ScratchScope { schemas }))
+            .map_err(|_| {
+                Diagnostic::new("DB_SCRATCH_NOT_EMPTY", "Scratch was already prepared.")
+            })?;
         Ok(identity)
+    }
+    /// In a prepared scratch database: what the replayed history created
+    /// outside the managed scope (`schema` and the `extra` schemas the history
+    /// creates), by catalog key (`OUTSIDE_OBJECTS`). Pass it to `catalog` so
+    /// they are inspected. Empty in any other session.
+    pub async fn outside_objects(&self, schema: &str, extra: &[String]) -> Result<Vec<String>> {
+        let Some(scratch) = self.scratch.get() else {
+            return Ok(vec![]);
+        };
+        // Routine keys spell argument types as the catalog's do.
+        self.batch("SET LOCAL search_path=pg_catalog").await?;
+        Ok(self
+            .rows(
+                super::catalog_sql::OUTSIDE_OBJECTS,
+                &[&scope(schema, extra), &scratch.schemas],
+            )
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect())
     }
     /// Reject unsupported live invocation paths before preparing any authored
     /// check. Names alone and provolatile are not proofs: only builtin base types,
@@ -780,8 +834,10 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         }
         Ok(())
     }
+    /// Checks read only managed-schema tables, so objects the history creates
+    /// outside the managed scope do not matter here.
     pub async fn check_purity(&self, schema: &str, extra: &[String]) -> Result<()> {
-        let catalog = self.catalog(schema, extra, "").await?;
+        let catalog = self.catalog(schema, extra, &[], "").await?;
         if !catalog.uncovered.is_empty() {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
@@ -1069,19 +1125,26 @@ impl RelationalAdapter for Postgres {
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "managed_schema_extensions":"version", "custom_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
-    async fn catalog(&self, schema: &str, extra: &[String], role: &str) -> Result<Catalog> {
+    async fn catalog(
+        &self,
+        schema: &str,
+        extra: &[String],
+        outside: &[String],
+        role: &str,
+    ) -> Result<Catalog> {
         self.batch("SET LOCAL search_path=pg_catalog").await?;
         let scope = scope(schema, extra);
         let mut catalog = Catalog::default();
         for (kind, sql) in super::catalog_sql::QUERIES {
-            for r in self.rows(sql, &[&schema, &scope]).await? {
+            // $1, $2 and $3 as `catalog_sql` describes them.
+            for r in self.rows(sql, &[&schema, &scope, &outside]).await? {
                 let name: String = r.get(0);
                 let mut value: Value = r.get(1);
                 let supported: bool = r.get(2);
                 canonical_roles(&mut value, role);
                 protect_definitions(&mut value);
-                // Keys in the managed schema stay unqualified; keys in the
-                // scope's other schemas lead with the quoted schema name.
+                // Keys in the managed schema stay unqualified; keys anywhere
+                // else lead with the quoted schema name.
                 let key = match r.get::<_, Option<String>>(3) {
                     None => format!("{kind}:{name}"),
                     Some(qualifier) => format!("{qualifier}.{kind}:{name}"),

@@ -54,6 +54,7 @@ impl Diagnostic {
             "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
             "DB_OUTSIDE_SCOPE" => "Remove the named statements from the migration that source names. The _ntnt schema holds NTNT's migration ledger, and pg_catalog, information_schema and the other pg_* schemas belong to PostgreSQL: migrations may not create, change, drop, grant or revoke on them, or put _ntnt on the search_path (pg_temp is allowed). Statements on other schemas, such as public, are allowed. See docs/DATABASE_MIGRATIONS.md#managed-scope.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
+            "DB_TARGET_CHANGED" => "Another session changed the target while it was being inspected, for example a concurrent migrate. Rerun the command once that work has finished.",
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
             "DB_HISTORY_MISSING" | "DB_HISTORY_DIVERGENT" | "DB_HISTORY_EDITED" | "DB_HISTORY_DIRTY" => "Recover the correct immutable release history or investigate the dirty attempt. Do not rewrite checksums, reorder applied files or blindly retry execution.",
@@ -525,8 +526,8 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     warning["code"], warning["relation"], warning["statement"], warning["message"]
                 );
             }
-            // Never refused, and NTNT does not inspect those schemas: for the
-            // reviewer, like a destructive change.
+            // Never refused, and NTNT inspects only what the history creates
+            // there: for the reviewer, like a destructive change.
             for note in migration["analysis"]["outside_scope"]
                 .as_array()
                 .into_iter()
