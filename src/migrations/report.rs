@@ -1243,7 +1243,7 @@ mod tests {
         // Only the two that leave m's foreign key without a unique parent key
         // fail, at the foreign-key check, and several states are outside
         // coverage.
-        let mismatch = "DB_SQLITE: SQLite operation failed (code 1). Details suppressed.";
+        let mismatch = "DB_SQLITE: foreign key mismatch - \"m\" referencing \"n\" (SQLITE_ERROR).";
         assert_eq!(
             failed,
             [

@@ -42,11 +42,10 @@ pub(super) struct Identity {
 fn sql_error(error: rusqlite::Error) -> Diagnostic {
     // An error that points at a token of the input SQL carries its SQLite code
     // separately from an ordinary failure; classify both by that code.
-    let sqlite = match &error {
-        rusqlite::Error::SqliteFailure(error, _) | rusqlite::Error::SqlInputError { error, .. } => {
-            Some(*error)
-        }
-        _ => None,
+    let (sqlite, text) = match &error {
+        rusqlite::Error::SqliteFailure(error, text) => (Some(*error), text.as_deref()),
+        rusqlite::Error::SqlInputError { error, msg, .. } => (Some(*error), Some(msg.as_str())),
+        _ => (None, None),
     };
     if sqlite.is_some_and(|e| e.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK) {
         return Diagnostic::new("DB_SQLITE_RECOVERY_REQUIRED", "SQLite requires rollback-journal recovery that read-only inspection cannot perform. A writer may still be active; details suppressed.");
@@ -57,13 +56,22 @@ fn sql_error(error: rusqlite::Error) -> Diagnostic {
         Some(rusqlite::ErrorCode::AuthorizationForStatementDenied) => "DB_SQL_UNSUPPORTED",
         _ => "DB_SQLITE",
     };
-    Diagnostic::new(
-        code,
-        &format!(
-            "SQLite operation failed (code {}). Details suppressed.",
-            sqlite.map(|e| e.extended_code).unwrap_or(-1)
-        ),
-    )
+    // SQLite's own message only in shapes that hold identifiers alone, and
+    // always the extended result code's name (#424).
+    let message = match sqlite {
+        Some(e) => {
+            let name = super::sqlite_errors::name(e.extended_code);
+            match text.and_then(|text| super::sqlite_errors::detail(e.extended_code, text)) {
+                Some(detail) => format!("{detail} ({name})."),
+                None => format!(
+                    "SQLite operation failed ({name}, code {}). Details suppressed.",
+                    e.extended_code
+                ),
+            }
+        }
+        None => "SQLite operation failed (code -1). Details suppressed.".to_owned(),
+    };
+    Diagnostic::new(code, &message)
 }
 fn reserved(name: &str) -> bool {
     name.to_ascii_lowercase().starts_with("_ntnt")
@@ -392,8 +400,9 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
         let active = state.auth.activate(conn, Policy::Migration)?;
         statement += 1;
         let number = statement;
+        let mut failure = Failure::default();
         let result = (|| {
-            let Some(mut statement) = batch.next().map_err(sql_error)? else {
+            let Some(mut statement) = batch.next().map_err(|e| failure.record(e))? else {
                 return Ok(false);
             };
             if statement.parameter_count() != 0 {
@@ -407,7 +416,7 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                 refuse_on_delete_drops(state, number, &dropped)?;
             }
             let mut output = statement.raw_query();
-            while output.next().map_err(sql_error)?.is_some() {}
+            while output.next().map_err(|e| failure.record(e))?.is_some() {}
             Ok(true)
         })();
         drop(active);
@@ -429,12 +438,92 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                     // SQLite interrupted the statement at its deadline.
                     None if error.code == "DB_TIMEOUT" => statement_limit(statement, limit, replay),
                     None => {
+                        if let Some(text) = failure.raised.take() {
+                            error.message = if raised_literal(conn, &text) {
+                                format!("a trigger raised: {text} (SQLITE_CONSTRAINT_TRIGGER).")
+                            } else {
+                                "a trigger raised an error whose message is computed, so it is suppressed (SQLITE_CONSTRAINT_TRIGGER).".to_owned()
+                            };
+                        }
                         error.message = format!("Statement {statement}: {}", error.message);
+                        if failure.authoring() {
+                            error.next_action = statement_advice(statement, replay);
+                        }
                         error
                     }
                 });
             }
         }
+    }
+}
+
+/// The SQLite result code an authored statement failed with and, for a
+/// RAISE, its raw message, kept out of the diagnostic until it is shown to
+/// be a literal the migration wrote (#424).
+#[derive(Default)]
+struct Failure {
+    code: Option<i32>,
+    raised: Option<String>,
+}
+impl Failure {
+    fn record(&mut self, error: rusqlite::Error) -> Diagnostic {
+        match &error {
+            rusqlite::Error::SqliteFailure(e, text) => {
+                self.code = Some(e.extended_code);
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER {
+                    self.raised = text.clone();
+                }
+            }
+            rusqlite::Error::SqlInputError { error: e, .. } => self.code = Some(e.extended_code),
+            _ => {}
+        }
+        sql_error(error)
+    }
+    /// An error in the statement's own SQL, or in the rows it writes, that a
+    /// change to the migration (or to those rows) fixes.
+    fn authoring(&self) -> bool {
+        use rusqlite::ffi;
+        self.code.is_some_and(|code| {
+            matches!(
+                code & 0xff,
+                ffi::SQLITE_ERROR
+                    | ffi::SQLITE_CONSTRAINT
+                    | ffi::SQLITE_MISMATCH
+                    | ffi::SQLITE_TOOBIG
+                    | ffi::SQLITE_RANGE
+            )
+        })
+    }
+}
+
+/// Whether `text` is the message of a `RAISE(..., '<literal>')` in a trigger
+/// the catalog holds: then the migration wrote it, and no row value is in it.
+fn raised_literal(conn: &Connection, text: &str) -> bool {
+    rows(
+        conn,
+        "SELECT sql FROM main.sqlite_schema WHERE type='trigger'",
+        &[],
+    )
+    .is_ok_and(|triggers| {
+        triggers
+            .iter()
+            .filter_map(|row| row[0].as_str())
+            .any(|sql| {
+                super::analysis::sqlite_raise_messages(sql)
+                    .iter()
+                    .any(|m| m == text)
+            })
+    })
+}
+
+/// What to do about statement `number` of a migration that failed in its
+/// own SQL (#424): in replay, fix it; on a target, nothing from the
+/// migration was committed.
+fn statement_advice(number: usize, replay: bool) -> String {
+    if replay {
+        format!("Fix statement {number} of the migration named in source so that it succeeds when the history replays in order on an empty database, then rerun plan. Replay changed nothing on the target.")
+    } else {
+        format!("Nothing from this migration was committed: its transaction rolled back when statement {number} failed on the target, and progress shows what this run committed before it. If the target's data conflicts with the statement, correct that data and rerun migrate with the same plan; if the migration is wrong, change it, then plan, review and approve again.")
     }
 }
 

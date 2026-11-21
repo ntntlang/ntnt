@@ -1565,8 +1565,8 @@ fn sqlite_scratch_setting_mismatch_names_the_setting_and_values() {
 }
 
 /// #414: any failing statement is numbered, and an error that SQLite ties to a
-/// token of the statement (here an unknown column) reports its real SQLite code,
-/// not -1.
+/// token of the statement (here an unknown column) reports its real SQLite code
+/// by name (#424), not -1.
 #[test]
 fn sqlite_failed_statement_is_numbered() {
     let f = Fixture::new();
@@ -1579,7 +1579,7 @@ fn sqlite_failed_statement_is_numbered() {
     let d = diagnostic(&r, "DB_SQLITE");
     let message = d["message"].as_str().unwrap();
     assert!(message.starts_with("Statement 3: "), "{message}");
-    assert!(message.contains("(code 1)"), "{message}");
+    assert!(message.contains("(SQLITE_ERROR)"), "{message}");
     assert_eq!(d["source"], "0001_initial.sql", "{d}");
 }
 

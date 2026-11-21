@@ -470,6 +470,33 @@ fn sqlite_script(a: &mut Analysis, sql: &str) {
     }
 }
 
+/// The literal messages of the `RAISE(ABORT|FAIL|ROLLBACK, '...')` calls in
+/// a SQLite trigger's SQL (#424).
+pub(crate) fn sqlite_raise_messages(sql: &str) -> Vec<String> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let Ok(tokens) = Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql).tokenize() else {
+        return vec![];
+    };
+    let tokens: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_)))
+        .collect();
+    tokens
+        .windows(6)
+        .filter_map(|window| match window {
+            [Token::Word(raise), Token::LParen, Token::Word(kind), Token::Comma, Token::SingleQuotedString(text), Token::RParen]
+                if raise.value.eq_ignore_ascii_case("RAISE")
+                    && ["ABORT", "FAIL", "ROLLBACK"]
+                        .iter()
+                        .any(|k| kind.value.eq_ignore_ascii_case(k)) =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whole migration scripts are bounded by the 1 MiB input cap; this bounds
 /// tokenizer output. Individual statements keep the 4,096-token parser bound.
 const MAX_SCRIPT_TOKENS: usize = 262_144;

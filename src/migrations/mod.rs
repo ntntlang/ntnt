@@ -15,6 +15,7 @@ mod report;
 mod scaffold;
 mod sqlite;
 mod sqlite_cache;
+mod sqlite_errors;
 mod sqlite_file;
 use serde::Serialize;
 use std::path::PathBuf;
