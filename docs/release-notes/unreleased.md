@@ -27,9 +27,35 @@ reports a runtime error in an imported module against that module's file.
   verify, and a predicate or expression changed outside a migration is reported
   as drift. They used to leave every plan `unknown` with
   `DB_COVERAGE_INCOMPLETE` (#411).
+- **Drops that would delete child rows.** A migration that drops a table which
+  other tables reference with `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT`
+  is refused with `DB_REBUILD_REQUIRED`, naming those tables, unless it uses
+  the `sqlite_rebuild` sidecar. SQLite deletes every row of a dropped table
+  first. A rebuild without the sidecar therefore deleted or orphaned child rows
+  on the target while plan, migrate and verify all passed (#419).
+- **Statement limit.** On a target, a SQLite migration runs under
+  `[databases.<name>.limits] statement_seconds` (90 seconds by default) instead
+  of a fixed 5 seconds. A statement past the limit fails with
+  `DB_STATEMENT_LIMIT`, naming the statement and the limit. Scratch replay keeps
+  its fixed 5-second bound. A plan records a declared limit, so a changed limit
+  makes the plan stale (#429).
+
+## `ntnt db` on PostgreSQL
+
+- **Schemas the history creates.** Inspection covers every schema the
+  migration history creates, with the same coverage and drift rules as the
+  managed schema. An object dropped there out of band is now reported as drift,
+  not as a pass. A migration that would create, change or drop objects in any
+  other schema is refused with `DB_OUTSIDE_SCOPE`, naming the objects (#420).
+- **Policies that call outside routines.** A row-level security policy that
+  calls a routine outside `pg_catalog` and the managed scope is now uncovered.
+  It used to be reported as covered (#434).
 
 ## `ntnt db` on every engine
 
+- **Empty migrations.** A migration with no statements, such as the file `ntnt
+  db new` creates, fails with `DB_MIGRATION_EMPTY`, naming it, instead of being
+  reported as unsupported SQL (#428).
 - **Coverage diagnostics name the objects.** `DB_COVERAGE_INCOMPLETE` lists the
   catalog objects outside supported inspection in a new `objects` field, and
   when replaying a migration produced them, `source` names that migration.
