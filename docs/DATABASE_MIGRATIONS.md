@@ -73,8 +73,8 @@ lock it, because NFS grants the lock only through such a handle. A `ntnt.toml` t
 local filesystems, and on NFS `new` fails with `DB_SCAFFOLD_IO`. Both commands fail
 that way on a filesystem without file locks. On Windows, file locks are mandatory,
 so while `init` or `new` holds the lock no other program can read `ntnt.toml`: an
-`ntnt db status` or `plan` that reads it at that moment fails with `DB_INPUT_IO`
-and must be rerun.
+`ntnt db status` or `plan` that reads it at that moment fails with `DB_INPUT_IO`,
+naming the manifest and the operating system's error, and must be rerun.
 
 For a ready-made local setup, [`examples/database-dev`](../examples/database-dev/README.md)
 starts PostgreSQL with matching target and scratch databases in one
@@ -236,7 +236,7 @@ required by every command except `init` and `new`.
 
 The example below selects PostgreSQL. See [SQLite](#sqlite-native-files-and-rebuilds) for its file-backed configuration and distinct guarantees.
 
-`--manifest` defaults to `ntnt.toml` in the current directory; there is no implicit ancestor/target selection. The migration directory is relative to that manifest, not the caller's working directory.
+`--manifest` defaults to `ntnt.toml` in the current directory; there is no implicit ancestor/target selection. The migration directory is relative to that manifest, not the caller's working directory. Run `ntnt db` from the project directory or pass `--manifest <path>`: from a subdirectory it fails with `DB_INPUT_IO` "Manifest ntnt.toml: not found in the current directory". Every input file (the manifest, a `--plan` or `--against` file, each migration and sidecar) must be a regular file of at most 1 MiB with a single hard link; a refusal names the file as you gave it and the rule it broke: not found, a symbolic link, not a regular file, larger than 1 MiB, more than one hard link, changed while it was being read, or the operating system's read error.
 
 ```toml
 [databases.app]

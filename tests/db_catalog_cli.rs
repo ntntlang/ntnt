@@ -109,6 +109,134 @@ fn dotfiles_and_readmes_in_migrations_are_ignored() {
     assert_eq!(report["diagnostics"][0]["code"], "DB_SECRET", "{report}");
 }
 
+/// `ntnt db <args> --json` in `dir` without secrets: its first diagnostic.
+fn first_diagnostic(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .arg("db")
+        .args(args)
+        .arg("--json")
+        .env_remove("DB_TARGET")
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{args:?} passed");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&output.stderr)));
+    report["diagnostics"][0].clone()
+}
+fn says(d: &serde_json::Value, fragments: &[&str]) {
+    let message = d["message"].as_str().unwrap();
+    for fragment in fragments {
+        assert!(message.contains(fragment), "{fragment:?} missing: {d}");
+    }
+}
+
+/// #422 (cli-11): a manifest that cannot be captured is named as the user
+/// gave it, with the cause, and following the advice resolves it.
+#[test]
+fn an_unreadable_manifest_is_named_with_its_cause() {
+    let root = project();
+    let routes = root.path().join("routes");
+    std::fs::create_dir(&routes).unwrap();
+    let status = ["status", "--target", "local"];
+    fn manifest(name: &str) -> Vec<&str> {
+        vec!["status", "--target", "local", "--manifest", name]
+    }
+    // From a project subdirectory, ntnt.toml is not in the current directory.
+    let d = first_diagnostic(&routes, &status);
+    assert_eq!(d["code"], "DB_INPUT_IO", "{d}");
+    assert_eq!(d["source"], "ntnt.toml", "{d}");
+    says(&d, &["ntnt.toml", "not found", "--manifest"]);
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(next_action.contains("--manifest"), "{d}");
+    // ntnt db new reads the manifest the same way.
+    let d = first_diagnostic(&routes, &["new", "second"]);
+    assert_eq!(d["code"], "DB_INPUT_IO", "{d}");
+    says(&d, &["ntnt.toml", "not found", "--manifest"]);
+    // Following the advice: the manifest is captured; the unset secret stops.
+    let d = first_diagnostic(&routes, &manifest("../ntnt.toml"));
+    assert_eq!(d["code"], "DB_SECRET", "{d}");
+    let d = first_diagnostic(root.path(), &manifest("nope.toml"));
+    assert_eq!(d["source"], "nope.toml", "{d}");
+    says(&d, &["nope.toml", "not found"]);
+    std::fs::create_dir(root.path().join("dir.toml")).unwrap();
+    says(
+        &first_diagnostic(root.path(), &manifest("dir.toml")),
+        &["dir.toml", "not a regular file"],
+    );
+    std::fs::write(root.path().join("big.toml"), vec![b'#'; (1 << 20) + 1]).unwrap();
+    says(
+        &first_diagnostic(root.path(), &manifest("big.toml")),
+        &["big.toml", "larger than 1 MiB"],
+    );
+    std::fs::hard_link(
+        root.path().join("ntnt.toml"),
+        root.path().join("linked.toml"),
+    )
+    .unwrap();
+    let d = first_diagnostic(root.path(), &manifest("linked.toml"));
+    assert_eq!(d["code"], "DB_INPUT_IO", "{d}");
+    says(&d, &["linked.toml", "more than one hard link"]);
+    std::fs::remove_file(root.path().join("linked.toml")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("ntnt.toml", root.path().join("link.toml")).unwrap();
+        let d = first_diagnostic(root.path(), &manifest("link.toml"));
+        says(&d, &["link.toml", "a symbolic link"]);
+        assert!(
+            d["next_action"].as_str().unwrap().contains("--manifest"),
+            "{d}"
+        );
+        // Following the advice: the file the link points to.
+        let d = first_diagnostic(root.path(), &manifest("ntnt.toml"));
+        assert_eq!(d["code"], "DB_SECRET", "{d}");
+        use std::os::unix::fs::PermissionsExt;
+        let locked = root.path().join("locked.toml");
+        std::fs::copy(root.path().join("ntnt.toml"), &locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A user who can read it anyway (root) cannot see this refusal.
+        if std::fs::read(&locked).is_err() {
+            says(
+                &first_diagnostic(root.path(), &manifest("locked.toml")),
+                &["locked.toml", "cannot be read", "denied"],
+            );
+        }
+    }
+}
+
+/// #422 (cli-11): a missing or unreadable --plan file is named the same way.
+#[test]
+fn an_unreadable_plan_file_is_named_with_its_cause() {
+    let root = project();
+    let migrate = |plan: &str| {
+        first_diagnostic(
+            root.path(),
+            &["migrate", "--target", "local", "--plan", plan],
+        )
+    };
+    let d = migrate("missing.json");
+    assert_eq!(d["code"], "DB_INPUT_IO", "{d}");
+    assert_eq!(d["source"], "missing.json", "{d}");
+    says(&d, &["--plan", "missing.json", "not found"]);
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("ntnt db plan --out"),
+        "{d}"
+    );
+    std::fs::create_dir(root.path().join("plans")).unwrap();
+    says(
+        &migrate("plans"),
+        &["--plan", "plans", "not a regular file"],
+    );
+    let d = first_diagnostic(
+        root.path(),
+        &["reconcile", "--target", "local", "--plan", "missing.json"],
+    );
+    says(&d, &["--plan", "missing.json", "not found"]);
+}
+
 #[test]
 fn db_reports_manifest_errors_as_versioned_json() {
     let root = tempfile::tempdir().unwrap();

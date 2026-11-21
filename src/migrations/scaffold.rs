@@ -558,7 +558,7 @@ fn initialize_with(
     let held = match std::fs::symlink_metadata(manifest) {
         Err(error) if error.kind() == ErrorKind::NotFound => None,
         _ => Some(inventory::capture(
-            manifest,
+            inventory::Input::Manifest(manifest),
             input_file::open_replaceable,
             |file| lock(manifest, file, try_lock),
         )?),
@@ -774,7 +774,8 @@ fn create_migration_with(
     // manifest new may not write is opened read-only, which local filesystems lock
     // as well and NFS refuses.
     let manifest = args.manifest.as_path();
-    let (held, bytes) = inventory::capture(manifest, input_file::open_replaceable, |file| {
+    let input = inventory::Input::Manifest(manifest);
+    let (held, bytes) = inventory::capture(input, input_file::open_replaceable, |file| {
         lock_numbering(manifest, file, try_lock)
     })?;
     let document = CapturedInputs::parse(&bytes)?;
@@ -1084,9 +1085,11 @@ mod tests {
 
     /// The manifest locked and captured as init does it.
     fn capture_locked(path: &Path) -> (File, Vec<u8>) {
-        inventory::capture(path, input_file::open_replaceable, |file| {
-            lock(path, file, File::try_lock)
-        })
+        inventory::capture(
+            inventory::Input::Manifest(path),
+            input_file::open_replaceable,
+            |file| lock(path, file, File::try_lock),
+        )
         .unwrap()
     }
 

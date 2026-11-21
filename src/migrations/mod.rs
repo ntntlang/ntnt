@@ -315,7 +315,7 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
     };
     // Capture a review artifact before database I/O; never reopen it later.
     let prior = options.against.as_ref().map(|p| {
-        inventory::file_bytes(p).and_then(|b| {
+        inventory::file_bytes(inventory::Input::Plan(p, "--against")).and_then(|b| {
             serde_json::from_slice::<serde_json::Value>(&b)
                 .map_err(|_| Diagnostic::new("DB_PLAN_INVALID", "Invalid saved plan JSON."))
         })
@@ -336,7 +336,7 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     "migrate and reconcile use only --plan; --adopt-through belongs to plan.",
                 ));
             }
-            let bytes = inventory::file_bytes(&path)?;
+            let bytes = inventory::file_bytes(inventory::Input::Plan(&path, "--plan"))?;
             let saved = serde_json::from_slice(&bytes).map_err(|_| {
                 Diagnostic::new("DB_PLAN_INVALID", "Invalid saved execution plan JSON.")
             })?;

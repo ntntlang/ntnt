@@ -332,7 +332,6 @@ fn invalid(message: &str) -> Diagnostic {
 // What to do about a refused entry of the migrations directory (#422). Each
 // is about the directory, not the manifest.
 const MOVE_OR_RENAME: &str = "Move the named entry out of the migrations directory, or rename it to <positive-id>_<name>.sql for a migration or to the .toml sidecar name of an existing migration. Names use ASCII letters, digits, underscores or hyphens and a lowercase suffix. Apart from README files and names starting with a dot, which are ignored, the directory holds nothing else. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
-const REPLACE_ENTRY: &str = "Replace the named entry with a regular file that has a single link and at most 1 MiB (for a link, a copy of the file it points to), or move it out of the migrations directory. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
 const RENUMBER: &str = "Rename whichever of the two named migrations has not been applied anywhere to an unused ID above the highest in the migrations directory (`ntnt db new <name>` takes the next free ID); never renumber an applied migration.";
 const SAVE_AS_UTF8: &str = "Save the named file as UTF-8 text; the migrations directory holds only UTF-8 migrations and sidecars.";
 const FIX_SIDECAR: &str = "Correct the named sidecar at the reported position. A sidecar holds only intent_ids = [\"<id>\", ...], [requires] and [ensures] tables that map check names to SQL strings, and, for SQLite, sqlite_rebuild = \"<table>\"; a migration without metadata needs no sidecar. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
@@ -365,14 +364,19 @@ fn refuse_entry(code: &str, entry: &str, problem: &str, next_action: &str) -> Di
     d.next_action = next_action.to_owned();
     d
 }
-/// An entry of the migrations directory `dir` as diagnostics name it, relative
-/// to the project: `migrations/0001_initial.sql`. A name that is not UTF-8 or
-/// holds a character a terminal could interpret is quoted and escaped.
-fn entry_label(dir: &str, name: &std::ffi::OsStr) -> String {
-    match name.to_str() {
-        Some(plain) if plain.escape_debug().eq(plain.chars()) => format!("{dir}/{plain}"),
-        _ => format!("{dir}/{name:?}"),
+/// A file name or path as diagnostics show it: as written, or quoted and
+/// escaped when it is not UTF-8 or holds a character a terminal could
+/// interpret.
+fn shown_os(text: &std::ffi::OsStr) -> String {
+    match text.to_str() {
+        Some(plain) if plain.escape_debug().eq(plain.chars()) => plain.to_owned(),
+        _ => format!("{text:?}"),
     }
+}
+/// An entry of the migrations directory `dir` as diagnostics name it, relative
+/// to the project: `migrations/0001_initial.sql`.
+fn entry_label(dir: &str, name: &std::ffi::OsStr) -> String {
+    format!("{dir}/{}", shown_os(name))
 }
 fn shown_entry(dir: &str, name: &str) -> String {
     entry_label(dir, std::ffi::OsStr::new(name))
@@ -522,51 +526,170 @@ pub(crate) fn identifier(s: &str) -> bool {
         && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
         && s.as_bytes()[0].is_ascii_alphabetic()
 }
+/// An input file, and how its diagnostics name it: as the user gave it, or,
+/// for an entry of the migrations directory, relative to the project.
+#[derive(Clone, Copy)]
+pub(super) enum Input<'a> {
+    /// The manifest (`--manifest`, ntnt.toml by default).
+    Manifest(&'a Path),
+    /// A saved plan, given with `flag` (`--plan` or `--against`).
+    Plan(&'a Path, &'static str),
+    /// An entry of the migrations directory at a path, named as shown.
+    Entry(&'a Path, &'a str),
+}
+/// Why an input file could not be captured (#422).
+enum Unreadable {
+    Missing,
+    Symlink,
+    NotRegular,
+    TooLarge,
+    Linked,
+    Changed,
+    Io(std::io::Error),
+}
+impl Input<'_> {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Manifest(path) | Self::Plan(path, _) | Self::Entry(path, _) => path,
+        }
+    }
+    /// Refuse the file for `cause`, naming it in the message and `source`,
+    /// with advice for this kind of input.
+    fn refuse(&self, cause: Unreadable) -> Diagnostic {
+        use Unreadable::*;
+        let shown = match self {
+            Self::Manifest(path) | Self::Plan(path, _) => shown_os(path.as_os_str()),
+            Self::Entry(_, shown) => (*shown).to_owned(),
+        };
+        let reason = match &cause {
+            Missing => "not found".to_owned(),
+            Symlink => "a symbolic link; `ntnt db` reads only regular files".to_owned(),
+            NotRegular => "not a regular file".to_owned(),
+            TooLarge => "larger than 1 MiB, the limit for one input file".to_owned(),
+            Linked => {
+                "more than one hard link; `ntnt db` reads only files with a single link".to_owned()
+            }
+            Changed => "changed while it was being read".to_owned(),
+            Io(error) => format!("cannot be read ({error})"),
+        };
+        let (message, next_action) = match self {
+            Self::Manifest(path) => {
+                let message = match cause {
+                    Missing => {
+                        // A bare file name is looked up in the current directory only.
+                        let here = if path.components().count() == 1 {
+                            " in the current directory"
+                        } else {
+                            ""
+                        };
+                        format!("Manifest {shown}: not found{here}; run from the project directory or pass --manifest <path>.")
+                    }
+                    _ => format!("Manifest {shown}: {reason}."),
+                };
+                let next_action = match cause {
+                    Missing => "Run the command from the project directory that holds ntnt.toml, or pass --manifest <path> naming that file; `ntnt db` does not search parent directories. `ntnt db init` creates a manifest.",
+                    Symlink => "Pass --manifest with the path of the file the link points to, or replace the link with that file.",
+                    NotRegular => "Pass --manifest with the path of the project's ntnt.toml file, not a directory or special file.",
+                    TooLarge => "Keep the manifest under 1 MiB: move large configuration out of it.",
+                    Linked => "Give the manifest a single link: copy it to a new name, then rename the copy over it.",
+                    Changed => "Rerun once nothing is changing the manifest, such as an editor saving it or another `ntnt db init` or `ntnt db new`.",
+                    Io(_) => "Make the manifest readable by this user, then rerun. On Windows, rerun once a running `ntnt db init` or `ntnt db new` has finished: it locks the manifest while it works.",
+                };
+                (message, next_action.to_owned())
+            }
+            Self::Plan(_, flag) => (
+                format!("{flag} file {shown}: {reason}."),
+                match cause {
+                    Missing => format!("Pass {flag} with the path of a plan saved by `ntnt db plan --out <file>`."),
+                    Symlink => format!("Pass {flag} with the path of the saved plan itself, not a link to it."),
+                    NotRegular => format!("Pass {flag} with the path of a saved plan file, not a directory or special file."),
+                    TooLarge => format!("Pass {flag} with a plan saved by `ntnt db plan --out`; saved plans are never larger than 1 MiB."),
+                    Linked => format!("Copy the saved plan to a new name, which has a single link, and pass that to {flag}."),
+                    Changed => "Rerun once nothing is writing the saved plan.".to_owned(),
+                    Io(_) => "Make the saved plan readable by this user, then rerun.".to_owned(),
+                },
+            ),
+            Self::Entry(..) => (
+                format!("{shown}: {reason}."),
+                match cause {
+                    Missing => "Rerun once nothing is changing the migrations directory.",
+                    Symlink => "Replace the link with a copy of the file it points to, or remove it from the migrations directory.",
+                    NotRegular => "Move the named entry out of the migrations directory, which holds only regular files.",
+                    TooLarge => "Split the named migration into migrations of at most 1 MiB each; the migrations directory holds no larger file.",
+                    Linked => "Give the named entry a single link: copy it to a new name outside the migrations directory, then move the copy over it.",
+                    Changed => "Rerun once nothing is writing the migrations directory.",
+                    Io(_) => "Make the named entry in the migrations directory readable by this user, then rerun.",
+                }
+                .to_owned(),
+            ),
+        };
+        let mut d = Diagnostic::new("DB_INPUT_IO", &message);
+        d.source = Some(shown);
+        d.next_action = next_action;
+        d
+    }
+}
 /// Capture one bounded regular file and reject links or detected replacement/mutation.
 /// Callers retain these bytes instead of reopening a validated path during execution.
-pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
-    Ok(capture(path, super::input_file::open, |_| Ok(()))?.1)
+pub(super) fn file_bytes(input: Input) -> Result<Vec<u8>> {
+    Ok(capture(input, super::input_file::open, |_| Ok(()))?.1)
 }
 /// `file_bytes` through `open`, running `before_read` on the opened handle (`ntnt db
-/// init` locks the manifest there) and returning the handle with the bytes.
+/// init` locks the manifest there) and returning the handle with the bytes. A
+/// refusal names the file and says which rule it broke.
 pub(super) fn capture(
-    path: &Path,
+    input: Input,
     open: fn(&Path) -> std::io::Result<File>,
     before_read: impl FnOnce(&File) -> Result<()>,
 ) -> Result<(File, Vec<u8>)> {
-    let bad = || {
-        Diagnostic::new(
-            "DB_INPUT_IO",
-            "Cannot capture a regular, unlinked input file (maximum 1 MiB).",
-        )
+    use Unreadable::*;
+    let path = input.path();
+    let refuse = |cause| input.refuse(cause);
+    let missing_or = |error: std::io::Error| match error.kind() {
+        std::io::ErrorKind::NotFound => Missing,
+        _ => Io(error),
     };
-    let meta = std::fs::symlink_metadata(path).map_err(|_| bad())?;
-    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_INPUT_BYTES as u64 {
-        return Err(bad());
+    let meta = std::fs::symlink_metadata(path).map_err(|e| refuse(missing_or(e)))?;
+    if meta.file_type().is_symlink() {
+        return Err(refuse(Symlink));
     }
-    let file = open(path).map_err(|_| bad())?;
+    if !meta.is_file() {
+        return Err(refuse(NotRegular));
+    }
+    if meta.len() > MAX_INPUT_BYTES as u64 {
+        return Err(refuse(TooLarge));
+    }
+    let file = open(path).map_err(|e| refuse(missing_or(e)))?;
     before_read(&file)?;
-    let opened = file.metadata().map_err(|_| bad())?;
-    if !opened.is_file()
-        || opened.file_type().is_symlink()
-        || !super::input_file::single_link(&file, &opened)
-    {
-        return Err(bad());
+    let opened = file.metadata().map_err(|e| refuse(Io(e)))?;
+    // A regular file a moment ago: anything else now replaced it.
+    if !opened.is_file() || opened.file_type().is_symlink() {
+        return Err(refuse(Changed));
+    }
+    if !super::input_file::single_link(&file, &opened) {
+        return Err(refuse(Linked));
     }
     let mut bytes = Vec::new();
     (&file)
         .take((MAX_INPUT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|_| bad())?;
-    let after = std::fs::symlink_metadata(path).map_err(|_| bad())?;
-    let finished = file.metadata().map_err(|_| bad())?;
-    if bytes.len() > MAX_INPUT_BYTES
-        || !super::input_file::same(&meta, &opened)
+        .map_err(|e| refuse(Io(e)))?;
+    let after = std::fs::symlink_metadata(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => refuse(Changed),
+        _ => refuse(Io(e)),
+    })?;
+    let finished = file.metadata().map_err(|e| refuse(Io(e)))?;
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(refuse(TooLarge));
+    }
+    if !super::input_file::same(&meta, &opened)
         || !super::input_file::same(&opened, &after)
         || !super::input_file::same(&opened, &finished)
-        || !super::input_file::single_link(&file, &finished)
     {
-        return Err(bad());
+        return Err(refuse(Changed));
+    }
+    if !super::input_file::single_link(&file, &finished) {
+        return Err(refuse(Linked));
     }
     Ok((file, bytes))
 }
@@ -793,7 +916,7 @@ impl CapturedInputs {
     /// unselected stores' directories are not visited. Exact bytes and logical selection
     /// participate in plan identity, while secret resolution remains a later operation.
     pub fn load(manifest: &Path, target: &str, database: Option<&str>) -> Result<Self> {
-        let bytes = file_bytes(manifest)?;
+        let bytes = file_bytes(Input::Manifest(manifest))?;
         let document = Self::parse(&bytes)?;
         let (database_name, config) = Self::select(&document, database)?;
         let endpoint = Self::endpoint(&config, target)?;
@@ -842,14 +965,7 @@ impl CapturedInputs {
                     DIRECTORY_LIMITS,
                 ));
             }
-            let bytes = file_bytes(&entry.path()).map_err(|d| {
-                refuse_entry(
-                    &d.code,
-                    &label,
-                    "cannot capture a regular, unlinked input file (maximum 1 MiB).",
-                    REPLACE_ENTRY,
-                )
-            })?;
+            let bytes = file_bytes(Input::Entry(&entry.path(), &label))?;
             total_bytes += bytes.len();
             if total_bytes > 16 * 1_048_576 {
                 return Err(refuse_entry(
@@ -1543,14 +1659,14 @@ role="target_role"
             Refused {
                 entry: "migrations/0002_old.sql",
                 code: "DB_INPUT_IO",
-                says: &[],
+                says: &["not a regular file"],
                 make: |r| std::fs::create_dir(r.join("migrations/0002_old.sql")).unwrap(),
                 fix: |r| rename(r, "migrations/0002_old.sql", "0002_old.sql"),
             },
             Refused {
                 entry: "migrations/0002_hard.sql",
                 code: "DB_INPUT_IO",
-                says: &[],
+                says: &["more than one hard link"],
                 make: |r| {
                     put(r, "original.sql", "CREATE TABLE app.h(id INT);");
                     std::fs::hard_link(r.join("original.sql"), r.join("migrations/0002_hard.sql"))
@@ -1689,7 +1805,7 @@ role="target_role"
                 Refused {
                     entry: "migrations/0002_link.sql",
                     code: "DB_INPUT_IO",
-                    says: &[],
+                    says: &["a symbolic link"],
                     make: |r| {
                         put(r, "original.sql", "CREATE TABLE app.l(id INT);");
                         std::os::unix::fs::symlink(
@@ -1830,6 +1946,32 @@ role="target_role"
             assert_eq!(d.source, Some(format!("migrations/{entry}")), "{d}");
             remove(root.path(), &format!("migrations/{entry}"));
         }
+    }
+
+    /// #422: a file that changes between the checks before and after it is
+    /// read is reported as changed, naming it as the user gave it.
+    #[test]
+    fn a_file_that_changes_while_it_is_captured_is_named() {
+        fn grow_then_open(path: &Path) -> std::io::Result<File> {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)?
+                .write_all(b"\n# appended while ntnt db read the file\n")?;
+            super::super::input_file::open(path)
+        }
+        let root = project();
+        let manifest = root.path().join("ntnt.toml");
+        let d = capture(Input::Manifest(&manifest), grow_then_open, |_| Ok(()))
+            .err()
+            .unwrap();
+        assert_eq!(d.code, "DB_INPUT_IO", "{d}");
+        assert!(
+            d.message.contains("ntnt.toml")
+                && d.message.contains("changed while it was being read"),
+            "{d}"
+        );
+        assert!(d.next_action.contains("Rerun"), "{d}");
     }
 
     /// Sidecar refusals give a syntax error's position as toml's own message
