@@ -2905,3 +2905,78 @@ CREATE VIEW app.recent AS SELECT id, msg FROM public.audit_log;",
     assert_eq!(applied["outcome"], "pass", "{applied}");
     assert_eq!(applied["assertions"]["executed"], 1, "{applied}");
 }
+
+/// A check may read a managed view, and the views it can reach may call only
+/// builtin non-volatile functions. That holds in every schema inspected: the
+/// managed schema, a schema the history creates, and the objects the history
+/// creates in other schemas (here `public`). A managed view over a view there
+/// that calls a writing function is refused before any check runs, so the
+/// function never writes; a chain of builtin-only views across the same
+/// schemas passes (#420, review r4654895923).
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_refuse_views_that_reach_a_writing_function_in_any_inspected_schema() {
+    for (create, s) in [("CREATE SCHEMA audit;\n", "audit"), ("", "public")] {
+        let f = Fixture::new();
+        // The writing function and what it writes exist from the first
+        // migration on, so a refused second migration leaves them to inspect.
+        // A sequence advance survives the rollback that a refusal causes.
+        f.sql(
+            "0001_initial.sql",
+            &format!(
+                "{create}CREATE TABLE {s}.calls (n bigint);
+CREATE SEQUENCE {s}.call_count;
+CREATE FUNCTION {s}.touch() RETURNS boolean VOLATILE LANGUAGE sql
+  AS $$ INSERT INTO {s}.calls VALUES (nextval('{s}.call_count')) RETURNING true $$;
+CREATE VIEW {s}.pure AS SELECT lower('A') = 'a' AS ok;
+CREATE VIEW app.pure AS SELECT ok FROM {s}.pure;"
+            ),
+        );
+        std::fs::write(
+            f.root.path().join("migrations/0001_initial.toml"),
+            "[ensures]\npure = 'SELECT EXISTS (SELECT 1 FROM app.pure WHERE ok)'\n",
+        )
+        .unwrap();
+        f.sql(
+            "0002_writes.sql",
+            &format!(
+                "CREATE VIEW {s}.writes AS SELECT {s}.touch() AS ok;
+CREATE VIEW app.writes AS SELECT ok FROM {s}.writes;"
+            ),
+        );
+        std::fs::write(
+            f.root.path().join("migrations/0002_writes.toml"),
+            "[ensures]\nwrites = 'SELECT EXISTS (SELECT 1 FROM app.writes WHERE ok)'\n",
+        )
+        .unwrap();
+        let plan = f.plan("plan.json");
+        assert_eq!(plan["outcome"], "pass", "{s}: {plan}");
+        if s == "public" {
+            let outside = names_in(&plan["plan"]["execution"]["outside_objects"]);
+            for key in ["public.relation:writes", "public.routine:touch()"] {
+                assert!(outside.contains(&key), "{key}: {outside:?}");
+            }
+        }
+        let r = f.apply("plan.json", plan["plan_digest"].as_str());
+        assert!(code(&r, "DB_CHECK_UNSUPPORTED"), "{s}: {r}");
+        // The builtin-only chain was checked and committed; the check that
+        // reads the writing chain never ran.
+        assert_eq!(r["progress"][0]["state"], "committed", "{s}: {r}");
+        assert_eq!(r["progress"][1]["state"], "failed", "{s}: {r}");
+        assert_eq!(r["assertions"]["executed"], 1, "{s}: {r}");
+        let row = f
+            .target()
+            .query_one(
+                &format!(
+                    "SELECT (SELECT count(*) FROM {s}.calls), (SELECT is_called FROM {s}.call_count)"
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            (row.get::<_, i64>(0), row.get::<_, bool>(1)),
+            (0, false),
+            "{s}: the function ran"
+        );
+    }
+}
