@@ -67,7 +67,10 @@ that each add the next migration still produce two files with the same ID.
 `status` and `plan` reject that history with `DB_DUPLICATE_ID`, naming both files;
 renumbering the migration that has not been applied anywhere fixes it. A merged
 migration numbered below one a target already applied is refused for that target
-with `DB_HISTORY_DIVERGENT`, which names it and the ID to renumber it above.
+with `DB_HISTORY_DIVERGENT`, which names it and the ID to renumber it above. An
+applied migration renamed with its ID kept is refused the same way, but named by
+the name it was applied under, with advice to rename it back; an applied
+migration is never renumbered.
 
 `new` never changes `ntnt.toml`, but like `init` it opens the file for writing to
 lock it, because NFS grants the lock only through such a handle. A `ntnt.toml` that

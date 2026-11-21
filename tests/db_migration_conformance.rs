@@ -378,6 +378,33 @@ fn history_refusals_name_the_migration(f: Fixture) {
     )
     .unwrap();
     assert_eq!(passes()["history"]["pending_count"], 1);
+
+    // An applied migration that is not the last one was renamed, its ID kept
+    // (review r1): it is named as applied, and never told to renumber.
+    let migrations = f.root().join("migrations");
+    std::fs::rename(
+        migrations.join("0020_b.sql"),
+        migrations.join("0020_bee.sql"),
+    )
+    .unwrap();
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(d["source"], "0020_b.sql", "{d}");
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action
+            .contains("If 0020_bee.sql is that migration renamed, rename it back to 0020_b.sql"),
+        "{d}"
+    );
+    assert!(!next_action.contains("above"), "{d}");
+    no_sql(d);
+    // Following the advice: the applied name is restored.
+    std::fs::rename(
+        migrations.join("0020_bee.sql"),
+        migrations.join("0020_b.sql"),
+    )
+    .unwrap();
+    assert_eq!(passes()["history"]["pending_count"], 1);
 }
 /// #423 (sq-12, cli-09): a stale plan names the binding that changed, for
 /// migrate and for --against; a plan for another target is refused before

@@ -248,8 +248,17 @@ fn divergent(
         recorded(entry), migration.name, migration.id
     );
     let applied = |name: &str| history.entries.iter().any(|e| e.name == name);
+    // The ledger's ID under another name is an applied migration renamed,
+    // not one merged in below the last applied ID: renumbering it would
+    // make SQL the target already ran pending again.
+    let renamed = history
+        .entries
+        .iter()
+        .any(|e| ledger_id(e).and_then(|id| id.parse::<u64>().ok()) == Some(migration.id));
     let last = last_recorded_id(history);
-    if let Some(last) = last.filter(|last| migration.id < *last && !applied(&migration.name)) {
+    if let Some(last) =
+        last.filter(|last| migration.id < *last && !applied(&migration.name) && !renamed)
+    {
         let advice = renumber_advice(inputs, &migration.name, last);
         return history_refusal("DB_HISTORY_DIVERGENT", &migration.name, message, advice);
     }
@@ -1585,6 +1594,34 @@ mod tests {
             assert!(d.message.contains(shown), "{shown}: {}", d.message);
         }
         assert!(d.next_action.contains("0020_b.sql"), "{}", d.next_action);
+    }
+
+    /// #423 (review r1): an applied migration renamed with its ID kept is a
+    /// rename even when later migrations are applied too, so the advice is to
+    /// rename it back, never to renumber SQL the target has already run.
+    #[test]
+    fn a_renamed_applied_migration_below_the_last_applied_id_is_renamed_back() {
+        let (_before, applied) = named_inputs(&[A, B, C]);
+        let history = ledger(&applied, 0, 3);
+        let (_after, now) = named_inputs(&[A, ("0020_bee.sql", B.1), C]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+        assert_eq!(d.source.as_deref(), Some("0020_b.sql"), "{d:?}");
+        for shown in ["position 2", "0020_b.sql", "0020_bee.sql"] {
+            assert!(d.message.contains(shown), "{shown}: {}", d.message);
+        }
+        assert!(
+            d.next_action.contains(
+                "If 0020_bee.sql is that migration renamed, rename it back to 0020_b.sql"
+            ),
+            "{}",
+            d.next_action
+        );
+        assert!(!d.next_action.contains("above"), "{}", d.next_action);
+        shows_no_sql(&d);
+        // Following the advice: under its applied name the history matches.
+        let (_fixed, fixed) = named_inputs(&[A, B, C]);
+        assert_eq!(prefix_with_attempt(&history, &fixed).unwrap(), (3, None));
     }
 
     /// #423: the adopted-checkpoint variants name the checkpoint's migrations.
