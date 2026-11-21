@@ -1014,3 +1014,70 @@ fn a_stalled_cli_child_is_stopped_at_its_deadline() {
     );
     assert!(!stalled.status.success(), "{stalled}");
 }
+
+/// #422 (cli-14): the SQLite quick start's commands work in a project entered
+/// through a symlinked directory, where the shell's PWD keeps the link and
+/// `ntnt db` refuses a path through it.
+#[cfg(unix)]
+#[test]
+fn the_sqlite_quick_start_runs_from_a_symlinked_directory() {
+    let guide = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/DATABASE_MIGRATIONS.md"),
+    )
+    .unwrap()
+    .replace("\r\n", "\n");
+    let sqlite = guide
+        .split("\n## Quick start\n")
+        .nth(1)
+        .unwrap()
+        .split("\n### SQLite\n")
+        .nth(1)
+        .unwrap()
+        .split("\n### PostgreSQL\n")
+        .next()
+        .unwrap();
+    let block = sqlite
+        .split("```sh\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    // The lines before the first `ntnt db` command create the files and set
+    // the secrets.
+    let setup: Vec<&str> = block
+        .lines()
+        .take_while(|line| !line.starts_with("ntnt "))
+        .collect();
+    assert!(
+        setup.iter().any(|line| line.contains("APP_DATABASE_FILE")),
+        "{block}"
+    );
+    let real = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let project = links.path().join("project");
+    std::os::unix::fs::symlink(real.path(), &project).unwrap();
+    pass(&project, &["init", "--engine", "sqlite"]);
+    pass(&project, &["new", "initial"]);
+    let migration = project.join("migrations/0001_initial.sql");
+    let mut sql = std::fs::read_to_string(&migration).unwrap();
+    sql.push_str("CREATE TABLE accounts (id INTEGER PRIMARY KEY);\n");
+    std::fs::write(&migration, sql).unwrap();
+    let mut shell = Command::new("sh");
+    shell
+        .arg("-c")
+        .arg(format!(
+            "{}\n\"$NTNT\" db status --target development --json",
+            setup.join("\n")
+        ))
+        .env("NTNT", env!("CARGO_BIN_EXE_ntnt"))
+        // As in an interactive shell that entered the project through the link.
+        .env("PWD", &project)
+        .current_dir(&project);
+    for name in SQLITE_SECRETS {
+        shell.env_remove(name);
+    }
+    let output = shell.bounded_output();
+    let r = report(&output);
+    assert_eq!(r["outcome"], "pass", "{r}");
+}

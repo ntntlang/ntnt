@@ -1143,9 +1143,18 @@ impl Sqlite {
     pub async fn connect(secret: &crate::interpreter::SecretValue, access: Access) -> Result<Self> {
         let path = std::path::PathBuf::from(secret.expose());
         let execute = matches!(access, Access::Execute(_));
+        // File identity refusals name the role and its secret, never the path.
+        let owner = super::sqlite_file::Owner {
+            role: if matches!(access, Access::Scratch(_)) {
+                "scratch"
+            } else {
+                "target"
+            },
+            secret: secret.name().to_owned(),
+        };
         let state=tokio::time::timeout(IO_TIMEOUT,tokio::task::spawn_blocking(move || {
             if rusqlite::version_number()/1000!=3054 {return Err(Diagnostic::new("DB_ENGINE_VERSION","SQLite adapter supports the bundled SQLite 3.54 series."));}
-            let file=FileBinding::capture(&path)?;
+            let file=FileBinding::capture(&path,owner)?;
             let writable=!matches!(access,Access::Inspect);
             match &access {
                 Access::Execute(expected) if expected["file_id"]!=file.id()=>return Err(Diagnostic::new("DB_WRONG_TARGET","SQLite file identity differs from the reviewed target; no writable connection opened.")),

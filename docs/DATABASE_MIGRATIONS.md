@@ -118,13 +118,15 @@ CREATE TABLE accounts (
 
 `ntnt db` never creates database files. Create an empty target file and a separate
 empty scratch file (an empty file is a valid SQLite database). Then point the secrets
-at their **absolute** paths:
+at their **absolute** paths. `pwd -P` prints the physical directory: `ntnt db`
+refuses a path through a symbolic link, and `$PWD` keeps one when the project was
+entered through a link (on macOS, `/var` is a link to `/private/var`):
 
 ```sh
 mkdir -p data && touch data/app.sqlite data/replay.sqlite
 export NTNT_ENV=development NTNT_SECRETS_PROVIDER=env
-export APP_DATABASE_FILE="$PWD/data/app.sqlite"
-export APP_REPLAY_FILE="$PWD/data/replay.sqlite"
+export APP_DATABASE_FILE="$(pwd -P)/data/app.sqlite"
+export APP_REPLAY_FILE="$(pwd -P)/data/replay.sqlite"
 
 ntnt db status --target development
 ntnt db plan --target development --out review.json
@@ -823,7 +825,7 @@ disposable = true
 
 Resolve the connection secrets to **absolute native paths of existing regular files**, not URLs, SQLite URIs, `:memory:`, or connection strings. Provision the empty deployment and scratch files yourself with SQLite first. Do not declare `database`/`role` for SQLite; its managed scope is exactly `main`, the entire file except the reserved ledger. There is no ATTACH, temp namespace, multi-store file, implicit creation or reset. Existing-file adoption is explicit and subject to the same scope/coverage checks.
 
-Files must have one hard link and no symlink path components. Filename components cannot contain `:` on any platform (a Windows drive prefix is allowed); NTFS alternate streams have independent contents but share file-level identity and are not supported. Use the native canonical path on macOS (for example `/private/...`, not its `/var` alias). Identity binds native device/inode or Windows volume/file-index plus available creation time, not merely path spelling. Plans also bind the bundled SQLite version, encoding, page size, auto-vacuum and journal mode, with Unix owner/group/mode or Windows readonly metadata. File paths themselves are not disclosed. Replacement/copying changes identity and requires a new plan. The Unix adapter checks SQLite's open-file movement status without opening and closing a second descriptor that could drop SQLite's POSIX locks; Windows retains a non-delete-sharing guard. Filesystem administrators, local directories and OS ACL administration remain trusted. These checks are **not a filesystem sandbox or full ACL attestation**; use local storage with reliable SQLite locking, not network/shared filesystems.
+Files must have one hard link and no symlink path components. Filename components cannot contain `:` on any platform (a Windows drive prefix is allowed); NTFS alternate streams have independent contents but share file-level identity and are not supported. Use the native canonical path on macOS (for example `/private/...`, not its `/var` alias). Identity binds native device/inode or Windows volume/file-index plus available creation time, not merely path spelling. Plans also bind the bundled SQLite version, encoding, page size, auto-vacuum and journal mode, with Unix owner/group/mode or Windows readonly metadata. File paths themselves are not disclosed: `DB_FILE_IDENTITY` names the role and the secret, as the manifest names it, and the rule the path broke (`Scratch connection secret APP_REPLAY_FILE names a relative path; ...`): a relative path, a file that does not exist, a symbolic link in the path, not a regular file, more than one hard link, `:` in a file name, or a file replaced or moved while `ntnt db` used it. Its `next_action` says how to fix that rule. Replacement/copying changes identity and requires a new plan. The Unix adapter checks SQLite's open-file movement status without opening and closing a second descriptor that could drop SQLite's POSIX locks; Windows retains a non-delete-sharing guard. Filesystem administrators, local directories and OS ACL administration remain trusted. These checks are **not a filesystem sandbox or full ACL attestation**; use local storage with reliable SQLite locking, not network/shared filesystems.
 
 ### Transactions, replay and contracts
 

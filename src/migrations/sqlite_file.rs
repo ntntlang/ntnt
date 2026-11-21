@@ -8,38 +8,137 @@ use std::path::{Path, PathBuf};
 pub(super) struct FileBinding {
     path: PathBuf,
     id: String,
+    owner: Owner,
     #[cfg(windows)]
     guard: std::fs::File,
 }
-fn bad() -> Diagnostic {
-    Diagnostic::new("DB_FILE_IDENTITY", "SQLite requires an existing regular, single-link local file at an absolute, non-symlink path. File details suppressed.")
+/// Whose file a binding is, for its diagnostics: the role (`target` or
+/// `scratch`) and the connection secret that names the file. A refusal names
+/// these and the rule the path broke, never the path (#422).
+pub(super) struct Owner {
+    pub role: &'static str,
+    pub secret: String,
+}
+/// The rule a SQLite file path broke.
+enum Rule {
+    NotText,
+    Relative,
+    Stream,
+    Missing,
+    Inaccessible(std::io::Error),
+    Symlink,
+    NotRegular,
+    Linked,
+    Replaced,
+    Moved,
+    #[cfg(not(any(unix, windows)))]
+    Unsupported,
+}
+impl Owner {
+    fn refuse(&self, rule: Rule) -> Diagnostic {
+        let secret = &self.secret;
+        let (role, example) = match self.role {
+            "scratch" => ("Scratch", "data/replay.sqlite"),
+            _ => ("Target", "data/app.sqlite"),
+        };
+        let (problem, next_action) = match rule {
+            Rule::NotText => (
+                "names a path that is not UTF-8 text or holds a NUL byte".to_owned(),
+                format!("Set {secret} to the database file's absolute path as UTF-8 text."),
+            ),
+            Rule::Relative => (
+                "names a relative path; SQLite files are named by absolute path".to_owned(),
+                format!("Set {secret} to the file's absolute path, for example \"$(pwd -P)/{example}\"; `ntnt db` never resolves a relative one."),
+            ),
+            Rule::Stream => (
+                "names a path with `:` in a file name (NTFS alternate streams are not supported)".to_owned(),
+                format!("Set {secret} to a path whose file names hold no `:`; a Windows drive prefix is fine."),
+            ),
+            Rule::Missing => (
+                "names a file that does not exist".to_owned(),
+                match self.role {
+                    "scratch" => format!("Create a separate, empty scratch file first, for example `touch {example}` (an empty file is a valid SQLite database), or set {secret} to the absolute path of an existing one; `ntnt db` never creates database files."),
+                    _ => format!("Create the file first, for example `touch {example}` (an empty file is a valid SQLite database), or set {secret} to the absolute path of the existing file; `ntnt db` never creates database files."),
+                },
+            ),
+            Rule::Inaccessible(error) => (
+                format!("names a path that cannot be inspected ({error})"),
+                "Make the file and every directory above it accessible to this user, then rerun.".to_owned(),
+            ),
+            Rule::Symlink => (
+                "names a path through a symbolic link".to_owned(),
+                format!("Set {secret} to the file's physical path, with no symbolic link in it: `pwd -P` prints the physical directory, as in \"$(pwd -P)/{example}\" (on macOS, /private/var rather than /var)."),
+            ),
+            Rule::NotRegular => (
+                "names something that is not a regular file".to_owned(),
+                format!("Set {secret} to the absolute path of a regular SQLite file, not a directory or special file."),
+            ),
+            Rule::Linked => (
+                "names a file with more than one hard link".to_owned(),
+                "Give the file a single link: remove its other hard links, or use a copy (a copy is a new file, so plan again).".to_owned(),
+            ),
+            Rule::Replaced => (
+                "names a file that was replaced while `ntnt db` was using it".to_owned(),
+                "Rerun once nothing replaces the database file; a different file needs a new plan.".to_owned(),
+            ),
+            Rule::Moved => (
+                "names a file that was moved or deleted while `ntnt db` had it open".to_owned(),
+                "Rerun once nothing moves or deletes the database file; a different file needs a new plan.".to_owned(),
+            ),
+            #[cfg(not(any(unix, windows)))]
+            Rule::Unsupported => (
+                "names a file this platform cannot bind".to_owned(),
+                "Run `ntnt db` on Unix or Windows.".to_owned(),
+            ),
+        };
+        let mut d = Diagnostic::new(
+            "DB_FILE_IDENTITY",
+            &format!("{role} connection secret {secret} {problem}. The path is not shown."),
+        );
+        d.next_action = next_action;
+        d
+    }
+    /// A path that does not exist, or the error that kept it from being inspected.
+    fn missing_or(&self, error: std::io::Error) -> Diagnostic {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => self.refuse(Rule::Missing),
+            _ => self.refuse(Rule::Inaccessible(error)),
+        }
+    }
 }
 impl FileBinding {
-    pub fn capture(path: &Path) -> Result<Self> {
-        if !path.is_absolute()
-            || path.to_str().is_none_or(|p| p.contains('\0'))
-            // NTFS streams share the file index/timestamps but have independent
-            // contents. Reject stream syntax in filename components portably;
-            // a Windows drive-prefix colon is not a Normal component.
-            || path.components().any(|part| matches!(part,
-                std::path::Component::Normal(name) if name.to_string_lossy().contains(':')))
-        {
-            return Err(bad());
+    pub fn capture(path: &Path, owner: Owner) -> Result<Self> {
+        if path.to_str().is_none_or(|p| p.contains('\0')) {
+            return Err(owner.refuse(Rule::NotText));
+        }
+        if !path.is_absolute() {
+            return Err(owner.refuse(Rule::Relative));
+        }
+        // NTFS streams share the file index/timestamps but have independent
+        // contents. Reject stream syntax in filename components portably;
+        // a Windows drive-prefix colon is not a Normal component.
+        if path.components().any(|part| {
+            matches!(part,
+            std::path::Component::Normal(name) if name.to_string_lossy().contains(':'))
+        }) {
+            return Err(owner.refuse(Rule::Stream));
         }
         // Resolve directory aliases once; reject linked namespace components.
         for parent in path.ancestors() {
             if std::fs::symlink_metadata(parent)
-                .map_err(|_| bad())?
+                .map_err(|error| owner.missing_or(error))?
                 .file_type()
                 .is_symlink()
             {
-                return Err(bad());
+                return Err(owner.refuse(Rule::Symlink));
             }
         }
-        let path = path.canonicalize().map_err(|_| bad())?;
-        let metadata = std::fs::symlink_metadata(&path).map_err(|_| bad())?;
+        let path = path
+            .canonicalize()
+            .map_err(|error| owner.missing_or(error))?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| owner.missing_or(error))?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(bad());
+            return Err(owner.refuse(Rule::NotRegular));
         }
         #[cfg(windows)]
         let guard = {
@@ -53,11 +152,12 @@ impl FileBinding {
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .open(&path)
-                .map_err(|_| bad())?
+                .map_err(|error| owner.missing_or(error))?
         };
         let mut binding = Self {
             path,
             id: String::new(),
+            owner,
             #[cfg(windows)]
             guard,
         };
@@ -73,14 +173,18 @@ impl FileBinding {
     pub fn check(&self) -> Result<Value> {
         let (id, authority) = self.observe()?;
         if id != self.id {
-            return Err(bad());
+            return Err(self.owner.refuse(Rule::Replaced));
         }
         Ok(authority)
     }
     fn observe(&self) -> Result<(String, Value)> {
-        let md = std::fs::symlink_metadata(&self.path).map_err(|_| bad())?;
+        let md = std::fs::symlink_metadata(&self.path).map_err(|error| match error.kind() {
+            // The file was there when the binding was made.
+            std::io::ErrorKind::NotFound => self.owner.refuse(Rule::Moved),
+            _ => self.owner.refuse(Rule::Inaccessible(error)),
+        })?;
         if !md.is_file() || md.file_type().is_symlink() {
-            return Err(bad());
+            return Err(self.owner.refuse(Rule::NotRegular));
         }
         let created = md
             .created()
@@ -91,7 +195,7 @@ impl FileBinding {
         {
             use std::os::unix::fs::MetadataExt;
             if md.nlink() != 1 {
-                return Err(bad());
+                return Err(self.owner.refuse(Rule::Linked));
             }
             Ok((
                 json_digest(&json!({"device":md.dev(),"inode":md.ino(),"created":created})),
@@ -109,12 +213,14 @@ impl FileBinding {
             if unsafe { GetFileInformationByHandle(self.guard.as_raw_handle(), info.as_mut_ptr()) }
                 == 0
             {
-                return Err(bad());
+                return Err(self
+                    .owner
+                    .refuse(Rule::Inaccessible(std::io::Error::last_os_error())));
             }
             // SAFETY: successful API call initialized the output.
             let info = unsafe { info.assume_init() };
             if info.nNumberOfLinks != 1 {
-                return Err(bad());
+                return Err(self.owner.refuse(Rule::Linked));
             }
             Ok((
                 json_digest(
@@ -126,7 +232,7 @@ impl FileBinding {
         #[cfg(not(any(unix, windows)))]
         {
             let _ = created;
-            Err(bad())
+            Err(self.owner.refuse(Rule::Unsupported))
         }
     }
     /// SQLite's own VFS checks the *open database*, not just a pathname stat.
@@ -147,7 +253,7 @@ impl FileBinding {
                 )
             };
             if result != rusqlite::ffi::SQLITE_OK || moved != 0 {
-                return Err(bad());
+                return Err(self.owner.refuse(Rule::Moved));
             }
         }
         #[cfg(not(unix))]

@@ -1795,3 +1795,109 @@ fn unresolved_connection_secrets_name_the_secret_role_and_cause() {
         "{d}"
     );
 }
+
+/// #422 (sq-14, cli-14): DB_FILE_IDENTITY names the role and its secret,
+/// as the manifest names it, and the rule the path broke, never the path;
+/// following its advice resolves it.
+#[test]
+fn file_identity_refusals_name_the_secret_and_the_rule() {
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE main.t(id INTEGER);");
+    let root = f.target_path.parent().unwrap().to_path_buf();
+    // The first DB_FILE_IDENTITY of `command` with `secret` set to `value`,
+    // which the report never shows.
+    let refused = |command: &str, secret: &'static str, value: std::path::PathBuf| {
+        let shown = value.to_str().unwrap().to_owned();
+        let r = report_with(&f, command, &move |c| {
+            c.env(secret, &value);
+        });
+        assert!(!r.to_string().contains(&shown), "{r}");
+        diagnostic(&r, "DB_FILE_IDENTITY").clone()
+    };
+    let passes = |command: &str| {
+        let r = report_with(&f, command, &|_| {});
+        assert_eq!(r["outcome"], "pass", "{r}");
+    };
+    let says = |d: &Value, message: &[&str], next_action: &str| {
+        for fragment in message {
+            assert!(
+                d["message"].as_str().unwrap().contains(fragment),
+                "{fragment:?} missing: {d}"
+            );
+        }
+        assert!(
+            d["next_action"].as_str().unwrap().contains(next_action),
+            "{next_action:?} missing: {d}"
+        );
+    };
+
+    // A relative scratch path, the most common first-run mistake.
+    let d = refused("plan", "DB_SCRATCH", "relative-replay.sqlite".into());
+    says(
+        &d,
+        &["Scratch connection secret DB_SCRATCH", "a relative path"],
+        "Set DB_SCRATCH to the file's absolute path",
+    );
+    passes("plan");
+
+    // A target file that does not exist yet.
+    let missing = root.join("missing.sqlite");
+    let d = refused("status", "DB_TARGET", missing.clone());
+    says(
+        &d,
+        &["Target connection secret DB_TARGET", "does not exist"],
+        "touch",
+    );
+    std::fs::File::create(&missing).unwrap();
+    let r = report_with(&f, "status", &|c| {
+        c.env("DB_TARGET", &missing);
+    });
+    assert_eq!(r["outcome"], "pass", "{r}");
+    std::fs::remove_file(&missing).unwrap();
+
+    // A directory.
+    let d = refused("status", "DB_TARGET", root.join("migrations"));
+    says(
+        &d,
+        &["Target connection secret DB_TARGET", "not a regular file"],
+        "regular SQLite file",
+    );
+
+    // A second hard link to the target.
+    let alias = root.join("alias.sqlite");
+    std::fs::hard_link(&f.target_path, &alias).unwrap();
+    let r = report_with(&f, "status", &|_| {});
+    let d = diagnostic(&r, "DB_FILE_IDENTITY");
+    says(
+        d,
+        &[
+            "Target connection secret DB_TARGET",
+            "more than one hard link",
+        ],
+        "single link",
+    );
+    std::fs::remove_file(&alias).unwrap();
+    passes("status");
+
+    #[cfg(unix)]
+    {
+        // A link to the file, and a path through a linked directory.
+        let link = root.join("link.sqlite");
+        std::os::unix::fs::symlink(&f.target_path, &link).unwrap();
+        let d = refused("status", "DB_TARGET", link);
+        says(
+            &d,
+            &["Target connection secret DB_TARGET", "symbolic link"],
+            "pwd -P",
+        );
+        let linked = root.join("linked-dir");
+        std::os::unix::fs::symlink(&root, &linked).unwrap();
+        let d = refused("plan", "DB_SCRATCH", linked.join("scratch.sqlite"));
+        says(
+            &d,
+            &["Scratch connection secret DB_SCRATCH", "symbolic link"],
+            "pwd -P",
+        );
+        passes("plan");
+    }
+}
