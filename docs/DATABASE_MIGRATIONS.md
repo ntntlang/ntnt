@@ -717,7 +717,10 @@ ntnt db verify --database app --target development --json
 ```
 
 `--adopt-through` is a positive **migration ID**, not a file count. It is accepted
-only on `plan`, not status, verify, migrate or alongside `--against`. The selected
+only on `plan`, not status, verify, migrate or alongside `--against`. Each
+subcommand's `--help` lists only the flags it takes; one it does not take (such as
+`--adopt-through` on `status`, or `--against` on `migrate` and `reconcile`, which run
+only the plan given with `--plan`) fails with `DB_CONFIG` naming that flag. The selected
 ID must exist in captured source. Gaps in IDs remain valid. Supply the expected SQL
 history/baseline yourself and review it; the tool does not dump the live target and
 then declare that target to be its own reference. The whole selected prefix must

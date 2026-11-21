@@ -120,29 +120,29 @@ pub enum DbCommand {
     /// Create the next numbered SQL migration file (no secrets or connection needed).
     New(NewArgs),
     /// Inspect catalog, migration history, pending changes and drift (read-only target).
-    Status(Options),
+    Status(InspectArgs),
     /// Capture a target-bound, non-authorizing plan (never applies target SQL).
-    Plan(Options),
+    Plan(PlanArgs),
     /// Verify the applied catalog/history; never runs application checks or repairs.
-    Verify(Options),
+    Verify(InspectArgs),
     /// Execute an externally authorized exact plan, one transaction per migration.
     Migrate {
         #[command(flatten)]
-        options: Options,
+        options: ExecuteArgs,
         #[arg(long)]
         plan: PathBuf,
     },
     /// Resolve an interrupted non-transactional migration under the same approved plan.
     Reconcile {
         #[command(flatten)]
-        options: Options,
+        options: ExecuteArgs,
         #[arg(long)]
         plan: PathBuf,
     },
 }
 #[derive(clap::Args)]
-/// Explicit selection and output controls shared by database inspection commands.
-pub struct Options {
+/// Explicit selection and output controls shared by every command that reads a target.
+pub struct Selection {
     #[arg(long, default_value = "ntnt.toml")]
     pub manifest: PathBuf,
     /// Logical database name; optional only when exactly one is declared.
@@ -158,12 +158,108 @@ pub struct Options {
     /// Restrict displayed catalog objects, not verification or plan identity.
     #[arg(long)]
     pub object: Option<String>,
+}
+// Each command's --help lists only the flags it takes (#432). A flag it does
+// not take is still parsed, hidden, so the command line keeps its JSON
+// refusal naming that flag (`refused_flag`).
+#[derive(clap::Args)]
+/// status and verify: inspect, optionally revalidating a saved plan.
+pub struct InspectArgs {
+    #[command(flatten)]
+    pub selection: Selection,
+    /// Revalidate a previously saved plan's source/target/base binding (no execution).
+    #[arg(long)]
+    pub against: Option<PathBuf>,
+    #[arg(long, hide = true, value_parser = clap::value_parser!(u64).range(1..))]
+    pub adopt_through: Option<u64>,
+}
+#[derive(clap::Args)]
+/// plan: capture a plan, or revalidate a saved one.
+pub struct PlanArgs {
+    #[command(flatten)]
+    pub selection: Selection,
     /// Revalidate a previously saved plan's source/target/base binding (no execution).
     #[arg(long)]
     pub against: Option<PathBuf>,
     /// Plan explicit adoption through this migration ID; never execute its old SQL.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub adopt_through: Option<u64>,
+}
+#[derive(clap::Args)]
+/// migrate and reconcile: run the saved plan given with --plan.
+pub struct ExecuteArgs {
+    #[command(flatten)]
+    pub selection: Selection,
+    #[arg(long, hide = true)]
+    pub against: Option<PathBuf>,
+    #[arg(long, hide = true, value_parser = clap::value_parser!(u64).range(1..))]
+    pub adopt_through: Option<u64>,
+}
+/// One command's selection and flags, as `run` uses them.
+struct Options {
+    manifest: PathBuf,
+    database: Option<String>,
+    target: String,
+    json: bool,
+    out: Option<PathBuf>,
+    object: Option<String>,
+    against: Option<PathBuf>,
+    adopt_through: Option<u64>,
+}
+impl Options {
+    fn new(selection: Selection, against: Option<PathBuf>, adopt_through: Option<u64>) -> Self {
+        let Selection {
+            manifest,
+            database,
+            target,
+            json,
+            out,
+            object,
+        } = selection;
+        Self {
+            manifest,
+            database,
+            target,
+            json,
+            out,
+            object,
+            against,
+            adopt_through,
+        }
+    }
+}
+/// A flag `command` does not take, refused naming that flag (#432).
+fn refused_flag(command: &str, options: &Options) -> Option<Diagnostic> {
+    let (against, adopt) = (options.against.is_some(), options.adopt_through.is_some());
+    let (message, next_action) = match command {
+        "migrate" | "reconcile" => match (against, adopt) {
+            (true, true) => (
+                format!("{command} does not take --against or --adopt-through: it runs only the saved plan given with --plan, which it revalidates itself."),
+                format!("Drop both and rerun `ntnt db {command} --plan <file>` with the reviewed plan."),
+            ),
+            (true, false) => (
+                format!("{command} does not take --against: it runs the saved plan given with --plan and revalidates that plan itself."),
+                format!("Drop --against and rerun `ntnt db {command} --plan <file>` with the reviewed plan; `ntnt db verify --against <file>` checks a saved plan without running it."),
+            ),
+            (false, true) => (
+                format!("{command} does not take --adopt-through: an adoption is planned by `ntnt db plan --adopt-through <id> --out <file>`."),
+                format!("Drop --adopt-through and rerun `ntnt db {command} --plan <file>` with the adoption plan that command saved."),
+            ),
+            (false, false) => return None,
+        },
+        "plan" if against && adopt => (
+            "plan takes --adopt-through or --against, not both: --adopt-through plans a new adoption, and --against revalidates a saved plan.".to_owned(),
+            "Pass --adopt-through <id> to plan the adoption, or --against <file> alone to revalidate the saved adoption plan.".to_owned(),
+        ),
+        "status" | "verify" if adopt => (
+            format!("{command} does not take --adopt-through: only `ntnt db plan --adopt-through <id>` plans an adoption."),
+            format!("Drop --adopt-through from {command}, or plan the adoption with `ntnt db plan --adopt-through <id>`."),
+        ),
+        _ => return None,
+    };
+    let mut d = Diagnostic::new("DB_CONFIG", &message);
+    d.next_action = next_action;
+    Some(d)
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -447,12 +543,33 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
     let (command, options, execution_plan) = match args.command {
         DbCommand::Init(args) => return scaffold::init(&args),
         DbCommand::New(args) => return scaffold::new(&args),
-        DbCommand::Status(o) => ("status", o, None),
-        DbCommand::Plan(o) => ("plan", o, None),
-        DbCommand::Verify(o) => ("verify", o, None),
-        DbCommand::Migrate { options, plan } => ("migrate", options, Some(plan)),
-        DbCommand::Reconcile { options, plan } => ("reconcile", options, Some(plan)),
+        DbCommand::Status(a) => (
+            "status",
+            Options::new(a.selection, a.against, a.adopt_through),
+            None,
+        ),
+        DbCommand::Plan(a) => (
+            "plan",
+            Options::new(a.selection, a.against, a.adopt_through),
+            None,
+        ),
+        DbCommand::Verify(a) => (
+            "verify",
+            Options::new(a.selection, a.against, a.adopt_through),
+            None,
+        ),
+        DbCommand::Migrate { options, plan } => (
+            "migrate",
+            Options::new(options.selection, options.against, options.adopt_through),
+            Some(plan),
+        ),
+        DbCommand::Reconcile { options, plan } => (
+            "reconcile",
+            Options::new(options.selection, options.against, options.adopt_through),
+            Some(plan),
+        ),
     };
+    let executes = execution_plan.is_some();
     // Capture a review artifact before database I/O; never reopen it later.
     let prior = options.against.as_ref().map(|p| {
         inventory::file_bytes(inventory::Input::Plan(p, "--against")).and_then(|b| {
@@ -500,11 +617,8 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             "observed_at":chrono::Utc::now().to_rfc3339(),"outcome":"unknown","diagnostics":[],
             "progress":[],"assertions":{"outcome":"not_run","executed":0}});
         let work = inputs.and_then(|inputs| {
-            if options.against.is_some() || options.adopt_through.is_some() {
-                return Err(Diagnostic::new(
-                    "DB_CONFIG",
-                    "migrate and reconcile use only --plan; --adopt-through belongs to plan.",
-                ));
+            if let Some(refused) = refused_flag(command, &options) {
+                return Err(refused);
             }
             if let Some(d) = refused_output.clone() {
                 return Err(d);
@@ -546,14 +660,14 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
     } else {
         inputs
             .and_then(|inputs| {
-                if options.adopt_through.is_some() && (command!="plan" || options.against.is_some()) {
-                    return Err(Diagnostic::new("DB_CONFIG","--adopt-through is only for an explicit plan, not status/verify/--against."));
+                if let Some(refused) = refused_flag(command, &options) {
+                    return Err(refused);
                 }
                 if let Some(d) = refused_output.clone() {
                     return Err(d);
                 }
-                let mut adopt_through=options.adopt_through;
-                if let Some(prior)=&prior {
+                let mut adopt_through = options.adopt_through;
+                if let Some(prior) = &prior {
                     // An unreadable --against file is reported as such (#422).
                     let saved = prior.as_ref().map_err(Clone::clone)?;
                     stale_against = execution::validate_named(&inputs, saved, files).err();
@@ -561,9 +675,14 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                         // Reuse the pure descriptor validator, never approval or
                         // the writer path. The explicit CLI target still owns
                         // all connection selection and inspection stays readonly.
-                        execution::validate(&inputs,saved)?;
-                        if let Some(action)=adoption::Adoption::from_plan(&inputs,saved)? {
-                            adopt_through=Some(action.through_id.parse().map_err(|_|Diagnostic::new("DB_PLAN_STALE","Invalid adoption prefix ID in saved artifact."))?);
+                        execution::validate(&inputs, saved)?;
+                        if let Some(action) = adoption::Adoption::from_plan(&inputs, saved)? {
+                            adopt_through = Some(action.through_id.parse().map_err(|_| {
+                                Diagnostic::new(
+                                    "DB_PLAN_STALE",
+                                    "Invalid adoption prefix ID in saved artifact.",
+                                )
+                            })?);
                         }
                     }
                 }
@@ -574,7 +693,7 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             })
             .unwrap_or_else(|d| report::failure(command, d))
     };
-    if let Some(prior) = prior {
+    if let Some(prior) = prior.filter(|_| !executes) {
         // What makes the saved plan not match, naming the binding (#423): a
         // capture error, a check that needed no I/O, or what was observed.
         let problem = match &prior {

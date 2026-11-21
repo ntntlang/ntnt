@@ -435,6 +435,141 @@ fn time_limits_are_validated_before_connecting() {
     }
 }
 
+/// #432 (cli-08): each subcommand's --help lists only the flags it accepts.
+#[test]
+fn each_subcommand_help_lists_only_the_flags_it_accepts() {
+    let help = |command: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["db", command, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let common = [
+        "--manifest",
+        "--database",
+        "--target",
+        "--json",
+        "--out",
+        "--object",
+    ];
+    for (command, accepted, refused) in [
+        (
+            "status",
+            &["--against"][..],
+            &["--adopt-through", "--plan", "--fail-on-pending"][..],
+        ),
+        (
+            "plan",
+            &["--against", "--adopt-through"],
+            &["--plan", "--fail-on-pending"],
+        ),
+        ("verify", &["--against"], &["--adopt-through", "--plan"]),
+        (
+            "migrate",
+            &["--plan"],
+            &["--against", "--adopt-through", "--fail-on-pending"],
+        ),
+        (
+            "reconcile",
+            &["--plan"],
+            &["--against", "--adopt-through", "--fail-on-pending"],
+        ),
+    ] {
+        let text = help(command);
+        for flag in common.iter().chain(accepted) {
+            assert!(
+                text.contains(&format!("{flag} ")) || text.contains(&format!("{flag}\n")),
+                "{command} --help lacks {flag}:\n{text}"
+            );
+        }
+        for flag in refused {
+            assert!(
+                !text.contains(flag),
+                "{command} --help lists {flag}:\n{text}"
+            );
+        }
+    }
+}
+
+/// #432 (cli-08): a flag a command does not take is refused naming that flag,
+/// and such command lines still parse, so the refusal stays a JSON report.
+#[test]
+fn a_refused_flag_is_named() {
+    let root = project();
+    std::fs::write(root.path().join("plan.json"), "{}").unwrap();
+    for (args, named, not_named) in [
+        (
+            &["migrate", "--plan", "plan.json", "--against", "plan.json"][..],
+            "--against",
+            "--adopt-through",
+        ),
+        (
+            &["reconcile", "--plan", "plan.json", "--against", "plan.json"],
+            "--against",
+            "--adopt-through",
+        ),
+        (
+            &["migrate", "--plan", "plan.json", "--adopt-through", "1"],
+            "--adopt-through",
+            "--against",
+        ),
+        (
+            &["status", "--adopt-through", "1"],
+            "--adopt-through",
+            "--against",
+        ),
+        (
+            &["verify", "--adopt-through", "1"],
+            "--adopt-through",
+            "--against",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .arg("db")
+            .args(args)
+            .args(["--target", "local", "--json"])
+            .env_remove("DB_TARGET")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{args:?}: {}", String::from_utf8_lossy(&output.stderr)));
+        let diagnostics = report["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), 1, "{args:?}: {report}");
+        let d = &diagnostics[0];
+        assert_eq!(d["code"], "DB_CONFIG", "{args:?}: {d}");
+        let message = d["message"].as_str().unwrap();
+        assert!(
+            message.contains(named) && message.contains(args[0]),
+            "{args:?}: {d}"
+        );
+        assert!(!message.contains(not_named), "{args:?}: {d}");
+    }
+    // plan takes either, not both.
+    let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args([
+            "db",
+            "plan",
+            "--adopt-through",
+            "1",
+            "--against",
+            "plan.json",
+        ])
+        .args(["--target", "local", "--json"])
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let message = report["diagnostics"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("--adopt-through") && message.contains("--against"),
+        "{report}"
+    );
+}
+
 #[test]
 fn original_source_migrate_command_remains_available() {
     let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
