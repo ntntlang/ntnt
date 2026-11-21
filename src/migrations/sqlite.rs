@@ -1233,6 +1233,35 @@ fn differences(target: &Identity, scratch: &Identity) -> String {
     differences.join("; ")
 }
 
+/// Give an empty scratch the target's encoding, page size and auto-vacuum
+/// where they differ (#425), and say whether any did. Only values SQLite
+/// itself can report are set; SQLite ignores one it can no longer change.
+fn adopt_layout(conn: &Connection, scratch: &Value, target: &Value) -> Result<bool> {
+    let mut pragmas = Vec::new();
+    if scratch["encoding"] != target["encoding"] {
+        if let Some(encoding @ ("UTF-8" | "UTF-16le" | "UTF-16be")) = target["encoding"].as_str() {
+            pragmas.push(format!("PRAGMA encoding='{encoding}'"));
+        }
+    }
+    if scratch["page_size"] != target["page_size"] {
+        if let Some(size) = target["page_size"]
+            .as_u64()
+            .filter(|size| (512..=65536).contains(size) && size.is_power_of_two())
+        {
+            pragmas.push(format!("PRAGMA main.page_size={size}"));
+        }
+    }
+    if scratch["auto_vacuum"] != target["auto_vacuum"] {
+        if let Some(mode) = target["auto_vacuum"].as_u64().filter(|mode| *mode <= 2) {
+            pragmas.push(format!("PRAGMA main.auto_vacuum={mode}"));
+        }
+    }
+    for pragma in &pragmas {
+        conn.execute_batch(pragma).map_err(sql_error)?;
+    }
+    Ok(!pragmas.is_empty())
+}
+
 /// A narrow, explicit mode for rebuilding one existing table. It may change that
 /// table's column/constraint definition, but not silently retire other tables or
 /// named dependent objects. Row counts are a guard, not proof of business meaning.
@@ -1517,6 +1546,16 @@ impl Sqlite {
             if !empty(s)? {
                 return Err(not_empty());
             }
+            // The empty scratch takes the target's encoding, page size and
+            // auto-vacuum where SQLite can still set them (#425), and then,
+            // below, its journal mode: a file made with `touch` takes all
+            // three. SQLite fixes the page size and auto-vacuum when the file
+            // gets its first page, and the encoding when it first holds a
+            // table (replay's tables roll back), and it ignores a setting it
+            // can no longer change, so the settings are compared again below.
+            if adopt_layout(&s.conn, &identity.settings, &target.settings)? {
+                identity = s.identity()?;
+            }
             // `std/db/sqlite` connect() puts every application database in WAL
             // mode, and a scratch made with `touch` is not. The scratch is
             // disposable and empty, so it takes the target's journal mode.
@@ -1530,13 +1569,15 @@ impl Sqlite {
                 }
             }
             if identity.version != target.version || identity.settings != target.settings {
-                return Err(Diagnostic::new(
+                let mut d = Diagnostic::new(
                     "DB_SCRATCH_MISMATCH",
                     &format!(
                         "SQLite scratch settings differ from the deployment file: {}.",
                         differences(&target, &identity)
                     ),
-                ));
+                );
+                d.next_action = format!("Replace the scratch file that {} names with a new empty file: delete it, then create an empty file at the same path, for example with `touch` (a 0-byte file is a valid SQLite database). ntnt gives an empty scratch the target's encoding, page size, auto-vacuum and journal mode before its first write. Do not reset the target.", s.file.owner().secret);
+                return Err(d);
             }
             s.conn.execute_batch("BEGIN IMMEDIATE").map_err(sql_error)?;
             if !empty(s)? {

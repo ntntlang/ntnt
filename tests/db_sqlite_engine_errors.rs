@@ -449,3 +449,63 @@ fn sqlite_busy_inspection_and_replay_name_the_file() {
     let r = f.command("plan", &[]);
     assert_eq!(r["outcome"], "pass", "{r}");
 }
+/// An empty (0-byte) scratch takes the target's page size, encoding and
+/// auto-vacuum before its first write, as it takes its journal mode (#425
+/// sq-17).
+#[test]
+fn sqlite_empty_scratch_takes_the_target_file_settings() {
+    let f = Fixture::new();
+    f.target()
+        .execute_batch("PRAGMA encoding='UTF-16le'; PRAGMA page_size=8192; PRAGMA auto_vacuum=INCREMENTAL; CREATE TABLE _p(a); DROP TABLE _p; PRAGMA journal_mode=WAL;")
+        .unwrap();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT DEFAULT 'a');",
+    );
+    let p = f.plan("initial.json");
+    // Replay rolls back, so the scratch file is empty again afterwards; the
+    // report gives the settings replay ran with.
+    let scratch = &p["scratch"]["identity"]["settings"];
+    assert_eq!(scratch["encoding"], "UTF-16le", "{p}");
+    assert_eq!(scratch["page_size"], 8192, "{p}");
+    assert_eq!(scratch["auto_vacuum"], 2, "{p}");
+    assert_eq!(scratch["journal_mode"], "wal", "{p}");
+    let r = f.apply("initial.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify", &[])["outcome"], "pass");
+}
+
+/// A scratch that already has pages cannot change them: DB_SCRATCH_MISMATCH
+/// says how to make a matching one, and doing so works (#425 sq-17).
+#[test]
+fn sqlite_scratch_mismatch_says_how_to_make_a_matching_scratch() {
+    let f = Fixture::new();
+    f.target()
+        .execute_batch("PRAGMA page_size=8192; CREATE TABLE _p(a); DROP TABLE _p;")
+        .unwrap();
+    rusqlite::Connection::open(&f.scratch_path)
+        .unwrap()
+        .execute_batch("CREATE TABLE _p(a); DROP TABLE _p;")
+        .unwrap();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY);",
+    );
+    let r = f.command("plan", &[]);
+    let d = diagnostic(&r, "DB_SCRATCH_MISMATCH");
+    assert_eq!(
+        message(d),
+        "SQLite scratch settings differ from the deployment file: page_size: target 8192, scratch 4096.",
+        "{r}"
+    );
+    assert!(
+        next_action(d)
+            .starts_with("Replace the scratch file that DB_SCRATCH names with a new empty file"),
+        "{r}"
+    );
+    // Following it: a new empty file at the same path.
+    std::fs::remove_file(&f.scratch_path).unwrap();
+    std::fs::File::create(&f.scratch_path).unwrap();
+    let r = f.command("plan", &[]);
+    assert_eq!(r["outcome"], "pass", "{r}");
+}
