@@ -1,7 +1,7 @@
 use super::{Diagnostic, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -328,6 +328,182 @@ pub(crate) struct CapturedInputs {
 fn invalid(message: &str) -> Diagnostic {
     Diagnostic::new("DB_CONFIG", message)
 }
+
+// What to do about a refused entry of the migrations directory (#422). Each
+// is about the directory, not the manifest.
+const MOVE_OR_RENAME: &str = "Move the named entry out of the migrations directory, or rename it to <positive-id>_<name>.sql for a migration or to the .toml sidecar name of an existing migration. Names use ASCII letters, digits, underscores or hyphens and a lowercase suffix; the directory holds nothing else. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const REPLACE_ENTRY: &str = "Replace the named entry with a regular file that has a single link and at most 1 MiB (for a link, a copy of the file it points to), or move it out of the migrations directory. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const RENUMBER: &str = "Rename whichever of the two named migrations has not been applied anywhere to an unused ID above the highest in the migrations directory (`ntnt db new <name>` takes the next free ID); never renumber an applied migration.";
+const SAVE_AS_UTF8: &str = "Save the named file as UTF-8 text; the migrations directory holds only UTF-8 migrations and sidecars.";
+const FIX_SIDECAR: &str = "Correct the named sidecar at the reported position. A sidecar holds only intent_ids = [\"<id>\", ...], [requires] and [ensures] tables that map check names to SQL strings, and, for SQLite, sqlite_rebuild = \"<table>\"; a migration without metadata needs no sidecar. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const FIX_INTENT_IDS: &str =
+    "Give each intent_ids entry in the named sidecar 1-128 characters and no control characters.";
+const FIX_CHECKS: &str = "Rewrite each named check in the sidecar as one schema-qualified SELECT within the documented check subset, or remove it. Check names are simple ASCII identifiers, each check is at most 64 KiB and a migration has at most 64. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const FIX_REBUILD: &str = "Remove sqlite_rebuild from the named sidecar, or set it to the one ordinary table (not a sqlite_ table) that the SQLite migration rebuilds; PostgreSQL migrations take no sqlite_rebuild. See docs/DATABASE_MIGRATIONS.md#sqlite-native-files-and-rebuilds.";
+const ORPHAN: &str = "Add the matching .sql migration to the migrations directory, rename the sidecar to the stem of the migration it belongs to, or remove it.";
+const DIRECTORY_LIMITS: &str = "Remove files that do not belong to this database's history from the migrations directory: capture reads at most 1,024 migrations, 2,048 files and 16 MiB. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const UNLISTABLE: &str =
+    "Make the migrations directory readable and listable by this user, then rerun.";
+
+/// Refuse an entry of the migrations directory (or the directory itself),
+/// naming it in the message and in `source` with advice about the directory.
+fn refuse_entry(code: &str, entry: &str, problem: &str, next_action: &str) -> Diagnostic {
+    let mut d = Diagnostic::new(code, &format!("{entry}: {problem}"));
+    d.source = Some(entry.to_owned());
+    d.next_action = next_action.to_owned();
+    d
+}
+/// An entry of the migrations directory `dir` as diagnostics name it, relative
+/// to the project: `migrations/0001_initial.sql`. A name that is not UTF-8 or
+/// holds a character a terminal could interpret is quoted and escaped.
+fn entry_label(dir: &str, name: &std::ffi::OsStr) -> String {
+    match name.to_str() {
+        Some(plain) if plain.escape_debug().eq(plain.chars()) => format!("{dir}/{plain}"),
+        _ => format!("{dir}/{name:?}"),
+    }
+}
+fn shown_entry(dir: &str, name: &str) -> String {
+    entry_label(dir, std::ffi::OsStr::new(name))
+}
+/// A check name or metadata key as diagnostics show it: as written when it is
+/// a simple name, otherwise quoted and escaped, at most 64 characters.
+fn shown_key(key: &str) -> String {
+    if !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return key.to_owned();
+    }
+    let mut bounded: String = key.chars().take(64).collect();
+    if bounded.len() < key.len() {
+        bounded.push('…');
+    }
+    format!("{bounded:?}")
+}
+/// The line and column (1-based, in characters) just after `text`.
+fn line_column(text: &str) -> (usize, usize) {
+    let line = 1 + text.matches('\n').count();
+    let column = 1 + text.rsplit('\n').next().unwrap_or_default().chars().count();
+    (line, column)
+}
+/// The position of the first byte of `bytes` that is not UTF-8.
+fn invalid_utf8_position(bytes: &[u8], error: std::str::Utf8Error) -> String {
+    let valid = std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default();
+    let (line, column) = line_column(valid);
+    format!("line {line}, column {column}")
+}
+/// The position of byte `offset` of `text` as toml's own messages give it:
+/// the end of the input is one column past its last character.
+fn toml_position(text: &str, offset: usize) -> String {
+    let offset = (0..=offset.min(text.len()))
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or_default();
+    let (line, column) = match text[..offset].char_indices().last() {
+        Some((last, _)) if offset == text.len() => {
+            let (line, column) = line_column(&text[..last]);
+            (line, column + 1)
+        }
+        _ => line_column(&text[..offset]),
+    };
+    format!("line {line}, column {column}")
+}
+/// Parse a sidecar. A refusal names the sidecar, the position and what is
+/// wrong, never what the file holds.
+fn parse_metadata(sidecar: &str, bytes: &[u8]) -> Result<Metadata> {
+    let refuse =
+        |problem: String| refuse_entry("DB_METADATA_UNSUPPORTED", sidecar, &problem, FIX_SIDECAR);
+    let text = std::str::from_utf8(bytes).map_err(|error| {
+        refuse(format!(
+            "metadata must be UTF-8; the first other byte is at {}.",
+            invalid_utf8_position(bytes, error)
+        ))
+    })?;
+    let at = |span: Option<std::ops::Range<usize>>| {
+        toml_position(text, span.map_or(0, |span| span.start))
+    };
+    toml::from_str::<Metadata>(text).map_err(|error| match text.parse::<toml::Table>() {
+        Err(syntax) => refuse(format!("not valid TOML at {}.", at(syntax.span()))),
+        Ok(table) => refuse(format!(
+            "unsupported metadata at {}: {}.",
+            at(error.span()),
+            metadata_problems(&table)
+        )),
+    })
+}
+/// What a sidecar that is valid TOML holds besides the supported fields.
+fn metadata_problems(table: &toml::Table) -> String {
+    let mut problems = Vec::new();
+    for (key, value) in table {
+        let (fits, expected) = match key.as_str() {
+            "intent_ids" => (
+                value
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().all(toml::Value::is_str)),
+                "intent_ids must be an array of strings".to_owned(),
+            ),
+            phase @ ("requires" | "ensures") => (
+                value
+                    .as_table()
+                    .is_some_and(|checks| checks.values().all(toml::Value::is_str)),
+                format!("[{phase}] must map each check name to an SQL string"),
+            ),
+            "sqlite_rebuild" => (
+                value.is_str(),
+                "sqlite_rebuild must be a table name".to_owned(),
+            ),
+            other => (false, format!("unknown key `{}`", shown_key(other))),
+        };
+        if !fits {
+            problems.push(expected);
+        }
+    }
+    if problems.is_empty() {
+        "the fields do not match intent_ids, requires, ensures and sqlite_rebuild".into()
+    } else {
+        problems.join("; ")
+    }
+}
+/// What is wrong with checks outside the supported subset, naming each (with
+/// its phase when there are several), or `None` when every check is supported.
+fn unsupported_checks(
+    phases: &[(&str, &BTreeMap<String, String>)],
+    schema: &str,
+) -> Option<String> {
+    let several = phases.len() > 1;
+    let count: usize = phases.iter().map(|(_, checks)| checks.len()).sum();
+    if count > 64 {
+        return Some(format!("{count} checks; at most 64 are allowed."));
+    }
+    let named: Vec<String> = phases
+        .iter()
+        .flat_map(|(phase, checks)| {
+            checks
+                .iter()
+                .filter(|(name, sql)| {
+                    !identifier(name)
+                        || sql.len() > 65536
+                        || !super::analysis::contract_supported(sql, schema)
+                })
+                .map(move |(name, _)| match several {
+                    true => format!("{} ([{phase}])", shown_key(name)),
+                    false => shown_key(name),
+                })
+        })
+        .collect();
+    match named.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "check {one} is outside the supported check subset; unsupported SQL is never executed."
+        )),
+        many => Some(format!(
+            "checks {} are outside the supported check subset; unsupported SQL is never executed.",
+            many.join(", ")
+        )),
+    }
+}
 pub(crate) fn identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
@@ -520,14 +696,12 @@ impl CapturedInputs {
                 .is_some();
             limits.validate(&database_name, &config.engine, declares_wait)?;
         }
-        if config.adoption_checks.len() > 64
-            || config.adoption_checks.iter().any(|(name, sql)| {
-                !identifier(name)
-                    || sql.len() > 65536
-                    || !super::analysis::contract_supported(sql, &config.schema)
-            })
-        {
-            return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED", "Adoption checks require bounded names and the supported schema-qualified SELECT expression subset."));
+        let adoption_checks = [("adoption_checks", &config.adoption_checks)];
+        if let Some(problem) = unsupported_checks(&adoption_checks, &config.schema) {
+            return Err(Diagnostic::new(
+                "DB_CHECK_UNSUPPORTED",
+                &format!("[databases.{database_name}.adoption_checks]: {problem}"),
+            ));
         }
         Ok((database_name, config))
     }
@@ -612,66 +786,116 @@ impl CapturedInputs {
         let (database_name, config) = Self::select(&document, database)?;
         let endpoint = Self::endpoint(&config, target)?;
         let dir = Self::migrations_dir(manifest, &config)?;
+        // Refusals name entries relative to the project, through the
+        // directory as the manifest names it (#422).
+        let shown = config.migrations_dir.as_str();
+        let unlistable = |error: std::io::Error| {
+            refuse_entry(
+                "DB_CONFIG",
+                shown,
+                &format!("cannot list the migrations directory ({error})."),
+                UNLISTABLE,
+            )
+        };
         let mut sources = BTreeMap::new();
         let mut total_bytes = 0usize;
-        for entry in
-            std::fs::read_dir(&dir).map_err(|_| invalid("Cannot enumerate migration directory."))?
-        {
-            let entry = entry.map_err(|_| invalid("Cannot enumerate migration directory."))?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| invalid("Migration filenames must be UTF-8."))?;
+        for entry in std::fs::read_dir(&dir).map_err(unlistable)? {
+            let entry = entry.map_err(unlistable)?;
+            let file_name = entry.file_name();
+            let label = entry_label(shown, &file_name);
+            let name = file_name.into_string().map_err(|_| {
+                refuse_entry(
+                    "DB_CONFIG",
+                    &label,
+                    "migration file names must be UTF-8.",
+                    MOVE_OR_RENAME,
+                )
+            })?;
             if !(name.ends_with(".sql") || name.ends_with(".toml")) {
-                return Err(invalid(
-                    "Migration directory accepts only SQL and matching TOML sidecars.",
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    &label,
+                    "the migrations directory holds only <id>_<name>.sql migrations and their matching .toml sidecars.",
+                    MOVE_OR_RENAME,
                 ));
             }
             if sources.len() >= 2048 {
-                return Err(invalid(
-                    "Too many migration files (maximum 1024 SQL/sidecar pairs).",
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    shown,
+                    "more than 2,048 files (at most 1,024 migrations and their sidecars).",
+                    DIRECTORY_LIMITS,
                 ));
             }
-            let bytes = file_bytes(&entry.path())?;
+            let bytes = file_bytes(&entry.path()).map_err(|d| {
+                refuse_entry(
+                    &d.code,
+                    &label,
+                    "cannot capture a regular, unlinked input file (maximum 1 MiB).",
+                    REPLACE_ENTRY,
+                )
+            })?;
             total_bytes += bytes.len();
             if total_bytes > 16 * 1_048_576 {
-                return Err(invalid("Migration inventory exceeds 16 MiB."));
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    shown,
+                    "the migration files exceed 16 MiB in total.",
+                    DIRECTORY_LIMITS,
+                ));
             }
             sources.insert(name, bytes);
         }
-        let mut ids = BTreeSet::new();
+        let mut ids = BTreeMap::new();
         let mut migrations = Vec::new();
         for (name, sql_bytes) in sources.iter().filter(|(name, _)| name.ends_with(".sql")) {
+            let label = shown_entry(shown, name);
+            let misnamed =
+                |problem: &str| refuse_entry("DB_CONFIG", &label, problem, MOVE_OR_RENAME);
             let stem = name.strip_suffix(".sql").unwrap();
             let (number, description) = stem
                 .split_once('_')
-                .ok_or_else(|| invalid("Use <numeric-id>_<name>.sql filenames."))?;
+                .filter(|(_, description)| !description.is_empty())
+                .ok_or_else(|| misnamed("migration file names are <numeric-id>_<name>.sql."))?;
             let id = number
                 .parse::<u64>()
                 .ok()
                 .filter(|v| *v > 0 && number.bytes().all(|b| b.is_ascii_digit()))
-                .ok_or_else(|| invalid("Migration ID must be a positive decimal integer."))?;
-            if description.is_empty()
-                || !description
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+                .ok_or_else(|| misnamed("the migration ID must be a positive decimal integer."))?;
+            if !description
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
             {
-                return Err(invalid(
-                    "Migration names use ASCII letters, numbers, underscores or hyphens.",
+                return Err(misnamed(
+                    "migration names use ASCII letters, digits, underscores or hyphens.",
                 ));
             }
-            if !ids.insert(id) {
-                return Err(Diagnostic::new(
+            if let Some(first) = ids.insert(id, name) {
+                return Err(refuse_entry(
                     "DB_DUPLICATE_ID",
-                    "Duplicate numeric migration ID.",
+                    &label,
+                    &format!(
+                        "migration ID {id} is also the ID of {}.",
+                        shown_entry(shown, first)
+                    ),
+                    RENUMBER,
                 ));
             }
-            let sql =
-                String::from_utf8(sql_bytes.clone()).map_err(|_| invalid("SQL must be UTF-8."))?;
+            let sql = String::from_utf8(sql_bytes.clone()).map_err(|error| {
+                refuse_entry(
+                    "DB_CONFIG",
+                    &label,
+                    &format!(
+                        "SQL must be UTF-8; the first other byte is at {}.",
+                        invalid_utf8_position(sql_bytes, error.utf8_error())
+                    ),
+                    SAVE_AS_UTF8,
+                )
+            })?;
+            let sidecar = shown_entry(shown, &format!("{stem}.toml"));
             let metadata = sources.get(&format!("{stem}.toml")).cloned();
             let parsed: Metadata = match &metadata {
-                Some(b) => std::str::from_utf8(b).ok().and_then(|s| toml::from_str(s).ok())
-                    .ok_or_else(|| Diagnostic::new("DB_METADATA_UNSUPPORTED", "Supported metadata: intent_ids and named requires/ensures SQL maps; execution modes are not supported."))?,
+                Some(bytes) => parse_metadata(&sidecar, bytes)?,
                 None => Metadata::default(),
             };
             if parsed
@@ -679,29 +903,32 @@ impl CapturedInputs {
                 .iter()
                 .any(|s| s.len() > 128 || s.is_empty() || s.chars().any(char::is_control))
             {
-                return Err(invalid("Invalid Intent traceability ID."));
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    &sidecar,
+                    "each intent_ids entry needs 1-128 characters and no control characters.",
+                    FIX_INTENT_IDS,
+                ));
             }
-            if parsed.requires.len() + parsed.ensures.len() > 64
-                || parsed
-                    .requires
-                    .iter()
-                    .chain(&parsed.ensures)
-                    .any(|(name, sql)| {
-                        !identifier(name)
-                            || sql.len() > 65536
-                            || !super::analysis::contract_supported(sql, &config.schema)
-                    })
-            {
-                return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED", "Checks require bounded names and the documented closed SELECT expression subset; unsupported SQL is never executed."));
+            let phases = [("requires", &parsed.requires), ("ensures", &parsed.ensures)];
+            if let Some(problem) = unsupported_checks(&phases, &config.schema) {
+                return Err(refuse_entry(
+                    "DB_CHECK_UNSUPPORTED",
+                    &sidecar,
+                    &problem,
+                    FIX_CHECKS,
+                ));
             }
             if parsed.sqlite_rebuild.as_ref().is_some_and(|table| {
                 config.engine != "sqlite"
                     || !identifier(table)
                     || table.to_ascii_lowercase().starts_with("sqlite_")
             }) {
-                return Err(Diagnostic::new(
+                return Err(refuse_entry(
                     "DB_METADATA_UNSUPPORTED",
+                    &sidecar,
                     "sqlite_rebuild requires one ordinary table name and the SQLite adapter.",
+                    FIX_REBUILD,
                 ));
             }
             let checksum = digest(&[
@@ -728,12 +955,26 @@ impl CapturedInputs {
             });
         }
         for name in sources.keys().filter(|n| n.ends_with(".toml")) {
-            if !sources.contains_key(&format!("{}.sql", name.strip_suffix(".toml").unwrap())) {
-                return Err(invalid("Orphan migration sidecar."));
+            let sql = format!("{}.sql", name.strip_suffix(".toml").unwrap());
+            if !sources.contains_key(&sql) {
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    &shown_entry(shown, name),
+                    &format!(
+                        "no migration {} matches this sidecar.",
+                        shown_entry(shown, &sql)
+                    ),
+                    ORPHAN,
+                ));
             }
         }
         if migrations.len() > 1024 {
-            return Err(invalid("Migration inventory exceeds 1024 migrations."));
+            return Err(refuse_entry(
+                "DB_CONFIG",
+                shown,
+                "more than 1,024 migrations.",
+                DIRECTORY_LIMITS,
+            ));
         }
         migrations.sort_by_key(|m| m.id);
         let summaries: Vec<_> = migrations.iter().map(Migration::summary).collect();
@@ -771,6 +1012,7 @@ impl CapturedInputs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     fn project() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("migrations")).unwrap();
@@ -1183,5 +1425,382 @@ role="target_role"
                 .code,
             "DB_INPUT_IO"
         );
+    }
+
+    fn put(root: &Path, entry: &str, bytes: impl AsRef<[u8]>) {
+        std::fs::write(root.join(entry), bytes).unwrap();
+    }
+    fn rename(root: &Path, from: &str, to: &str) {
+        std::fs::rename(root.join(from), root.join(to)).unwrap();
+    }
+    fn remove(root: &Path, entry: &str) {
+        std::fs::remove_file(root.join(entry)).unwrap();
+    }
+    /// A check inside the supported subset, and the one #422 reports (cli-19)
+    /// with an operator outside it.
+    const SUPPORTED_CHECK: &str = "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE id IS NULL)";
+    const UNSUPPORTED_CHECK: &str = "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE kind = 'snmp' GROUP BY tenant_id, options->>'oid' HAVING count(*) > 1)";
+
+    /// An entry of a project's migrations directory, beside a valid
+    /// `0001_initial.sql`, that `load` refuses: how to make it, what the
+    /// refusal is, and how to follow its advice.
+    struct Refused {
+        /// The entry as the diagnostic names it, relative to the project.
+        entry: &'static str,
+        code: &'static str,
+        /// Fragments the message contains besides the entry.
+        says: &'static [&'static str],
+        make: fn(&Path),
+        /// What the next action says to do.
+        fix: fn(&Path),
+    }
+    fn refused_entries() -> Vec<Refused> {
+        #[allow(unused_mut)]
+        let mut cases = vec![
+            Refused {
+                entry: "migrations/notes.txt",
+                code: "DB_CONFIG",
+                says: &["only <id>_<name>.sql migrations"],
+                make: |r| put(r, "migrations/notes.txt", "notes"),
+                fix: |r| rename(r, "migrations/notes.txt", "notes.txt"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.sql~",
+                code: "DB_CONFIG",
+                says: &["only <id>_<name>.sql migrations"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.sql~",
+                        "CREATE TABLE app.t(id INT);",
+                    )
+                },
+                fix: |r| rename(r, "migrations/0001_initial.sql~", "0001_initial.sql~"),
+            },
+            Refused {
+                entry: "migrations/0002_more.SQL",
+                code: "DB_CONFIG",
+                says: &["only <id>_<name>.sql migrations"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0002_more.SQL",
+                        "CREATE TABLE app.more(id INT);",
+                    )
+                },
+                fix: |r| rename(r, "migrations/0002_more.SQL", "migrations/0002_more.sql"),
+            },
+            Refused {
+                entry: "migrations/old",
+                code: "DB_CONFIG",
+                says: &["only <id>_<name>.sql migrations"],
+                make: |r| std::fs::create_dir(r.join("migrations/old")).unwrap(),
+                fix: |r| rename(r, "migrations/old", "old"),
+            },
+            Refused {
+                entry: "migrations/0002_café.sql",
+                code: "DB_CONFIG",
+                says: &["ASCII letters"],
+                make: |r| put(r, "migrations/0002_café.sql", "CREATE TABLE app.u(id INT);"),
+                fix: |r| rename(r, "migrations/0002_café.sql", "migrations/0002_cafe.sql"),
+            },
+            Refused {
+                entry: "migrations/0000_zero.sql",
+                code: "DB_CONFIG",
+                says: &["positive decimal integer"],
+                make: |r| put(r, "migrations/0000_zero.sql", "CREATE TABLE app.z(id INT);"),
+                fix: |r| rename(r, "migrations/0000_zero.sql", "migrations/0002_zero.sql"),
+            },
+            Refused {
+                entry: "migrations/second.sql",
+                code: "DB_CONFIG",
+                says: &["<numeric-id>_<name>.sql"],
+                make: |r| put(r, "migrations/second.sql", "CREATE TABLE app.s(id INT);"),
+                fix: |r| rename(r, "migrations/second.sql", "migrations/0002_second.sql"),
+            },
+            Refused {
+                entry: "migrations/0002_.sql",
+                code: "DB_CONFIG",
+                says: &["<numeric-id>_<name>.sql"],
+                make: |r| put(r, "migrations/0002_.sql", "CREATE TABLE app.e(id INT);"),
+                fix: |r| rename(r, "migrations/0002_.sql", "migrations/0002_e.sql"),
+            },
+            Refused {
+                entry: "migrations/0002_old.sql",
+                code: "DB_INPUT_IO",
+                says: &[],
+                make: |r| std::fs::create_dir(r.join("migrations/0002_old.sql")).unwrap(),
+                fix: |r| rename(r, "migrations/0002_old.sql", "0002_old.sql"),
+            },
+            Refused {
+                entry: "migrations/0002_hard.sql",
+                code: "DB_INPUT_IO",
+                says: &[],
+                make: |r| {
+                    put(r, "original.sql", "CREATE TABLE app.h(id INT);");
+                    std::fs::hard_link(r.join("original.sql"), r.join("migrations/0002_hard.sql"))
+                        .unwrap();
+                },
+                fix: |r| {
+                    remove(r, "migrations/0002_hard.sql");
+                    put(r, "migrations/0002_hard.sql", "CREATE TABLE app.h(id INT);");
+                },
+            },
+            Refused {
+                entry: "migrations/01_dup.sql",
+                code: "DB_DUPLICATE_ID",
+                says: &["ID 1", "migrations/0001_initial.sql"],
+                make: |r| put(r, "migrations/01_dup.sql", "CREATE TABLE app.d(id INT);"),
+                fix: |r| rename(r, "migrations/01_dup.sql", "migrations/0002_dup.sql"),
+            },
+            Refused {
+                entry: "migrations/0002_bytes.sql",
+                code: "DB_CONFIG",
+                says: &["UTF-8", "line 2, column 4"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0002_bytes.sql",
+                        b"CREATE TABLE app.b(id INT);\n-- \xff\n",
+                    )
+                },
+                fix: |r| {
+                    put(
+                        r,
+                        "migrations/0002_bytes.sql",
+                        "CREATE TABLE app.b(id INT);\n",
+                    )
+                },
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["not valid TOML", "line 1, column 19"],
+                make: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"\n"),
+                fix: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"]\n"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["line 2, column 1", "`force`"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.toml",
+                        "intent_ids = [\"x\"]\nforce = true\n",
+                    )
+                },
+                fix: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"]\n"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["line 2, column 5", "requires"],
+                make: |r| put(r, "migrations/0001_initial.toml", "[requires]\nx = 1\n"),
+                fix: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.toml",
+                        format!("[requires]\nx = {SUPPORTED_CHECK:?}\n"),
+                    )
+                },
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["UTF-8", "line 1, column 16"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.toml",
+                        b"intent_ids = [\"\xff\"]\n",
+                    )
+                },
+                fix: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"]\n"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_CONFIG",
+                says: &["intent_ids"],
+                make: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"\"]\n"),
+                fix: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"]\n"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_CHECK_UNSUPPORTED",
+                says: &["snmp_oid_unique", "[requires]"],
+                make: |r| {
+                    let sidecar = format!("[requires]\ncheck_types_known = {SUPPORTED_CHECK:?}\nsnmp_oid_unique = {UNSUPPORTED_CHECK:?}\n");
+                    put(r, "migrations/0001_initial.toml", sidecar)
+                },
+                fix: |r| {
+                    let sidecar = format!("[requires]\ncheck_types_known = {SUPPORTED_CHECK:?}\n");
+                    put(r, "migrations/0001_initial.toml", sidecar)
+                },
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["sqlite_rebuild"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.toml",
+                        "sqlite_rebuild = \"t\"\n",
+                    )
+                },
+                fix: |r| put(r, "migrations/0001_initial.toml", ""),
+            },
+            Refused {
+                entry: "migrations/0009_orphan.toml",
+                code: "DB_CONFIG",
+                says: &["migrations/0009_orphan.sql"],
+                make: |r| put(r, "migrations/0009_orphan.toml", ""),
+                fix: |r| remove(r, "migrations/0009_orphan.toml"),
+            },
+        ];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            cases.extend([
+                Refused {
+                    // A control character is escaped, never written to a terminal.
+                    entry: "migrations/\"0002_a\\nb.sql\"",
+                    code: "DB_CONFIG",
+                    says: &["ASCII letters"],
+                    make: |r| put(r, "migrations/0002_a\nb.sql", "CREATE TABLE app.n(id INT);"),
+                    fix: |r| remove(r, "migrations/0002_a\nb.sql"),
+                },
+                Refused {
+                    entry: "migrations/0002_link.sql",
+                    code: "DB_INPUT_IO",
+                    says: &[],
+                    make: |r| {
+                        put(r, "original.sql", "CREATE TABLE app.l(id INT);");
+                        std::os::unix::fs::symlink(
+                            r.join("original.sql"),
+                            r.join("migrations/0002_link.sql"),
+                        )
+                        .unwrap();
+                    },
+                    fix: |r| {
+                        remove(r, "migrations/0002_link.sql");
+                        std::fs::copy(r.join("original.sql"), r.join("migrations/0002_link.sql"))
+                            .unwrap();
+                    },
+                },
+                Refused {
+                    // Bytes that are not UTF-8 are shown escaped.
+                    entry: "migrations/\"0002_\\xFF.sql\"",
+                    code: "DB_CONFIG",
+                    says: &["UTF-8"],
+                    make: |r| {
+                        let name = std::ffi::OsStr::from_bytes(b"0002_\xff.sql");
+                        std::fs::write(r.join("migrations").join(name), "SELECT 1;").unwrap()
+                    },
+                    fix: |r| {
+                        let name = std::ffi::OsStr::from_bytes(b"0002_\xff.sql");
+                        std::fs::remove_file(r.join("migrations").join(name)).unwrap()
+                    },
+                },
+            ]);
+        }
+        cases
+    }
+
+    /// #422: every refusal of a migrations directory entry names it, in the
+    /// message and in `source`, relative to the project and without the
+    /// project's own path. Its next action is about the directory, not the
+    /// manifest, and following it resolves the refusal.
+    #[test]
+    fn inventory_refusals_name_the_entry_and_advise_on_the_directory() {
+        let manifest_advice = Diagnostic::new("DB_CONFIG", "x").next_action;
+        let generic = Diagnostic::new("DB_NOT_A_REAL_CODE", "x").next_action;
+        for case in refused_entries() {
+            let root = project();
+            put(
+                root.path(),
+                "migrations/0001_initial.sql",
+                "CREATE TABLE app.t(id INT);",
+            );
+            (case.make)(root.path());
+            let manifest = root.path().join("ntnt.toml");
+            let Err(d) = CapturedInputs::load(&manifest, "local", None) else {
+                panic!("{} was accepted", case.entry);
+            };
+            let at = format!("{}: {d} ({:?})", case.entry, d.source);
+            assert_eq!(d.code, case.code, "{at}");
+            assert_eq!(d.source.as_deref(), Some(case.entry), "{at}");
+            assert!(d.message.starts_with(&format!("{}: ", case.entry)), "{at}");
+            for fragment in case.says {
+                assert!(d.message.contains(fragment), "{fragment:?} missing: {at}");
+            }
+            assert!(!d.message.contains(root.path().to_str().unwrap()), "{at}");
+            assert_ne!(d.next_action, manifest_advice, "{at}");
+            assert_ne!(d.next_action, generic, "{at}");
+            assert!(
+                d.next_action.contains("migrations directory") || d.next_action.contains("sidecar"),
+                "{at}: {}",
+                d.next_action
+            );
+            (case.fix)(root.path());
+            if let Err(d) = CapturedInputs::load(&manifest, "local", None) {
+                panic!("{} after following its advice: {d}", case.entry);
+            }
+        }
+    }
+
+    /// Sidecar refusals give a syntax error's position as toml's own message
+    /// does, at the end of the input too.
+    #[test]
+    fn sidecar_positions_are_the_ones_toml_reports() {
+        for text in [
+            "intent_ids = [\"x\"\n",
+            "intent_ids = [\"x\"",
+            "a = 1\nb = \n",
+            "[requires\nx = 'y'",
+            "é = [\n",
+            "x = \"é\nz\"",
+            "\n\n[requires]\nok = 'x'\n[requires]\n",
+        ] {
+            let error = text.parse::<toml::Table>().unwrap_err();
+            let position = toml_position(text, error.span().unwrap().start);
+            assert!(
+                error
+                    .to_string()
+                    .starts_with(&format!("TOML parse error at {position}\n")),
+                "{text:?}: {position} / {error}"
+            );
+        }
+    }
+
+    /// #422: an unsupported check is named with its phase, and only the
+    /// checks outside the subset are named.
+    #[test]
+    fn unsupported_checks_are_named_with_their_phase() {
+        let root = project();
+        put(
+            root.path(),
+            "migrations/0001_initial.sql",
+            "CREATE TABLE app.t(id INT);",
+        );
+        put(
+            root.path(),
+            "migrations/0001_initial.toml",
+            format!("[requires]\nok = {SUPPORTED_CHECK:?}\nfirst = {UNSUPPORTED_CHECK:?}\n[ensures]\nsecond = \"SELECT 1 FROM app.t; DELETE FROM app.t\"\n\"bad name\" = {SUPPORTED_CHECK:?}\n"),
+        );
+        let d = CapturedInputs::load(&root.path().join("ntnt.toml"), "local", None)
+            .err()
+            .unwrap();
+        assert_eq!(d.code, "DB_CHECK_UNSUPPORTED", "{d}");
+        for fragment in [
+            "first ([requires])",
+            "second ([ensures])",
+            "\"bad name\" ([ensures])",
+        ] {
+            assert!(d.message.contains(fragment), "{fragment:?} missing: {d}");
+        }
+        assert!(!d.message.contains("ok ("), "{d}");
+        assert!(!d.message.contains("DELETE"), "{d}");
     }
 }

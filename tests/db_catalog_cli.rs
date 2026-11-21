@@ -45,6 +45,53 @@ fn duplicate_numeric_ids_are_rejected_before_connecting() {
     );
 }
 
+/// #422: a refused migrations entry is named relative to the project in the
+/// report's message and `source`, and the next action is about the
+/// migrations directory, not the manifest (cli-07, cli-19).
+#[test]
+fn inventory_refusals_name_the_entry_in_the_report() {
+    let supported = "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE id IS NULL)";
+    let unsupported = "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE kind = 'snmp' GROUP BY tenant_id, options->>'oid' HAVING count(*) > 1)";
+    for (entry, contents, code, says) in [
+        (
+            "migrations/0001_one.sql~".to_owned(),
+            "x".to_owned(),
+            "DB_CONFIG",
+            "only <id>_<name>.sql migrations",
+        ),
+        (
+            "migrations/0001_one.toml".to_owned(),
+            "intent_ids = [\"x\"\n".to_owned(),
+            "DB_METADATA_UNSUPPORTED",
+            "line 1, column 19",
+        ),
+        (
+            "migrations/0001_one.toml".to_owned(),
+            format!("[requires]\ncheck_types_known = {supported:?}\nsnmp_oid_unique = {unsupported:?}\n"),
+            "DB_CHECK_UNSUPPORTED",
+            "snmp_oid_unique ([requires])",
+        ),
+    ] {
+        let root = project();
+        std::fs::write(
+            root.path().join("migrations/0001_one.sql"),
+            "CREATE TABLE app.t (id int);",
+        )
+        .unwrap();
+        std::fs::write(root.path().join(&entry), contents).unwrap();
+        let report = inspect(root.path());
+        let d = &report["diagnostics"][0];
+        assert_eq!(d["code"], code, "{d}");
+        assert_eq!(d["source"], entry.as_str(), "{d}");
+        let message = d["message"].as_str().unwrap();
+        assert!(message.starts_with(&format!("{entry}: ")), "{d}");
+        assert!(message.contains(says), "{d}");
+        assert!(!message.contains("check_types_known"), "{d}");
+        let next_action = d["next_action"].as_str().unwrap();
+        assert!(!next_action.contains("[databases.<name>]"), "{d}");
+    }
+}
+
 #[test]
 fn db_reports_manifest_errors_as_versioned_json() {
     let root = tempfile::tempdir().unwrap();

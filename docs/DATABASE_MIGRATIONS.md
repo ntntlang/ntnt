@@ -64,8 +64,8 @@ that lock: `init` also refuses when it sees that the manifest changed, but an ed
 saved just before `init` replaces the file can be lost, so do not run `init` while
 `ntnt.toml` is being edited. No local lock helps across branches: two branches
 that each add the next migration still produce two files with the same ID.
-`status` and `plan` reject that history with `DB_DUPLICATE_ID`; renumbering the
-migration that has not been applied anywhere fixes it.
+`status` and `plan` reject that history with `DB_DUPLICATE_ID`, naming both files;
+renumbering the migration that has not been applied anywhere fixes it.
 
 `new` never changes `ntnt.toml`, but like `init` it opens the file for writing to
 lock it, because NFS grants the lock only through such a handle. A `ntnt.toml` that
@@ -442,6 +442,16 @@ Not supported: arbitrary functions/routines, casts, aliases/joins, SELECT INTO, 
 `ensures` are transition checks, not permanent invariants: `verify` does not re-execute historical postconditions. Use database constraints for lasting concurrency/future-write enforcement and ordinary native/Intent tests for business behavior. Intent IDs remain traceability, not proof. The SQLite-only `sqlite_rebuild` field below is the sole supported adapter-mode metadata. Other execution/transaction modes remain rejected.
 
 Files use `<positive-decimal-u64>_<ASCII-name>.sql`; names contain letters, digits, `_` or `-`. Ordering is numeric; `01` and `0001` are the same ID and cannot coexist. Gaps are allowed. Sidecars must have the exact SQL stem. The directory contains only SQL and matching TOML files. Orphan sidecars, duplicate IDs, invalid UTF-8, unsafe paths, symlinks, hard links, directories in place of files and nonregular inputs are rejected.
+
+Each refusal names the entry relative to the project, in its message and `source`
+(`migrations/0002_more.SQL: the migrations directory holds only <id>_<name>.sql
+migrations and their matching .toml sidecars.`), and its `next_action` says what
+to do about the directory. A file that is not UTF-8 gives the line and column of
+its first other byte. A sidecar that is not valid TOML, or holds an unknown key or
+a value of the wrong type, fails with `DB_METADATA_UNSUPPORTED` giving the line
+and column, never the file's contents. `DB_CHECK_UNSUPPORTED` names each check
+outside the supported subset with its phase (`snmp_oid_unique ([requires])`), and
+`DB_DUPLICATE_ID` names both files that share an ID.
 
 Checksum v1 is lowercase SHA-256 over length-framed byte parts. Each part is prefixed by its unsigned 64-bit big-endian byte length. The parts are:
 
