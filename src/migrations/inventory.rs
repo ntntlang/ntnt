@@ -482,6 +482,25 @@ fn metadata_problems(table: &toml::Table) -> String {
         problems.join("; ")
     }
 }
+/// At most this many declared names are listed in a diagnostic.
+const NAMES_SHOWN: usize = 20;
+/// Declared manifest keys for a diagnostic: shown as `shown_key` shows them,
+/// at most `NAMES_SHOWN`, or `none`.
+fn declared_names<'a>(names: impl ExactSizeIterator<Item = &'a String>) -> String {
+    let total = names.len();
+    let mut shown: Vec<String> = names
+        .take(NAMES_SHOWN)
+        .map(|name| shown_key(name))
+        .collect();
+    if total > NAMES_SHOWN {
+        shown.push(format!("and {} more", total - NAMES_SHOWN));
+    }
+    if shown.is_empty() {
+        "none".to_owned()
+    } else {
+        shown.join(", ")
+    }
+}
 /// What is wrong with checks outside the supported subset, naming each (with
 /// its phase when there are several), or `None` when every check is supported.
 fn unsupported_checks(
@@ -775,11 +794,36 @@ impl CapturedInputs {
             }
             return Err(invalid(&format!("Invalid database entry databases.{label:?}: names must start with an ASCII letter and contain at most 63 letters, digits, underscores or hyphens; each entry must be a table.")));
         }
+        // The declared names are manifest keys, validated above; never secrets.
+        let declared = declared_names(databases.keys());
+        let choices = databases
+            .keys()
+            .take(NAMES_SHOWN)
+            .map(|name| format!("--database {name}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let database_name = match database {
             Some(name) if databases.contains_key(name) => name.to_owned(),
-            Some(_) => return Err(Diagnostic::new("DB_DATABASE_UNKNOWN", "The selected logical database is not declared; no fallback database was selected.")),
+            Some(name) => {
+                let mut d = Diagnostic::new(
+                    "DB_DATABASE_UNKNOWN",
+                    &format!(
+                        "Database {} is not declared; declared databases: {declared}. No other database was selected.",
+                        shown_key(name)
+                    ),
+                );
+                d.next_action = format!("Pass one of the declared databases ({choices}), or declare the database as a [databases.<name>] table in the manifest.");
+                return Err(d);
+            }
             None if databases.len() == 1 => databases.keys().next().unwrap().clone(),
-            None => return Err(Diagnostic::new("DB_DATABASE_REQUIRED", "Multiple logical databases are declared; select one with --database before choosing its target.")),
+            None => {
+                let mut d = Diagnostic::new(
+                    "DB_DATABASE_REQUIRED",
+                    &format!("Several logical databases are declared ({declared}); select one with --database before choosing its target."),
+                );
+                d.next_action = format!("Pass one of {choices}; --database may be omitted only when one logical database is declared.");
+                return Err(d);
+            }
         };
         // Only the selected definition is interpreted. Other stores may use a
         // future adapter, unavailable credentials, or unprovisioned directories.
@@ -842,12 +886,28 @@ impl CapturedInputs {
     }
     /// Resolve the selected target and validate its endpoint, scratch and approval
     /// references. Secret names are validated here; their values are never read.
-    pub(super) fn endpoint(config: &Database, target: &str) -> Result<Endpoint> {
-        let endpoint = config
-            .targets
-            .get(target)
-            .cloned()
-            .ok_or_else(|| invalid("Select a declared database target."))?;
+    pub(super) fn endpoint(config: &Database, database: &str, target: &str) -> Result<Endpoint> {
+        let endpoint = config.targets.get(target).cloned().ok_or_else(|| {
+            // Target names are manifest keys, shown escaped; never secrets.
+            let declared = declared_names(config.targets.keys());
+            let mut d = invalid(&format!(
+                "Target {} is not declared for database {database}; declared targets: {declared}.",
+                shown_key(target)
+            ));
+            d.next_action = if config.targets.is_empty() {
+                format!("Declare a [databases.{database}.targets.<name>] table with its connection_secret in the manifest, then pass --target <name>.")
+            } else {
+                let choices = config
+                    .targets
+                    .keys()
+                    .take(NAMES_SHOWN)
+                    .map(|name| format!("--target {}", shown_key(name)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Pass one of the declared targets ({choices}); names are case-sensitive. To add a target, declare [databases.{database}.targets.<name>] with its connection_secret in the manifest.")
+            };
+            d
+        })?;
         for ep in std::iter::once(&endpoint).chain(config.scratch.iter().map(|s| &s.endpoint)) {
             if (config.engine == "postgresql"
                 && (!identifier(&ep.database) || !identifier(&ep.role)))
@@ -919,7 +979,7 @@ impl CapturedInputs {
         let bytes = file_bytes(Input::Manifest(manifest))?;
         let document = Self::parse(&bytes)?;
         let (database_name, config) = Self::select(&document, database)?;
-        let endpoint = Self::endpoint(&config, target)?;
+        let endpoint = Self::endpoint(&config, &database_name, target)?;
         let dir = Self::migrations_dir(manifest, &config)?;
         // Refusals name entries relative to the project, through the
         // directory as the manifest names it (#422).

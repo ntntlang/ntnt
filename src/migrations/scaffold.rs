@@ -589,7 +589,7 @@ fn initialize_with(
             conflict("The manifest cannot be extended with [databases] and [secrets] tables; it may define them inline.")
         })?;
     let (_, config) = CapturedInputs::select(&document, Some(name))?;
-    CapturedInputs::endpoint(&config, "development")?;
+    CapturedInputs::endpoint(&config, name, "development")?;
     let migrations = project_dir(manifest).map_or_else(
         || PathBuf::from(MIGRATIONS_DIR),
         |dir| dir.join(MIGRATIONS_DIR),
@@ -1595,7 +1595,7 @@ mod tests {
             let document = CapturedInputs::parse(text.as_bytes()).unwrap();
             let (name, config) = CapturedInputs::select(&document, None).unwrap();
             assert_eq!(name, "app");
-            let endpoint = CapturedInputs::endpoint(&config, "development").unwrap();
+            let endpoint = CapturedInputs::endpoint(&config, &name, "development").unwrap();
             assert_eq!(endpoint.connection_secret, secrets[0]);
             assert_eq!(config.approval_secret.as_deref(), Some(secrets[2].as_str()));
             for secret in &secrets {

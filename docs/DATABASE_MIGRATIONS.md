@@ -236,7 +236,12 @@ unix-socket provider that is misconfigured, unavailable or refuses it. A refused
 password) or `28000` (for example `peer`): check `pg_hba.conf` and the secret.
 Add `--json` to any command for the machine-readable report. If the
 manifest declares only one database, `--database` is optional; `--target` is
-required by every command except `init` and `new`.
+required by every command except `init` and `new`. Target and database names are
+case-sensitive manifest keys. A name that is not declared fails, echoing it and
+listing the declared ones: `DB_CONFIG` "Target dev is not declared for database
+app; declared targets: development." or `DB_DATABASE_UNKNOWN` "Database ap is not
+declared; declared databases: app.", and `DB_DATABASE_REQUIRED` lists the
+databases to choose from.
 
 ## Explicit configuration and secrets
 
