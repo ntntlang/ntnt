@@ -344,6 +344,23 @@ async fn observe(
         (Err(d), _) | (_, Err(d)) => Err(d),
     }
 }
+/// The catalog of a second snapshot of the target (`observe`) when it shows
+/// the identity and history the first one did. Otherwise nothing may be
+/// compared: `DB_TARGET_CHANGED` if either changed or its history could not
+/// be read, or the error the snapshot itself failed with.
+fn second_snapshot(
+    identity: &Identity,
+    history: &History,
+    second: Result<(Identity, Catalog, Result<History>)>,
+) -> Result<Catalog> {
+    match second {
+        Ok((again, catalog, Ok(later))) if json!(&again) == json!(identity) && later == *history => {
+            Ok(catalog)
+        }
+        Ok(_) => Err(Diagnostic::new("DB_TARGET_CHANGED", "The target's identity or migration history changed between its two inspections; nothing was compared.")),
+        Err(d) => Err(d),
+    }
+}
 /// Combine captured target facts with applied-prefix and optional candidate replay.
 /// Plan bindings retain logical labels, physical identity and exact source/policy digests.
 /// Missing or incomplete evidence stays unknown; no target connection remains open here.
@@ -491,16 +508,11 @@ async fn inspect_observed(
     let outside: Vec<String> = replayed.outside.iter().cloned().collect();
     if !outside.is_empty() {
         report["target"]["outside_objects"] = json!(outside);
-        match observe(inputs, target_secret, &outside).await {
-            Ok((again, observed, Ok(later)))
-                if json!(&again) == json!(&identity) && later == history =>
-            {
+        let second = observe(inputs, target_secret, &outside).await;
+        match second_snapshot(&identity, &history, second) {
+            Ok(observed) => {
                 catalog = observed;
                 report["catalog"] = json!(&catalog);
-            }
-            Ok(_) => {
-                diagnostic(&mut report, Diagnostic::new("DB_TARGET_CHANGED", "The target's identity or migration history changed between its two inspections; nothing was compared."));
-                replayed.expected = None;
             }
             Err(d) => {
                 diagnostic(&mut report, d);
@@ -1060,6 +1072,73 @@ mod tests {
             failed.len() <= 60 && (24..=216).contains(&uncovered),
             "{failed:?} {uncovered}"
         );
+    }
+
+    /// The second snapshot replay's outside objects need is used only when it
+    /// shows the target and history the first one did.
+    #[test]
+    fn a_second_snapshot_is_used_only_for_the_same_target_and_history() {
+        use super::super::model::HistoryEntry;
+        let identity = Identity::Postgres(super::super::postgres::Identity {
+            cluster: "7000000000000000001".into(),
+            database_oid: 16384,
+            database: "app".into(),
+            role: "app".into(),
+            version: 180_000,
+            settings: json!({"encoding": "UTF8"}),
+            authority: json!({"database_owner": "app"}),
+            transport: json!({"sslmode": "disable", "tls_version": null, "server_ssl": false}),
+        });
+        let history = History {
+            present: true,
+            entries: vec![HistoryEntry {
+                position: 1,
+                id: "1".into(),
+                name: "0001_initial.sql".into(),
+                checksum: "c".repeat(64),
+                state: "applied".into(),
+            }],
+            scope: Some(json!({"database": "app", "schema": "app"})),
+        };
+        let mut catalog = Catalog::default();
+        catalog
+            .objects
+            .insert("public.relation:audit_log".into(), json!({"kind": "r"}));
+        let code = |second| {
+            second_snapshot(&identity, &history, second)
+                .map(|c| json!(c))
+                .map_err(|d| d.code)
+        };
+        let same = || Ok((identity.clone(), catalog.clone(), Ok(history.clone())));
+        assert_eq!(code(same()), Ok(json!(catalog)));
+        let Identity::Postgres(mut other) = identity.clone() else {
+            unreachable!()
+        };
+        other.database_oid += 1;
+        let moved = Ok((
+            Identity::Postgres(other),
+            catalog.clone(),
+            Ok(history.clone()),
+        ));
+        assert_eq!(code(moved), Err("DB_TARGET_CHANGED".into()));
+        let mut later = history.clone();
+        later.entries[0].checksum = "d".repeat(64);
+        let edited = Ok((identity.clone(), catalog.clone(), Ok(later)));
+        assert_eq!(code(edited), Err("DB_TARGET_CHANGED".into()));
+        let mut later = history.clone();
+        later.entries.push(HistoryEntry {
+            position: 2,
+            ..history.entries[0].clone()
+        });
+        let migrated = Ok((identity.clone(), catalog.clone(), Ok(later)));
+        assert_eq!(code(migrated), Err("DB_TARGET_CHANGED".into()));
+        let unreadable = Ok((
+            identity.clone(),
+            catalog.clone(),
+            Err(failure("DB_LEDGER_UNKNOWN")),
+        ));
+        assert_eq!(code(unreadable), Err("DB_TARGET_CHANGED".into()));
+        assert_eq!(code(Err(failure("DB_TIMEOUT"))), Err("DB_TIMEOUT".into()));
     }
 
     #[test]
