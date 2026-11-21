@@ -339,3 +339,113 @@ fn sqlite_recursive_cte_refusal_names_the_action() {
         "{r}"
     );
 }
+/// `ntnt db migrate` as a person runs it, without --json.
+fn human_migrate(f: &Fixture, plan: &str, approval: &str) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["db", "migrate", "--target", "test", "--plan", plan])
+        .env("DB_TARGET", &f.target_path)
+        .env("DB_SCRATCH", &f.scratch_path)
+        .env("DB_APPROVAL", approval)
+        .env("NTNT_ENV", "development")
+        .env("NTNT_SECRETS_PROVIDER", "env")
+        .current_dir(f.root.path())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A target another connection holds the write lock on: DB_BUSY says so,
+/// gives the busy timeout, says nothing was committed and to retry once the
+/// writer finishes, which works (#425 sq-11). The lock is held from a second
+/// connection for the whole run, so the outcome never depends on timing.
+#[test]
+fn sqlite_busy_target_names_the_lock_and_retry_works() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_base.sql",
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, kind TEXT);",
+    );
+    let p = f.plan("base.json");
+    assert_eq!(
+        f.apply("base.json", p["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0002_more.sql",
+        "CREATE TABLE more (id INTEGER PRIMARY KEY);",
+    );
+    let p = f.plan("more.json");
+    let digest = p["plan_digest"].as_str().unwrap();
+    let app = f.target();
+    app.execute_batch("BEGIN IMMEDIATE; INSERT INTO events (kind) VALUES ('rowsecret-app');")
+        .unwrap();
+    let failed = f.apply("more.json", Some(digest));
+    let d = diagnostic(&failed, "DB_BUSY");
+    let text = message(d);
+    assert!(
+        text.starts_with("The SQLite target file (secret DB_TARGET) is locked (SQLITE_BUSY): another connection holds its write lock"),
+        "{failed}"
+    );
+    assert!(text.contains("EXCLUSIVE locking mode"), "{failed}");
+    assert!(
+        text.contains("ntnt waited its 2-second busy timeout"),
+        "{failed}"
+    );
+    assert!(text.contains("Nothing was committed"), "{failed}");
+    assert!(
+        next_action(d).starts_with("Retry once the writer finishes"),
+        "{failed}"
+    );
+    assert!(!failed.to_string().contains("rowsecret"), "{failed}");
+    assert_ne!(failed["progress"][1]["state"], "committed", "{failed}");
+    let human = human_migrate(&f, "more.json", digest);
+    assert!(human.contains("Target: \"test\" / \"main\""), "{human}");
+    assert!(!human.contains("(null)"), "{human}");
+    // Following the advice: once the writer finishes, the same plan runs.
+    app.execute_batch("COMMIT").unwrap();
+    let again = f.apply("more.json", Some(digest));
+    assert_eq!(again["outcome"], "pass", "{again}");
+}
+
+/// Inspection of a target in EXCLUSIVE locking mode and replay on a scratch
+/// another connection writes: DB_BUSY names the file's role and secret.
+#[test]
+fn sqlite_busy_inspection_and_replay_name_the_file() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_base.sql",
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, kind TEXT);",
+    );
+    let p = f.plan("base.json");
+    assert_eq!(
+        f.apply("base.json", p["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    // After its first write, a connection in EXCLUSIVE locking mode keeps
+    // the file locked until it closes.
+    let app = f.target();
+    app.execute_batch("PRAGMA locking_mode=EXCLUSIVE; INSERT INTO events (kind) VALUES ('x');")
+        .unwrap();
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_BUSY");
+    assert!(
+        message(d).starts_with("The SQLite target file (secret DB_TARGET) is locked"),
+        "{r}"
+    );
+    assert!(message(d).contains("Inspection writes nothing"), "{r}");
+    drop(app);
+    let r = f.command("status", &[]);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let other = rusqlite::Connection::open(&f.scratch_path).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let r = f.command("plan", &[]);
+    let d = diagnostic(&r, "DB_BUSY");
+    assert!(
+        message(d).starts_with("The SQLite scratch file (secret DB_SCRATCH) is locked"),
+        "{r}"
+    );
+    assert!(message(d).contains("the target was not changed"), "{r}");
+    other.execute_batch("ROLLBACK").unwrap();
+    let r = f.command("plan", &[]);
+    assert_eq!(r["outcome"], "pass", "{r}");
+}

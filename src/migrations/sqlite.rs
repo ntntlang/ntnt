@@ -23,6 +23,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long SQLite waits for a lock another connection holds.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 /// How much longer than an operation's own deadline the session waits before
 /// it discards the session: an operation SQLite can interrupt always returns
 /// first, and only one stuck outside SQLite is discarded.
@@ -40,7 +42,7 @@ pub(super) struct Identity {
 }
 
 /// How a diagnostic about the session's file itself begins; the session
-/// names the file's role and secret in its place (`State::attribute`).
+/// names the file's role and secret in its place (`attribute`).
 const FILE_SUBJECT: &str = "The SQLite file ";
 
 fn sql_error(error: rusqlite::Error) -> Diagnostic {
@@ -63,6 +65,12 @@ fn sql_error(error: rusqlite::Error) -> Diagnostic {
     // SQLite's own message only in shapes that hold identifiers alone, and
     // always the extended result code's name (#424).
     let message = match sqlite {
+        // A locked file is not a statement's fault (#425).
+        Some(e) if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => format!(
+            "{FILE_SUBJECT}is locked ({}): another connection holds its write lock or keeps it in EXCLUSIVE locking mode, or, in rollback-journal mode, is reading it while ntnt commits. ntnt waited its {}-second busy timeout.",
+            super::sqlite_errors::name(e.extended_code),
+            BUSY_TIMEOUT.as_secs()
+        ),
         // A file SQLite cannot write is not a statement's fault.
         Some(e) if e.code == rusqlite::ErrorCode::ReadOnly => format!(
             "{FILE_SUBJECT}is not writable ({}): {}.",
@@ -789,6 +797,39 @@ fn index_metadata(
     })
 }
 
+/// Name this session's file, by its role and secret and never its path,
+/// in a diagnostic about the file itself: SQLite cannot write it (#424),
+/// or another connection holds it locked (#425). `execute` is a session
+/// that migrates the target.
+fn attribute(owner: &super::sqlite_file::Owner, mut d: Diagnostic, execute: bool) -> Diagnostic {
+    let Some(rest) = d.message.strip_prefix(FILE_SUBJECT) else {
+        return d;
+    };
+    let (role, secret) = (owner.role, &owner.secret);
+    d.message = format!("The SQLite {role} file (secret {secret}) {rest}");
+    // What the operation that waited had committed: nothing. Inspection
+    // never writes and replay never commits. On a target, BEGIN
+    // IMMEDIATE never began, a statement or the ledger insert rolls
+    // back with its migration, and a busy COMMIT leaves the transaction
+    // open until the session is discarded.
+    if d.code == "DB_BUSY" {
+        d.message.push(' ');
+        d.message.push_str(match (role, execute) {
+            ("scratch", _) => "Replay never commits: nothing was committed, and the target was not changed.",
+            (_, true) => "Nothing was committed by the transaction that waited; progress shows any migration this run committed before it.",
+            _ => "Inspection writes nothing, so nothing was committed.",
+        });
+    }
+    if d.code == "DB_SQLITE" {
+        d.next_action = if role == "scratch" {
+            format!("Make the scratch file that {secret} names, and its directory, writable by the user running ntnt (SQLite writes its journal or WAL beside the file), or set {secret} to another empty, writable file; then rerun.")
+        } else {
+            format!("Make the target file that {secret} names, and its directory, writable by the user running ntnt (SQLite writes its journal or WAL beside the file). A plan binds the file's permissions, so then plan, review and approve again, and run migrate with the new plan.")
+        };
+    }
+    d
+}
+
 struct State {
     // Drop SQLite before the Windows pathname guard.
     conn: Connection,
@@ -799,24 +840,6 @@ struct State {
     cache: Cache,
 }
 impl State {
-    /// Name this session's file, by its role and secret and never its path,
-    /// in a diagnostic about the file itself: SQLite cannot write it (#424).
-    fn attribute(&self, mut d: Diagnostic) -> Diagnostic {
-        let Some(rest) = d.message.strip_prefix(FILE_SUBJECT) else {
-            return d;
-        };
-        let owner = self.file.owner();
-        let (role, secret) = (owner.role, &owner.secret);
-        d.message = format!("The SQLite {role} file (secret {secret}) {rest}");
-        if d.code == "DB_SQLITE" {
-            d.next_action = if role == "scratch" {
-                format!("Make the scratch file that {secret} names, and its directory, writable by the user running ntnt (SQLite writes its journal or WAL beside the file), or set {secret} to another empty, writable file; then rerun.")
-            } else {
-                format!("Make the target file that {secret} names, and its directory, writable by the user running ntnt (SQLite writes its journal or WAL beside the file). A plan binds the file's permissions, so then plan, review and approve again, and run migrate with the new plan.")
-            };
-        }
-        d
-    }
     fn identity(&self) -> Result<Identity> {
         let authority = self.file.check_connection(&self.conn)?;
         let settings = json!({
@@ -1313,6 +1336,11 @@ impl Sqlite {
             },
             secret: secret.name().to_owned(),
         };
+        // Opening reads the schema, so it can find the file locked too.
+        let faults = super::sqlite_file::Owner {
+            role: owner.role,
+            secret: owner.secret.clone(),
+        };
         let state=tokio::time::timeout(IO_TIMEOUT,tokio::task::spawn_blocking(move || {
             if rusqlite::version_number()/1000!=3054 {return Err(Diagnostic::new("DB_ENGINE_VERSION","SQLite adapter supports the bundled SQLite 3.54 series."));}
             let file=FileBinding::capture(&path,owner)?;
@@ -1325,7 +1353,7 @@ impl Sqlite {
             let flags=if writable {OpenFlags::SQLITE_OPEN_READ_WRITE} else {OpenFlags::SQLITE_OPEN_READ_ONLY};
             let mut conn=Connection::open_with_flags(file.path(),flags|OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(sql_error)?;
             file.check_connection(&conn)?;
-            conn.busy_timeout(Duration::from_secs(2)).map_err(sql_error)?;
+            conn.busy_timeout(BUSY_TIMEOUT).map_err(sql_error)?;
             conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_SQL_LENGTH,1_048_576).map_err(sql_error)?;
             conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,16*1_048_576).map_err(sql_error)?;
             conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_EXPR_DEPTH,64).map_err(sql_error)?;
@@ -1336,7 +1364,8 @@ impl Sqlite {
             let auth=Authorizer::install(&mut conn)?;
             Ok::<_,Diagnostic>(State{conn,file,writable,auth,cache:Cache::default()})
         })).await.map_err(|_|Diagnostic::new("DB_TIMEOUT","SQLite connection deadline exceeded."))?
-            .map_err(|_|Diagnostic::new("DB_RUNTIME","SQLite connection worker failed."))??;
+            .map_err(|_|Diagnostic::new("DB_RUNTIME","SQLite connection worker failed."))?
+            .map_err(|d| attribute(&faults, d, execute))?;
         let interrupt = state.conn.get_interrupt_handle();
         Ok(Self {
             state: Arc::new(Mutex::new(state)),
@@ -1360,6 +1389,7 @@ impl Sqlite {
     ) -> Result<T> {
         let state = self.state.clone();
         let cancelled = self.interrupted.clone();
+        let execute = self.execute;
         let work = tokio::task::spawn_blocking(move || {
             let mut state = state.lock().map_err(|_| {
                 Diagnostic::new(
@@ -1381,7 +1411,7 @@ impl Sqlite {
                     Some(move || cancelled.load(Ordering::Acquire) || Instant::now() >= deadline),
                 )
                 .map_err(sql_error)?;
-            operation(&mut state).map_err(|d| state.attribute(d))
+            operation(&mut state).map_err(|d| attribute(state.file.owner(), d, execute))
         });
         match tokio::time::timeout(limit + DISCARD_GRACE, work).await {
             Ok(result) => result

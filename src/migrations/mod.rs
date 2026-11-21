@@ -70,6 +70,7 @@ impl Diagnostic {
             "DB_REBUILD_REQUIRED" => "Rebuild the named table with a `sqlite_rebuild = \"<table>\"` sidecar (docs/DATABASE_MIGRATIONS.md, SQLite table rebuilds), which runs the migration with foreign-key actions off and checks the rebuilt table, or remove those foreign keys in an earlier migration. Nothing ran.",
             "DB_MIGRATION_EMPTY" => "Write the migration's SQL below its header comment, or delete the file if it is not needed yet. Nothing was run.",
             "DB_STATEMENT_LIMIT" => "Make the statement cheaper. For migrate on a target, raise statement_seconds in [databases.<name>.limits] (docs/DATABASE_MIGRATIONS.md, Time limits) and review a new plan, since the limit is part of the plan; replay's limit on the empty scratch database is fixed.",
+            "DB_BUSY" => "Retry once the writer finishes: wait for the other connection's write transaction to end, or close the connection that set PRAGMA locking_mode=EXCLUSIVE (it keeps the lock until it closes), then rerun the same command. Nothing was committed while ntnt waited; migrate, rerun with the same plan, skips any migration already committed.",
             "DB_LOCK_CONFLICT" => "Another session held a conflicting lock; nothing was committed for this migration. Retry the same reviewed plan when application or migrator load allows.",
             "DB_TIMEOUT" => "Check endpoint availability and conflicting locks. Preserve committed progress; reconcile unknown migration outcomes with the same reviewed plan before any further SQL.",
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
@@ -751,10 +752,13 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             println!("Logical database: {database}");
         }
         if let Some(t) = report.get("target") {
-            println!(
-                "Target: {} / {} ({})",
-                t["name"], t["schema"], t["identity"]["database"]
-            );
+            // A target not yet inspected has no identity (#425).
+            let database = &t["identity"]["database"];
+            if database.is_null() {
+                println!("Target: {} / {}", t["name"], t["schema"]);
+            } else {
+                println!("Target: {} / {} ({database})", t["name"], t["schema"]);
+            }
             if let Some(transport) = t["identity"].get("transport") {
                 println!("Transport: {}", describe_transport(transport));
             }
