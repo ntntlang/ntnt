@@ -1852,7 +1852,6 @@ role="target_role"
         ];
         #[cfg(unix)]
         {
-            use std::os::unix::ffi::OsStrExt;
             cases.extend([
                 Refused {
                     // A control character is escaped, never written to a terminal.
@@ -1880,21 +1879,27 @@ role="target_role"
                             .unwrap();
                     },
                 },
-                Refused {
-                    // Bytes that are not UTF-8 are shown escaped.
-                    entry: "migrations/\"0002_\\xFF.sql\"",
-                    code: "DB_CONFIG",
-                    says: &["UTF-8"],
-                    make: |r| {
-                        let name = std::ffi::OsStr::from_bytes(b"0002_\xff.sql");
-                        std::fs::write(r.join("migrations").join(name), "SELECT 1;").unwrap()
-                    },
-                    fix: |r| {
-                        let name = std::ffi::OsStr::from_bytes(b"0002_\xff.sql");
-                        std::fs::remove_file(r.join("migrations").join(name)).unwrap()
-                    },
-                },
             ]);
+        }
+        // macOS file systems store only UTF-8 names, so this name cannot exist
+        // there.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            cases.extend([Refused {
+                // Bytes that are not UTF-8 are shown escaped.
+                entry: "migrations/\"0002_\\xFF.sql\"",
+                code: "DB_CONFIG",
+                says: &["UTF-8"],
+                make: |r| {
+                    let name = std::ffi::OsStr::from_bytes(b"0002_\xff.sql");
+                    std::fs::write(r.join("migrations").join(name), "SELECT 1;").unwrap()
+                },
+                fix: |r| {
+                    let name = std::ffi::OsStr::from_bytes(b"0002_\xff.sql");
+                    std::fs::remove_file(r.join("migrations").join(name)).unwrap()
+                },
+            }]);
         }
         cases
     }
@@ -1983,6 +1988,10 @@ role="target_role"
                 root.path().join("migrations/.#0001_initial.sql"),
             )
             .unwrap();
+        }
+        // macOS file systems store only UTF-8 names.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
             use std::os::unix::ffi::OsStrExt;
             let name = std::ffi::OsStr::from_bytes(b".\xff");
             std::fs::write(root.path().join("migrations").join(name), "x").unwrap();
@@ -1999,6 +2008,11 @@ role="target_role"
             "0002_more.SQL",
             "0001_initial.sql~",
         ] {
+            // Windows drops a trailing dot, so `readme.` would be created as
+            // the README `readme`.
+            if cfg!(windows) && entry.ends_with('.') {
+                continue;
+            }
             put(root.path(), &format!("migrations/{entry}"), "x");
             let d = CapturedInputs::load(&manifest, "local", None)
                 .err()
