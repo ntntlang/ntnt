@@ -1880,7 +1880,7 @@ mod tests {
         // check; its state is inspected all the same.
         assert_eq!(
             failed,
-            ["0012_step.sql DB_SQLITE: SQLite operation failed (code 1). Details suppressed."]
+            ["0012_step.sql DB_SQLITE: foreign key mismatch - \"g\" referencing \"f\" (SQLITE_ERROR)."]
         );
         let expected: Vec<Vec<String>> = steps
             .iter()
