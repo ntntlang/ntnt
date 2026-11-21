@@ -41,16 +41,35 @@ and underscores, at most 50 characters) replaces `app`; the secret names and the
 PostgreSQL schema, role and database names derive from it. If `ntnt.toml` exists,
 `init` appends the section and keeps every existing byte. It refuses, changing
 nothing, when the manifest already declares that database or one of those secrets,
-or when another declared database already uses `migrations/`. `init` locks the
-manifest from reading it until it has written it, so a concurrent `init` refuses
-with `DB_INIT_CONFLICT` instead of overwriting the other's section. Editors do not
-take that lock: `init` also refuses when it sees that the manifest changed, but an
-edit saved just before `init` replaces the file can be lost, so do not run `init`
-while `ntnt.toml` is being edited. `new` numbers the
+or when another declared database already uses `migrations/`. `new` numbers the
 file after the highest existing ID, zero-padded to four digits (or wider, to match
 existing files). Migration names use lowercase ASCII letters, digits and
 underscores, and `new` never overwrites a file. Writing the same files by hand
 works just as well.
+
+`init` and `new` take turns through an exclusive lock on `ntnt.toml`. `init` holds
+it from reading the manifest until it has written it, and `new` from reading the
+manifest, before it lists `migrations/`, until the new file exists. Neither waits
+for the lock. While another `init` or `new` holds it, `init` refuses with
+`DB_INIT_CONFLICT` instead of overwriting another init's section, and `new` refuses
+with `DB_NEW_CONFLICT` instead of picking the ID another `new` is about to use. The
+refused command changes nothing; rerun it once the other has finished. The lock
+ends when the command exits, so it never needs cleaning up. Editors do not take
+that lock: `init` also refuses when it sees that the manifest changed, but an edit
+saved just before `init` replaces the file can be lost, so do not run `init` while
+`ntnt.toml` is being edited. No local lock helps across branches: two branches
+that each add the next migration still produce two files with the same ID.
+`status` and `plan` reject that history with `DB_DUPLICATE_ID`; renumbering the
+migration that has not been applied anywhere fixes it.
+
+`new` never changes `ntnt.toml`, but like `init` it opens the file for writing to
+lock it, because NFS grants the lock only through such a handle. A `ntnt.toml` that
+`new` may not write is locked through a read-only handle instead: that works on
+local filesystems, and on NFS `new` fails with `DB_SCAFFOLD_IO`. Both commands fail
+that way on a filesystem without file locks. On Windows, file locks are mandatory,
+so while `init` or `new` holds the lock no other program can read `ntnt.toml`: an
+`ntnt db status` or `plan` that reads it at that moment fails with `DB_INPUT_IO`
+and must be rerun.
 
 For a ready-made local setup, [`examples/database-dev`](../examples/database-dev/README.md)
 starts PostgreSQL with matching target and scratch databases in one

@@ -58,10 +58,11 @@ impl Diagnostic {
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_APPROVAL_REQUIRED" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",
             "DB_OUTPUT" => "Select a new output filename with a writable parent directory; existing files are never replaced.",
             "DB_OUTPUT_LIMIT" => "Reduce the saved report using --object, or reduce oversized migration metadata. No artifact was written; verification is never truncated to fit.",
-            "DB_INIT_CONFLICT" => "Nothing was written. If another `ntnt db init` or an editor was changing the manifest, rerun init once it has finished; do not run init while ntnt.toml is being edited. Otherwise choose another --database name (its secret names derive from it), or edit the existing [databases.<name>] and [secrets.<NAME>] declarations by hand; init never changes existing declarations or replaces an existing migrations path. Give a further database its own migrations_dir as in docs/DATABASE_MIGRATIONS.md#multiple-databases-in-one-application.",
+            "DB_INIT_CONFLICT" => "Nothing was written. If another `ntnt db init` or `ntnt db new` held the manifest lock, or an editor was changing the manifest, rerun init once it has finished; do not run init while ntnt.toml is being edited. Otherwise choose another --database name (its secret names derive from it), or edit the existing [databases.<name>] and [secrets.<NAME>] declarations by hand; init never changes existing declarations or replaces an existing migrations path. Give a further database its own migrations_dir as in docs/DATABASE_MIGRATIONS.md#multiple-databases-in-one-application.",
             "DB_INIT_NAME" => "Pass --database with 1-50 lowercase ASCII letters, digits or underscores, starting with a letter (for example --database app). Names starting with pg_ and information_schema are reserved; secret, role and database names are derived from this name.",
             "DB_MIGRATION_NAME" => "Use 1-64 lowercase ASCII letters, digits or underscores, for example `ntnt db new add_accounts`; the numeric ID and .sql suffix are added for you.",
             "DB_MIGRATION_EXISTS" => "The existing file was left unchanged. Rerun `ntnt db new` to take the next free ID; never edit or renumber a migration that has been applied.",
+            "DB_NEW_CONFLICT" => "Nothing was created. Rerun `ntnt db new` once the other `ntnt db new` or `ntnt db init` has finished; it then takes the next free ID. The lock ends when that command exits, so there is nothing to clean up.",
             "DB_SCAFFOLD_IO" => "Make the project and migrations directories writable and keep ntnt.toml a writable regular file on a filesystem that supports file locks, then rerun. Existing files are never truncated: an existing ntnt.toml is replaced only by a complete, synced copy with the new section appended.",
             _ => "Correct the reported input or configuration using docs/DATABASE_MIGRATIONS.md; inspect committed progress before retrying any migration.",
         };
@@ -622,7 +623,7 @@ mod tests {
                 "DB_INIT_CONFLICT",
                 [
                     "Nothing was written",
-                    "another `ntnt db init`",
+                    "another `ntnt db init` or `ntnt db new`",
                     "being edited",
                     "--database",
                     "by hand",
@@ -637,6 +638,16 @@ mod tests {
             (
                 "DB_MIGRATION_NAME",
                 ["lowercase", "64", "ntnt db new add_accounts"].as_slice(),
+            ),
+            (
+                "DB_NEW_CONFLICT",
+                [
+                    "Nothing was created",
+                    "Rerun `ntnt db new`",
+                    "`ntnt db init`",
+                    "next free ID",
+                ]
+                .as_slice(),
             ),
             (
                 "DB_MIGRATION_EXISTS",

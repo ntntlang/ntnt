@@ -1,6 +1,8 @@
 //! First-time setup: `ntnt db init` declares one logical database and its secret
 //! names in ntnt.toml; `ntnt db new` creates the next numbered SQL migration.
 //! Neither command reads a secret value, connects to a database or replaces a file.
+//! Both hold an exclusive lock on ntnt.toml while they work and refuse, never
+//! waiting, while another one holds it.
 use super::input_file;
 use super::inventory::{self, CapturedInputs};
 use super::{Diagnostic, Engine, InitArgs, NewArgs, Result};
@@ -231,28 +233,73 @@ fn names(path: &Path, file: &File) -> bool {
     }
 }
 
-/// How init attempts the manifest lock: `File::try_lock`, replaced in tests.
+/// How init and new attempt the manifest lock: `File::try_lock`, replaced in tests.
 type TryLock = fn(&File) -> std::result::Result<(), TryLockError>;
 
-/// Take init's exclusive lock on `file`, the manifest at `path`, without waiting.
-/// Every init holds it from capturing the manifest until its write is complete, so
-/// a concurrent init refuses instead of replacing the manifest with stale bytes.
-fn lock(path: &Path, file: &File, try_lock: TryLock) -> Result<()> {
+/// Why the manifest lock was not taken.
+enum Refusal {
+    /// The path no longer names the opened file.
+    Replaced,
+    /// Another handle holds the lock.
+    Held,
+    /// The lock call itself failed.
+    Failed(std::io::Error),
+}
+
+/// Take the exclusive manifest lock on `file`, the manifest at `path`, without
+/// waiting. Every init holds it from capturing the manifest until its write is
+/// complete, and every new from capturing it until the new migration file exists.
+/// A concurrent init or new refuses instead, so init never replaces the manifest
+/// with stale bytes and two new runs never take the same migration ID.
+fn try_lock_manifest(
+    path: &Path,
+    file: &File,
+    try_lock: TryLock,
+) -> std::result::Result<(), Refusal> {
     let locked = try_lock(file);
     // A lock on a file that was replaced meanwhile protects nothing.
     if !names(path, file) {
-        return Err(conflict(CHANGED));
+        return Err(Refusal::Replaced);
     }
     match locked {
         Ok(()) => Ok(()),
-        Err(TryLockError::WouldBlock) => Err(conflict(
-            "Another `ntnt db init` is updating the manifest; it was left unchanged.",
+        Err(TryLockError::WouldBlock) => Err(Refusal::Held),
+        Err(TryLockError::Error(error)) => Err(Refusal::Failed(error)),
+    }
+}
+
+/// Take init's manifest lock (`try_lock_manifest`).
+fn lock(path: &Path, file: &File, try_lock: TryLock) -> Result<()> {
+    try_lock_manifest(path, file, try_lock).map_err(|refusal| match refusal {
+        Refusal::Replaced => conflict(CHANGED),
+        Refusal::Held => conflict(&format!(
+            "Another `ntnt db init` or `ntnt db new` holds the lock on the manifest {}; it was left unchanged.",
+            shown(path)
         )),
-        Err(TryLockError::Error(error)) => Err(io_failure(&format!(
+        Refusal::Failed(error) => io_failure(&format!(
             "Cannot lock the manifest {} for an exclusive update: {error}; it was left unchanged.",
             shown(path)
-        ))),
-    }
+        )),
+    })
+}
+
+/// Take new's manifest lock (`try_lock_manifest`).
+fn lock_numbering(path: &Path, file: &File, try_lock: TryLock) -> Result<()> {
+    let busy = |message: String| Diagnostic::new("DB_NEW_CONFLICT", &message);
+    try_lock_manifest(path, file, try_lock).map_err(|refusal| match refusal {
+        Refusal::Replaced => busy(format!(
+            "The manifest {} was replaced while `ntnt db new` was locking it; no migration was created.",
+            shown(path)
+        )),
+        Refusal::Held => busy(format!(
+            "Another `ntnt db new` or `ntnt db init` holds the lock on the manifest {}; no migration was created.",
+            shown(path)
+        )),
+        Refusal::Failed(error) => io_failure(&format!(
+            "Cannot lock the manifest {} to number the new migration: {error}; no migration was created.",
+            shown(path)
+        )),
+    })
 }
 
 /// The locked file's current bytes, read through its own handle: on Windows the
@@ -564,8 +611,10 @@ fn initialize_with(
             // A new manifest is locked before it is written, so a concurrent init that
             // finds it never extends a partially written file.
             if let Err(error) = lock(manifest, &file, try_lock) {
-                // On a conflict, another init that found the file holds its lock and
-                // extends it. Otherwise the empty file is still this init's own.
+                // On a conflict, another command that found the file holds its lock:
+                // an init extends it, and a new finds no database in it and leaves it
+                // empty for the next init to extend. Either way it is no longer only
+                // this init's file to remove. Otherwise the empty file is still its own.
                 if error.code == "DB_INIT_CONFLICT" {
                     return Err(error);
                 }
@@ -644,7 +693,8 @@ fn initialize_with(
 }
 
 /// `ntnt db new`: create the next numbered SQL migration for the selected logical
-/// database. It reads only the manifest and the migration directory listing.
+/// database. It reads only the manifest and the migration directory listing, and
+/// holds the manifest lock while it numbers and creates the file.
 pub(super) fn new(args: &NewArgs) -> anyhow::Result<()> {
     finish("new", args.json, create_migration(args))
 }
@@ -691,16 +741,46 @@ fn next_id(dir: &Path) -> Result<(u64, usize)> {
 }
 
 fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
+    create_migration_with(args, File::try_lock, |_| {})
+}
+
+/// A race boundary in `create_migration_with`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NewStep {
+    /// New holds the manifest lock and is about to list the migrations directory.
+    List,
+    /// New has chosen the next ID and is about to create its file.
+    Create,
+}
+
+/// `create_migration`, taking the manifest lock with `try_lock` and calling `pause`
+/// at each `NewStep` (tests fail the lock or run a concurrent command there).
+fn create_migration_with(
+    args: &NewArgs,
+    try_lock: TryLock,
+    mut pause: impl FnMut(NewStep),
+) -> Result<(Value, Vec<String>)> {
     if !valid_migration_name(&args.name) {
         return Err(Diagnostic::new(
             "DB_MIGRATION_NAME",
             "Invalid migration name.",
         ));
     }
-    let bytes = inventory::file_bytes(&args.manifest)?;
+    // The manifest is locked as init locks it, then captured under the same file
+    // rules as every db command. The lock is held until the new file exists, so a
+    // concurrent new or init refuses: new runs number their files one at a time,
+    // each after the files the runs before it created. Nothing is written through
+    // this handle. It is open for writing because NFS locks only such a handle; a
+    // manifest new may not write is opened read-only, which local filesystems lock
+    // as well and NFS refuses.
+    let manifest = args.manifest.as_path();
+    let (held, bytes) = inventory::capture(manifest, input_file::open_replaceable, |file| {
+        lock_numbering(manifest, file, try_lock)
+    })?;
     let document = CapturedInputs::parse(&bytes)?;
     let (database, config) = CapturedInputs::select(&document, args.database.as_deref())?;
     let dir = CapturedInputs::migrations_dir(&args.manifest, &config)?;
+    pause(NewStep::List);
     let (id, width) = next_id(&dir)?;
     let source = format!("{id:0width$}_{}.sql", args.name);
     let header = format!(
@@ -710,6 +790,7 @@ fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
         engine = config.engine
     );
     let path = dir.join(&source);
+    pause(NewStep::Create);
     let file = create_new(
         &path,
         Diagnostic::new(
@@ -719,6 +800,9 @@ fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
         "the migration file",
     )?;
     write_new(&path, &file, header.as_bytes(), "the migration file")?;
+    // The new file is complete; release the lock only now. An early return releases
+    // it after `write_new` has removed an incomplete file.
+    drop(held);
     let mut shown = project_dir(&args.manifest)
         .map(Path::to_path_buf)
         .unwrap_or_default();
@@ -1232,6 +1316,255 @@ mod tests {
         assert_eq!(error.code, "DB_INIT_CONFLICT");
         assert!(manifest.is_file(), "the lock holder's manifest was removed");
         assert!(!dir.path().join(MIGRATIONS_DIR).exists());
+    }
+
+    fn new_migration(manifest: &Path, name: &str) -> NewArgs {
+        NewArgs {
+            name: name.into(),
+            manifest: manifest.to_path_buf(),
+            database: None,
+            json: true,
+        }
+    }
+
+    /// The sorted file names in `dir`.
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// `new accounts` runs `new events` to completion when it reaches `step` on a
+    /// scaffolded manifest. The first creates the only migration with ID 1 whatever
+    /// the second reports, and once it has returned the next `new` takes ID 2.
+    /// Returns the manifest path and what the second reported.
+    fn new_race(step: NewStep) -> (PathBuf, Result<(Value, Vec<String>)>) {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ntnt.toml");
+        initialize(&sqlite_init(&manifest, "app")).unwrap();
+        let mut second = None;
+        let first = create_migration_with(
+            &new_migration(&manifest, "accounts"),
+            File::try_lock,
+            |at| {
+                if at == step {
+                    second = Some(create_migration(&new_migration(&manifest, "events")));
+                }
+            },
+        );
+        let second = second.expect("the second new ran at the race boundary");
+        let (report, _) = first.unwrap_or_else(|error| panic!("the first new failed: {error}"));
+        assert_eq!(report["migration"]["source"], "0001_accounts.sql");
+        let migrations = dir.path().join(MIGRATIONS_DIR);
+        assert_eq!(
+            file_names(&migrations),
+            ["0001_accounts.sql"],
+            "the second new reported {second:?}"
+        );
+        // The first new released the lock when it returned.
+        let (report, _) = create_migration(&new_migration(&manifest, "events")).unwrap();
+        assert_eq!(report["migration"]["source"], "0002_events.sql");
+        (manifest, second)
+    }
+
+    /// The manifest-lock refusal of `ntnt db new`: it names the manifest and the
+    /// commands that take the lock.
+    fn assert_new_conflict(error: &Diagnostic, manifest: &Path) {
+        assert_eq!(error.code, "DB_NEW_CONFLICT", "{error}");
+        assert!(error.message.contains(&shown(manifest)), "{error}");
+        assert!(
+            error.message.contains("`ntnt db new` or `ntnt db init`"),
+            "{error}"
+        );
+    }
+
+    /// Two `new` runs never take the same ID: one that starts after another has
+    /// chosen its ID but before it has created that file refuses at once.
+    #[test]
+    fn concurrent_new_never_takes_the_id_another_new_is_creating() {
+        let (manifest, second) = new_race(NewStep::Create);
+        assert_new_conflict(&second.unwrap_err(), &manifest);
+    }
+
+    /// `new` locks the manifest before it lists the migrations directory.
+    #[test]
+    fn concurrent_new_refuses_before_another_new_lists_the_migrations() {
+        let (manifest, second) = new_race(NewStep::List);
+        assert_new_conflict(&second.unwrap_err(), &manifest);
+    }
+
+    /// A manifest declaring `app` with its own migrations directory, so that init
+    /// can add a database that uses `migrations/`.
+    fn manifest_with_app(dir: &Path) -> PathBuf {
+        let manifest = dir.join("ntnt.toml");
+        std::fs::write(
+            &manifest,
+            "[databases.app]\nengine = \"sqlite\"\nschema = \"main\"\nmigrations_dir = \"app\"\n\
+             [databases.app.targets.development]\nconnection_secret = \"APP_DATABASE_FILE\"\n\
+             [secrets.APP_DATABASE_FILE]\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.join("app")).unwrap();
+        manifest
+    }
+
+    /// `new` and `init` exclude each other through the manifest lock: an init that
+    /// starts while a `new` holds it refuses and leaves the manifest unchanged.
+    #[test]
+    fn init_refuses_while_new_holds_the_manifest_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_app(dir.path());
+        let before = std::fs::read(&manifest).unwrap();
+        let mut init = None;
+        let created = create_migration_with(
+            &new_migration(&manifest, "accounts"),
+            File::try_lock,
+            |at| {
+                if at == NewStep::Create {
+                    init = Some(initialize(&sqlite_init(&manifest, "analytics")));
+                }
+            },
+        );
+        let init = init.expect("init ran while new held the lock");
+        assert_eq!(
+            created.unwrap().0["migration"]["source"],
+            "0001_accounts.sql"
+        );
+        let error = init.expect_err("init succeeded while new held the manifest lock");
+        assert_eq!(error.code, "DB_INIT_CONFLICT");
+        assert!(error.message.contains("`ntnt db new`"), "{error}");
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        assert!(!dir.path().join(MIGRATIONS_DIR).exists());
+    }
+
+    /// A lock call that fails outright (a filesystem answering `flock` with `ENOLCK`)
+    /// stops new before it lists the migrations, naming the manifest and the OS
+    /// error; contention is refused the same way. Neither creates a file.
+    #[test]
+    fn new_lists_and_creates_nothing_without_the_manifest_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ntnt.toml");
+        initialize(&sqlite_init(&manifest, "app")).unwrap();
+        let failed = |_: &File| {
+            Err(TryLockError::Error(std::io::Error::other(
+                "no locks available",
+            )))
+        };
+        let held = |_: &File| Err(TryLockError::WouldBlock);
+        let mut reached = Vec::new();
+        let args = new_migration(&manifest, "accounts");
+        let error = create_migration_with(&args, failed, |at| reached.push(at)).unwrap_err();
+        assert_eq!(error.code, "DB_SCAFFOLD_IO");
+        assert!(error.message.contains(&shown(&manifest)), "{error}");
+        assert!(error.message.contains("no locks available"), "{error}");
+        let error = create_migration_with(&args, held, |at| reached.push(at)).unwrap_err();
+        assert_new_conflict(&error, &manifest);
+        assert_eq!(reached, [], "new went on without the lock");
+        assert!(file_names(&dir.path().join(MIGRATIONS_DIR)).is_empty());
+    }
+
+    /// New refuses a lock on a manifest that was replaced after it opened it: a
+    /// concurrent new could lock the replacement and take the same ID.
+    #[test]
+    fn new_refuses_a_lock_on_a_replaced_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ntnt.toml");
+        std::fs::write(&path, "[lint]\n").unwrap();
+        let opened = input_file::open_replaceable(&path).unwrap();
+        let saved = dir.path().join("saved.toml");
+        std::fs::write(&saved, "[lint]\nstrict = true\n").unwrap();
+        std::fs::rename(&saved, &path).unwrap();
+        let error = lock_numbering(&path, &opened, File::try_lock).unwrap_err();
+        assert_eq!(error.code, "DB_NEW_CONFLICT");
+        assert!(error.message.contains("was replaced"), "{error}");
+        assert!(error.message.contains(&shown(&path)), "{error}");
+    }
+
+    /// The Linux NFS client emulates `flock` with a whole-file byte-range lock, which
+    /// is refused (`EBADF`) on a descriptor not open for writing. New locks the
+    /// manifest through a writable handle that way and leaves the file unchanged. A
+    /// manifest new may not write is locked through a read-only handle, which local
+    /// filesystems accept and NFS refuses: new then names the manifest and the OS
+    /// error and creates nothing.
+    #[cfg(unix)]
+    #[test]
+    fn new_takes_the_manifest_lock_that_nfs_grants() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        /// The exclusive whole-file byte-range lock NFS takes for `flock`.
+        fn byte_range_lock(file: &File) -> std::result::Result<(), TryLockError> {
+            // SAFETY: an all-zero flock is a valid value; the fields are set below.
+            let mut range: libc::flock = unsafe { std::mem::zeroed() };
+            range.l_type = libc::F_WRLCK as libc::c_short;
+            range.l_whence = libc::SEEK_SET as libc::c_short;
+            // SAFETY: a live descriptor and a valid flock that outlives the call.
+            match unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &range) } {
+                -1 => match std::io::Error::last_os_error() {
+                    error if matches!(error.raw_os_error(), Some(libc::EACCES | libc::EAGAIN)) => {
+                        Err(TryLockError::WouldBlock)
+                    }
+                    error => Err(TryLockError::Error(error)),
+                },
+                _ => Ok(()),
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("ntnt.toml");
+        initialize(&sqlite_init(&manifest, "app")).unwrap();
+        let before = std::fs::read(&manifest).unwrap();
+        let modified = std::fs::metadata(&manifest).unwrap().modified().unwrap();
+        let args = new_migration(&manifest, "accounts");
+        let (report, _) = create_migration_with(&args, byte_range_lock, |_| {}).unwrap();
+        assert_eq!(report["migration"]["source"], "0001_accounts.sql");
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        let unchanged = std::fs::metadata(&manifest).unwrap().modified().unwrap();
+        assert_eq!(unchanged, modified, "new modified the manifest");
+
+        let mode = |mode| std::fs::set_permissions(&manifest, PermissionsExt::from_mode(mode));
+        mode(0o444).unwrap();
+        // A process that may write it anyway (root) opens it for writing as before.
+        let writable = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&manifest)
+            .is_ok();
+        let result =
+            create_migration_with(&new_migration(&manifest, "events"), byte_range_lock, |_| {});
+        mode(0o644).unwrap();
+        let migrations = dir.path().join(MIGRATIONS_DIR);
+        if writable {
+            assert_eq!(result.unwrap().0["migration"]["source"], "0002_events.sql");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "DB_SCAFFOLD_IO");
+            assert!(error.message.contains(&shown(&manifest)), "{error}");
+            assert!(error.message.contains("(os error"), "{error}");
+            assert_eq!(file_names(&migrations), ["0001_accounts.sql"]);
+        }
+    }
+
+    /// A `new` that starts while init holds the manifest lock refuses and creates
+    /// nothing.
+    #[test]
+    fn new_refuses_while_init_holds_the_manifest_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = manifest_with_app(dir.path());
+        let mut new = None;
+        let mut args = new_migration(&manifest, "accounts");
+        args.database = Some("app".into());
+        initialize_with(&sqlite_init(&manifest, "analytics"), File::try_lock, |at| {
+            if at == Step::Write {
+                new = Some(create_migration(&args));
+            }
+        })
+        .unwrap();
+        let error = new
+            .expect("new ran while init held the lock")
+            .expect_err("new succeeded while init held the manifest lock");
+        assert_new_conflict(&error, &manifest);
+        assert!(file_names(&dir.path().join("app")).is_empty());
     }
 
     #[test]
