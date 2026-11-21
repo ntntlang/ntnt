@@ -755,7 +755,12 @@ mod tests {
     /// #421: replaying n migrations inspects n + 1 states, and reads each
     /// object's metadata and compiles its programs once, when the migration
     /// that creates it runs, not again after every later migration. The work
-    /// is exact for n and 2n; it used to grow with the square of n.
+    /// is exact for n and 2n; it used to grow with the square of n. That
+    /// holds for histories dense in foreign keys too: a new table that
+    /// references the last of a chain of ON DELETE CASCADE keys, a hub that
+    /// every table references (each with an index and a trigger), and a DAG
+    /// of CASCADE and SET NULL keys. The DELETE of every table above a new
+    /// one now cascades into it, yet none of them is compiled again.
     #[test]
     fn replay_inspection_work_grows_linearly_with_history() {
         const N: u64 = 8;
@@ -763,6 +768,33 @@ mod tests {
         // An index and a view per table as well.
         let views = |i: usize| {
             format!("CREATE TABLE t{i}(id INTEGER PRIMARY KEY, v TEXT); CREATE INDEX t{i}_v ON t{i}(v); CREATE VIEW v{i} AS SELECT id, v FROM t{i};")
+        };
+        let chain = |i: usize| {
+            match i {
+            1 => "CREATE TABLE t1(id INTEGER PRIMARY KEY);".to_owned(),
+            _ => format!(
+                "CREATE TABLE t{i}(id INTEGER PRIMARY KEY, prev INTEGER REFERENCES t{}(id) ON DELETE CASCADE);",
+                i - 1
+            ),
+        }
+        };
+        let hub = |i: usize| {
+            match i {
+            1 => "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT UNIQUE); CREATE TABLE audit(id INTEGER PRIMARY KEY, what TEXT);".to_owned(),
+            _ => format!(
+                "CREATE TABLE t{i}(id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, v TEXT); CREATE INDEX t{i}_user ON t{i}(user_id); CREATE TRIGGER t{i}_audit AFTER UPDATE OF v ON t{i} BEGIN INSERT INTO audit(what) VALUES ('t{i}'); END;"
+            ),
+        }
+        };
+        let dag = |i: usize| {
+            match i {
+            1 | 2 => format!("CREATE TABLE t{i}(id INTEGER PRIMARY KEY);"),
+            _ => format!(
+                "CREATE TABLE t{i}(id INTEGER PRIMARY KEY, a INTEGER REFERENCES t{}(id) ON DELETE CASCADE, b INTEGER REFERENCES t{}(id) ON DELETE SET NULL);",
+                1 + (i * 7) % (i - 1),
+                1 + (i * 13) % (i - 1)
+            ),
+        }
         };
         for n in [N, 2 * N] {
             let work = replay_work(n as usize, tables);
@@ -780,6 +812,20 @@ mod tests {
             assert_eq!(work.metadata_queries, 4 * n, "{work:?}");
             // The view's SELECT too.
             assert_eq!(work.programs_compiled, 7 * n, "{work:?}");
+            assert_eq!(work.allowlists, n, "{work:?}");
+            for (shape, history) in [("chain", &chain as &dyn Fn(usize) -> String), ("dag", &dag)] {
+                let work = replay_work(n as usize, history);
+                assert_eq!(work.catalogs, n + 1, "{shape} {work:?}");
+                assert_eq!(work.metadata_queries, 2 * n, "{shape} {work:?}");
+                assert_eq!(work.programs_compiled, 6 * n, "{shape} {work:?}");
+                assert_eq!(work.allowlists, n, "{shape} {work:?}");
+            }
+            let work = replay_work(n as usize, hub);
+            assert_eq!(work.catalogs, n + 1, "{work:?}");
+            // users (with the index of its UNIQUE email) and audit, then a
+            // table and its index per migration.
+            assert_eq!(work.metadata_queries, 4 * n + 2, "{work:?}");
+            assert_eq!(work.programs_compiled, 6 * n + 6, "{work:?}");
             assert_eq!(work.allowlists, n, "{work:?}");
         }
     }
@@ -918,12 +964,15 @@ mod tests {
     /// same coverage and json_digest of that catalog as the fingerprint, or
     /// the same error. The first inspection after a migration goes through
     /// `catalog`, `fingerprint` and `coverage` in turn. A failed migration's
-    /// state is inspected too. Returns the migrations that failed and how
-    /// many states were outside coverage.
+    /// state is inspected too. `depth_limit` lowers SQLite's limit on nested
+    /// trigger programs for the session. Returns the migrations that failed
+    /// and, after each migration, what was outside coverage (`None` where
+    /// inspection failed).
     fn assert_incremental_inspection_is_exact(
         scripts: &[(String, Option<&str>)],
         restart: usize,
-    ) -> (Vec<String>, usize) {
+        depth_limit: Option<i32>,
+    ) -> (Vec<String>, Vec<Option<Vec<String>>>) {
         let project = sqlite_project_with(scripts);
         let inputs = &project.inputs;
         current_thread().block_on(async {
@@ -931,7 +980,10 @@ mod tests {
             let Adapter::Sqlite(db) = &scratch else {
                 unreachable!("a SQLite scratch")
             };
-            let (mut failed, mut uncovered_states) = (Vec::new(), 0);
+            if let Some(limit) = depth_limit {
+                db.set_trigger_depth_limit(limit).await.unwrap();
+            }
+            let (mut failed, mut states) = (Vec::new(), Vec::new());
             for (index, migration) in inputs.migrations.iter().enumerate() {
                 if index == restart {
                     // A rolled-back replay leaves the session's cache behind.
@@ -987,13 +1039,18 @@ mod tests {
                     };
                     assert_eq!(reported.map_err(error), expect(&fresh), "{at}, call {call}");
                 }
-                if fresh.is_ok_and(|catalog| !catalog.uncovered.is_empty()) {
-                    uncovered_states += 1;
-                }
+                states.push(fresh.ok().map(|catalog| catalog.uncovered));
             }
             scratch.rollback().await.unwrap();
-            (failed, uncovered_states)
+            (failed, states)
         })
+    }
+    /// How many of these states were outside coverage.
+    fn uncovered_states(states: &[Option<Vec<String>>]) -> usize {
+        states
+            .iter()
+            .filter(|state| state.as_ref().is_some_and(|u| !u.is_empty()))
+            .count()
     }
 
     /// #421: what a session reuses from its earlier inspections never
@@ -1047,7 +1104,8 @@ mod tests {
         .enumerate()
         .map(|(i, sql)| (sql, (i == 28).then_some("accounts")))
         .collect();
-        let (failed, uncovered) = assert_incremental_inspection_is_exact(&written, 29);
+        let (failed, states) = assert_incremental_inspection_is_exact(&written, 29, None);
+        let uncovered = uncovered_states(&states);
         // Only the two that leave m's foreign key without a unique parent key
         // fail, at the foreign-key check, and several states are outside
         // coverage.
@@ -1064,7 +1122,8 @@ mod tests {
             .into_iter()
             .map(|sql| (sql, None))
             .collect();
-        let (failed, uncovered) = assert_incremental_inspection_is_exact(&generated, 120);
+        let (failed, states) = assert_incremental_inspection_is_exact(&generated, 120, None);
+        let uncovered = uncovered_states(&states);
         // Most of the generated history runs (replay refuses some drops that
         // would run ON DELETE actions, and what follows them can fail), and
         // both covered and uncovered states occur.
@@ -1139,6 +1198,276 @@ mod tests {
         ));
         assert_eq!(code(unreadable), Err("DB_TARGET_CHANGED".into()));
         assert_eq!(code(Err(failure("DB_TIMEOUT"))), Err("DB_TIMEOUT".into()));
+    }
+
+    /// The tables outside coverage in each state, by name.
+    fn uncovered_tables(states: &[Option<Vec<String>>]) -> Vec<Vec<String>> {
+        states
+            .iter()
+            .map(|state| {
+                state
+                    .iter()
+                    .flatten()
+                    .map(|key| {
+                        key.strip_prefix("table:\"")
+                            .and_then(|k| k.strip_suffix('"'))
+                            .unwrap_or(key)
+                            .to_owned()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// #421: a table's programs are reused across changes below it in its
+    /// foreign-key tree only where compiling them again could not change
+    /// what they report. Each step here changes something below an unchanged
+    /// table that takes it outside coverage, or brings it back: through
+    /// cascades several levels deep, SET NULL, SET DEFAULT (with a function
+    /// default) and ON UPDATE CASCADE actions, RESTRICT, a key whose parent
+    /// key is not unique, triggers on children that the action fires or does
+    /// not fire, a REPLACE conflict on a WITHOUT ROWID parent, a cycle, a
+    /// table that references itself, and children dropped again.
+    #[test]
+    fn incremental_inspection_is_exact_when_foreign_keys_change_below_a_table() {
+        let l = "_ntnt_schema_migrations_v2";
+        let gone = |table: &str, event: &str| {
+            format!("CREATE TRIGGER {table}_t AFTER {event} ON {table} BEGIN DELETE FROM {l}; END;")
+        };
+        let undo = |table: &str| format!("DROP TRIGGER {table}_t;");
+        let steps: Vec<(String, &[&str])> = vec![
+            ("CREATE TABLE a(id INTEGER PRIMARY KEY, k TEXT UNIQUE);".into(), &[]),
+            ("CREATE TABLE b(id INTEGER PRIMARY KEY, a_id INTEGER REFERENCES a(id) ON DELETE CASCADE);".into(), &[]),
+            ("CREATE TABLE c(id INTEGER PRIMARY KEY, b_id INTEGER REFERENCES b(id) ON DELETE CASCADE);".into(), &[]),
+            // A cascade three levels below a.
+            (format!("CREATE TABLE d(id INTEGER PRIMARY KEY, c_id INTEGER REFERENCES c(id) ON DELETE CASCADE); {}", gone("d", "DELETE")), &["a", "b", "c", "d"]),
+            (undo("d"), &[]),
+            // SET NULL updates the key column of the child: an UPDATE OF
+            // trigger on that column fires, one on another column does not.
+            ("CREATE TABLE e(id INTEGER PRIMARY KEY, b_id INTEGER REFERENCES b(id) ON DELETE SET NULL);".into(), &[]),
+            (gone("e", "UPDATE OF b_id"), &["a", "b", "e"]),
+            (undo("e"), &[]),
+            (gone("e", "UPDATE OF id"), &["e"]),
+            (undo("e"), &[]),
+            // ON UPDATE CASCADE and RESTRICT through a unique key; a key into
+            // a column that is not unique takes the parent's programs and,
+            // through the cascade, the grandparent's outside coverage.
+            ("CREATE TABLE f(id INTEGER PRIMARY KEY, a_k TEXT REFERENCES a(k) ON UPDATE CASCADE ON DELETE RESTRICT);".into(), &[]),
+            ("CREATE TABLE g(id INTEGER PRIMARY KEY, f_a_k TEXT REFERENCES f(a_k) ON UPDATE CASCADE);".into(), &["a", "f", "g"]),
+            ("DROP TABLE g;".into(), &[]),
+            ("CREATE UNIQUE INDEX f_a_k ON f(a_k); CREATE TABLE g(id INTEGER PRIMARY KEY, f_a_k TEXT REFERENCES f(a_k) ON UPDATE CASCADE);".into(), &[]),
+            (gone("g", "UPDATE"), &["a", "f", "g"]),
+            (undo("g"), &[]),
+            // SET DEFAULT with function defaults.
+            ("CREATE TABLE h(id INTEGER PRIMARY KEY, a_id INTEGER DEFAULT (abs(-1)) REFERENCES a(id) ON DELETE SET DEFAULT, at TEXT DEFAULT (datetime('now')));".into(), &[]),
+            (gone("h", "UPDATE OF a_id"), &["a", "h"]),
+            (undo("h"), &[]),
+            // A REPLACE conflict on the parent deletes rows too.
+            ("CREATE TABLE w(k TEXT PRIMARY KEY ON CONFLICT REPLACE, v TEXT) WITHOUT ROWID;".into(), &[]),
+            (format!("CREATE TABLE wc(id INTEGER PRIMARY KEY, w_k TEXT REFERENCES w(k) ON DELETE CASCADE); {}", gone("wc", "DELETE")), &["w", "wc"]),
+            (undo("wc"), &[]),
+            // A cycle, and a table that references itself.
+            ("CREATE TABLE x1(id INTEGER PRIMARY KEY, x2_id INTEGER REFERENCES x2(id) ON DELETE CASCADE); CREATE TABLE x2(id INTEGER PRIMARY KEY, x1_id INTEGER REFERENCES x1(id) ON DELETE CASCADE);".into(), &[]),
+            (format!("CREATE TABLE x3(id INTEGER PRIMARY KEY, x2_id INTEGER REFERENCES x2(id) ON DELETE CASCADE); {}", gone("x3", "DELETE")), &["x1", "x2", "x3"]),
+            (undo("x3"), &[]),
+            ("CREATE TABLE tree(id INTEGER PRIMARY KEY, parent INTEGER REFERENCES tree(id) ON DELETE CASCADE);".into(), &[]),
+            (format!("CREATE TABLE twig(id INTEGER PRIMARY KEY, tree_id INTEGER REFERENCES tree(id) ON DELETE CASCADE); {}", gone("twig", "DELETE")), &["tree", "twig"]),
+            (undo("twig"), &[]),
+            // ON UPDATE CASCADE into a child that itself cascades updates to
+            // a grandchild: the child's UPDATE is no longer a leaf.
+            ("CREATE TABLE c2(id INTEGER PRIMARY KEY, c_id INTEGER REFERENCES c(id) ON DELETE CASCADE ON UPDATE CASCADE);".into(), &[]),
+            ("CREATE UNIQUE INDEX c2_c ON c2(c_id); CREATE TABLE c3(id INTEGER PRIMARY KEY, c2_c INTEGER REFERENCES c2(c_id) ON UPDATE CASCADE);".into(), &[]),
+            (gone("c3", "UPDATE"), &["c", "c2", "c3"]),
+            (undo("c3"), &[]),
+            // Children dropped, a parent changed, and a cascade four levels deep.
+            ("DROP TABLE e; DROP TABLE wc;".into(), &[]),
+            ("ALTER TABLE b ADD COLUMN note TEXT;".into(), &[]),
+            (format!("CREATE TABLE deep(id INTEGER PRIMARY KEY, d_id INTEGER REFERENCES d(id) ON DELETE CASCADE); {}", gone("deep", "DELETE")), &["a", "b", "c", "d", "deep"]),
+            (undo("deep"), &[]),
+        ];
+        let scripts: Vec<(String, Option<&str>)> =
+            steps.iter().map(|(sql, _)| (sql.clone(), None)).collect();
+        let (failed, states) = assert_incremental_inspection_is_exact(&scripts, usize::MAX, None);
+        // The key into a column that is not unique fails the foreign-key
+        // check; its state is inspected all the same.
+        assert_eq!(
+            failed,
+            ["0012_step.sql DB_SQLITE: SQLite operation failed (code 1). Details suppressed."]
+        );
+        let expected: Vec<Vec<String>> = steps
+            .iter()
+            .map(|(_, tables)| tables.iter().map(|t| (*t).to_owned()).collect())
+            .collect();
+        assert_eq!(uncovered_tables(&states), expected);
+    }
+
+    /// #421: a program that nests sub-programs `SQLITE_LIMIT_TRIGGER_DEPTH`
+    /// levels deep does not compile. With the limit lowered to 5, a cascade
+    /// chain takes the tables at its top outside coverage one by one as it
+    /// grows past 5 levels below them, and back as it shrinks. Where the
+    /// longest path below a table is past the limit but SQLite need not
+    /// take it (it reaches s through d0's own key first, and finds s already
+    /// coded at the end of the long path), and where a trigger in the chain
+    /// leaves only a loose bound, the table is compiled again: d0 still
+    /// compiles in the first case and not in the second.
+    #[test]
+    fn incremental_inspection_is_exact_at_the_trigger_depth_limit() {
+        let link = |i: usize| {
+            format!("CREATE TABLE d{i}(id INTEGER PRIMARY KEY, p INTEGER REFERENCES d{}(id) ON DELETE CASCADE);", i - 1)
+        };
+        let mut steps: Vec<(String, &[&str])> =
+            vec![("CREATE TABLE d0(id INTEGER PRIMARY KEY);".into(), &[])];
+        for i in 1..=5 {
+            steps.push((link(i), &[]));
+        }
+        steps.extend([
+            (link(6), &["d0"][..]),
+            (link(7), &["d0", "d1"]),
+            ("DROP TABLE d7;".into(), &["d0"]),
+            ("DROP TABLE d6;".into(), &[]),
+            // s is one level below d0 and five below it through d1..d4.
+            ("CREATE TABLE s(id INTEGER PRIMARY KEY, d4_id INTEGER REFERENCES d4(id) ON DELETE CASCADE, d0_id INTEGER REFERENCES d0(id) ON DELETE CASCADE);".into(), &[]),
+            ("CREATE TABLE s2(id INTEGER PRIMARY KEY, s_id INTEGER REFERENCES s(id) ON DELETE CASCADE);".into(), &[]),
+            ("DROP TABLE s2;".into(), &[]),
+            ("CREATE TABLE au(id INTEGER); CREATE TRIGGER d3_t AFTER DELETE ON d3 BEGIN INSERT INTO au VALUES (old.id); END;".into(), &[]),
+            (link(6), &["d0"]),
+        ]);
+        let scripts: Vec<(String, Option<&str>)> =
+            steps.iter().map(|(sql, _)| (sql.clone(), None)).collect();
+        let (failed, states) =
+            assert_incremental_inspection_is_exact(&scripts, usize::MAX, Some(5));
+        assert_eq!(failed, Vec::<String>::new());
+        let expected: Vec<Vec<String>> = steps
+            .iter()
+            .map(|(_, tables)| tables.iter().map(|t| (*t).to_owned()).collect())
+            .collect();
+        assert_eq!(uncovered_tables(&states), expected);
+    }
+
+    /// `steps` migrations over a few tables that reference each other and
+    /// themselves through the rowid or a unique key, with every ON DELETE
+    /// and ON UPDATE action, function defaults, triggers on any of them that
+    /// write another (now and then the ledger), indexes, added columns and
+    /// drops (none that replay refuses). Each migration is one an in-memory
+    /// SQLite database with foreign keys on accepted after the ones before it.
+    fn generated_foreign_key_history(steps: usize, seed: u64) -> Vec<String> {
+        const TABLES: &[&str] = &["f0", "f1", "f2", "f3", "f4", "f5"];
+        const ACTIONS: &[&str] = &[
+            "NO ACTION",
+            "RESTRICT",
+            "CASCADE",
+            "SET NULL",
+            "SET DEFAULT",
+        ];
+        const EVENTS: &[&str] = &[
+            "DELETE",
+            "INSERT",
+            "UPDATE",
+            "UPDATE OF v",
+            "UPDATE OF r0",
+            "UPDATE OF s0",
+            "UPDATE OF k",
+        ];
+        let mut rng = Rng(seed);
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON;")
+            .unwrap();
+        let mut history = Vec::new();
+        while history.len() < steps {
+            let t = rng.pick(TABLES);
+            let other = rng.pick(TABLES);
+            let statement = match rng.below(14) {
+                0..=4 => {
+                    let mut columns = String::from("id INTEGER PRIMARY KEY, k TEXT UNIQUE, v TEXT");
+                    for j in 0..rng.below(3) {
+                        let target = rng.pick(TABLES);
+                        let column = match rng.below(3) {
+                            0 => format!("r{j} INTEGER DEFAULT (abs(-1)) REFERENCES {target}(id)"),
+                            1 => format!("s{j} TEXT REFERENCES {target}(k)"),
+                            _ => format!("r{j} INTEGER REFERENCES {target}"),
+                        };
+                        let (on_delete, on_update) = (rng.pick(ACTIONS), rng.pick(ACTIONS));
+                        columns.push_str(&format!(
+                            ", {column} ON DELETE {on_delete} ON UPDATE {on_update}"
+                        ));
+                    }
+                    format!("CREATE TABLE {t}({columns})")
+                }
+                5 => {
+                    // Replay refuses to drop a table whose rows other tables'
+                    // ON DELETE actions would change (#419).
+                    let refused: i64 = db
+                        .query_row(
+                            "SELECT count(*) FROM sqlite_schema AS m, pragma_foreign_key_list(m.name) AS f \
+                             WHERE m.type = 'table' AND m.name <> ?1 COLLATE NOCASE AND f.\"table\" = ?1 COLLATE NOCASE \
+                             AND f.on_delete IN ('CASCADE', 'SET NULL', 'SET DEFAULT')",
+                            [t],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    if refused > 0 {
+                        continue;
+                    }
+                    format!("DROP TABLE {t}")
+                }
+                6..=8 => {
+                    let body = match rng.below(9) {
+                        0 | 1 => format!("DELETE FROM {other} WHERE id = 0"),
+                        2 => format!("UPDATE {other} SET k = k WHERE id = 0"),
+                        3 => format!("UPDATE {other} SET v = v WHERE id = 0"),
+                        4 | 5 => format!("INSERT INTO {other}(v) VALUES ('x')"),
+                        6 => "DELETE FROM _ntnt_schema_migrations_v2".to_owned(),
+                        _ => "SELECT 1".to_owned(),
+                    };
+                    let event = EVENTS[rng.below(EVENTS.len())];
+                    let name = ["ga", "gb", "gc"][rng.below(3)];
+                    format!("CREATE TRIGGER {name} AFTER {event} ON {t} BEGIN {body}; END")
+                }
+                9 => format!("DROP TRIGGER {}", ["ga", "gb", "gc"][rng.below(3)]),
+                10 => format!(
+                    "CREATE {}INDEX {} ON {t}(v)",
+                    ["", "UNIQUE "][rng.below(2)],
+                    ["ia", "ib"][rng.below(2)]
+                ),
+                11 => format!("DROP INDEX {}", ["ia", "ib"][rng.below(2)]),
+                _ => format!("ALTER TABLE {t} ADD COLUMN z{} TEXT", rng.below(3)),
+            };
+            let script = format!("{statement};\n");
+            db.execute_batch("SAVEPOINT candidate").unwrap();
+            let accepted = db.execute_batch(&script).is_ok();
+            let end = if accepted {
+                "RELEASE candidate"
+            } else {
+                "ROLLBACK TO candidate; RELEASE candidate"
+            };
+            db.execute_batch(end).unwrap();
+            if accepted {
+                history.push(script);
+            }
+        }
+        history
+    }
+
+    /// #421: generated foreign-key histories, at SQLite's own limit on
+    /// nested trigger programs and at a limit of 3 that their cascades reach.
+    #[test]
+    fn incremental_inspection_is_exact_over_generated_foreign_key_histories() {
+        let mut uncovered = 0;
+        for (seed, limit) in [
+            (0x2545_f491_4f6c_dd1d, None),
+            (0x9e37_79b9_7f4a_7c15, Some(3)),
+            (0x1234_5678_9abc_def1, Some(3)),
+        ] {
+            let history: Vec<_> = generated_foreign_key_history(100, seed)
+                .into_iter()
+                .map(|sql| (sql, None))
+                .collect();
+            let (failed, states) = assert_incremental_inspection_is_exact(&history, 50, limit);
+            assert!(failed.len() <= 50, "{failed:?}");
+            uncovered += uncovered_states(&states);
+        }
+        // Both covered and uncovered states occur.
+        assert!((30..=270).contains(&uncovered), "{uncovered}");
     }
 
     #[test]

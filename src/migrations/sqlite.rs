@@ -1288,6 +1288,18 @@ impl Sqlite {
     pub async fn stats(&self) -> Result<Stats> {
         self.run(|s| Ok(s.cache.stats)).await
     }
+    /// Lower SQLite's limit on nested trigger programs for this session, so
+    /// a test reaches it with a small schema.
+    #[cfg(test)]
+    pub async fn set_trigger_depth_limit(&self, limit: i32) -> Result<()> {
+        self.run(move |s| {
+            s.conn
+                .set_limit(Limit::SQLITE_LIMIT_TRIGGER_DEPTH, limit)
+                .map_err(sql_error)?;
+            Ok(())
+        })
+        .await
+    }
     /// The catalog as an inspection that reuses nothing reports it. The
     /// session keeps what it had for later inspections.
     #[cfg(test)]
