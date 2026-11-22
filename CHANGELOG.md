@@ -58,6 +58,11 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   lock and that nothing was committed (#424, #425).
 - `ntnt db` (SQLite): an empty scratch also takes the target's page size,
   encoding and auto-vacuum (#425).
+- `ntnt db`: an adoption plan refused because the target holds tables the history
+  does not create names them, and says how to retire an application's previous
+  migration ledger (#431).
+- `ntnt db new` pads a new migration's ID to the width of the widest existing ID,
+  or four digits in an empty directory (#431).
 - `ntnt run`: a runtime error raised in an imported module names that module's
   file and line, shows its source, and lists the call sites that led there
   (#412).

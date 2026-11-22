@@ -107,6 +107,19 @@ reports a runtime error in an imported module against that module's file.
   - On NFS, a read-only `ntnt.toml` cannot be locked, so `ntnt db new` fails
     with `DB_SCAFFOLD_IO` naming the file and the error.
 
+- **Adopting an application with its own migration ledger.** When `plan
+  --adopt-through` is refused because the target holds tables the history does
+  not create, the advice names them. If one is the application's previous
+  migration ledger, it gives the commands to retire it: on PostgreSQL, move it
+  to a schema of its own; on SQLite, copy it to another file and drop it.
+  `DATABASE_MIGRATIONS.md` has a new section on retiring an application's
+  previous ledger. Tested by adopting a copy of a real application's 33
+  PostgreSQL migrations (#431).
+- **`ntnt db new` keeps the ID width.** A new migration's ID is padded to the
+  width of the widest existing ID, so a history numbered `001_` to `033_` gets
+  `034_`, which sorts last in `ls` and shell globs. An empty directory still
+  gets four digits (#431).
+
 ## `ntnt db` refusals say what to fix
 
 Refusals that used one fixed message now name the file, secret, migration or
