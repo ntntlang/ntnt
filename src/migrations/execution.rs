@@ -195,7 +195,7 @@ fn authorize(inputs: &CapturedInputs, saved: &Value) -> Result<()> {
         );
         return Err(refuse(
             format!("Database {database} declares no approval_secret, so migrate cannot run any plan for it. No target or ledger writes were attempted."),
-            format!("Declare one: add approval_secret = \"{suggested}\" to [databases.{database}] and a [secrets.{suggested}] table to the manifest. The manifest is part of the plan, so then plan, review and approve again: set {suggested} to the new plan's plan_digest through the secrets provider and run migrate with that plan."),
+            format!("Declare one: add approval_secret = \"{suggested}\" to [databases.{database}] and a {} table to the manifest. The manifest is part of the plan, so then plan, review and approve again: set {suggested} to the new plan's plan_digest through the secrets provider and run migrate with that plan.", super::secrets_table(&suggested)),
         ));
     };
     // The digest of an intact saved plan: validate ran first.
@@ -204,7 +204,7 @@ fn authorize(inputs: &CapturedInputs, saved: &Value) -> Result<()> {
         Ok(approval) if saved["plan_digest"].as_str() == Some(approval.expose()) => Ok(()),
         Err(Undeclared) => Err(refuse(
             format!("Approval secret {name} is not declared under [secrets] in the manifest, so database {database}'s approval_secret cannot be resolved. No target or ledger writes were attempted."),
-            format!("Add a [secrets.{name}] table to the manifest (the name only, never its value). The manifest is part of the plan, so then plan, review and approve again: set {name} to the new plan's plan_digest through the secrets provider and run migrate with that plan."),
+            format!("Add a {} table to the manifest (the name only, never its value). The manifest is part of the plan, so then plan, review and approve again: set {name} to the new plan's plan_digest through the secrets provider and run migrate with that plan.", super::secrets_table(name)),
         )),
         // The provider cannot read any secret: say how to fix that.
         Err(error @ (EnvProviderDisabled | UnsupportedProvider | ProviderConfiguration | InvalidDeclarations)) => {

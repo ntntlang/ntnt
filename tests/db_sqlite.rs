@@ -1476,6 +1476,88 @@ fn a_missing_approval_declaration_is_named() {
     assert_eq!(applied["outcome"], "pass", "{applied}");
 }
 
+/// CodeRabbit on #445 (report.rs, execution.rs): TOML reads
+/// `[secrets.DB.target]` as nested tables, so for a dotted secret name the
+/// suggested table quotes the name. Written into ntnt.toml as suggested, it
+/// declares that secret: inspection passes, and so does migrate once the
+/// dotted approval secret is declared, planned and approved again.
+#[test]
+fn suggested_secrets_tables_declare_dotted_names() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let manifest = f.root.path().join("ntnt.toml");
+    let declared = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        declared
+            .replace("\"DB_TARGET\"", "\"DB.target\"")
+            .replace("[secrets.DB_TARGET]\n", "")
+            .replace("\"DB_APPROVAL\"", "\"deploy.approval\"")
+            .replace("[secrets.DB_APPROVAL]\n", ""),
+    )
+    .unwrap();
+    // Appends the table a next action suggests to the manifest, as written.
+    let follow = |d: &Value| {
+        let action = d["next_action"].as_str().unwrap();
+        let table = action
+            .strip_prefix("Add a ")
+            .and_then(|rest| rest.split(" table to the manifest").next())
+            .unwrap_or_else(|| panic!("{d}"))
+            .to_owned();
+        let mut text = std::fs::read_to_string(&manifest).unwrap();
+        text.push_str(&format!("{table}\n"));
+        std::fs::write(&manifest, text).unwrap();
+        table
+    };
+    let run = |command: &str, args: &[&str], approval: Option<&str>| {
+        let mut process = f.process(command);
+        process.args(args).env("DB.target", &f.target_path);
+        if let Some(digest) = approval {
+            process.env("deploy.approval", digest);
+        }
+        let output = process.output().unwrap();
+        serde_json::from_slice::<Value>(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    let r = run("status", &[], None);
+    let d = diagnostic(&r, "DB_SECRET");
+    assert_eq!(
+        d["message"],
+        "Target connection secret DB.target is not declared under [secrets] in the manifest.",
+        "{d}"
+    );
+    assert_eq!(follow(d), "[secrets.\"DB.target\"]");
+    let r = run("status", &[], None);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let plan = run("plan", &["--out", "review.json"], None);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let r = run(
+        "migrate",
+        &["--plan", "review.json"],
+        plan["plan_digest"].as_str(),
+    );
+    let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Approval secret deploy.approval is not declared under [secrets]"),
+        "{d}"
+    );
+    assert_eq!(follow(d), "[secrets.\"deploy.approval\"]");
+    let plan = run("plan", &["--out", "review-2.json"], None);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let applied = run(
+        "migrate",
+        &["--plan", "review-2.json"],
+        plan["plan_digest"].as_str(),
+    );
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
 /// #425 (cli-01): a plan whose save fails after the replay (here: the saved
 /// plan would exceed the 1 MiB readback limit) prints no plan digest in the
 /// human report, since there is no saved plan to approve.

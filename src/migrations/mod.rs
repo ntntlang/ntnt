@@ -341,6 +341,35 @@ fn database_runtime_on<T>(
     result
 }
 
+/// The `[secrets.<name>]` table that declares secret `name`, for advice. The
+/// name is quoted where TOML needs it: `[secrets."DB.app"]` declares
+/// `DB.app`, while `[secrets.DB.app]` would be nested tables.
+fn secrets_table(name: &str) -> String {
+    format!("[secrets.{}]", toml_key(name))
+}
+/// `key` as a TOML key: bare where TOML allows it (ASCII letters, digits, `_`
+/// and `-`), otherwise a basic string.
+fn toml_key(key: &str) -> String {
+    use std::fmt::Write;
+    let bare = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+    if !key.is_empty() && key.bytes().all(bare) {
+        return key.to_owned();
+    }
+    let mut quoted = String::from('"');
+    for c in key.chars() {
+        match c {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            c if c.is_control() => {
+                let _ = write!(quoted, "\\u{:04X}", u32::from(c));
+            }
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// What `--out` holds for `command`.
 fn saved_artifact(command: &str) -> &'static str {
     if command == "plan" {
@@ -1098,6 +1127,28 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// CodeRabbit on #445 (report.rs, execution.rs): a suggested [secrets]
+    /// table declares exactly the name it was made for. Plain names stay
+    /// bare; a dotted name, and anything else TOML cannot hold bare, is quoted.
+    #[test]
+    fn suggested_secrets_tables_declare_their_name() {
+        assert_eq!(super::secrets_table("DB_TARGET"), "[secrets.DB_TARGET]");
+        assert_eq!(super::secrets_table("app-db2"), "[secrets.app-db2]");
+        assert_eq!(super::secrets_table("DB.app"), "[secrets.\"DB.app\"]");
+        for name in [
+            "DB_TARGET",
+            "app-db2",
+            "DB.app",
+            "a.b.c",
+            "q\"uote\\d",
+            "tab\there",
+        ] {
+            let manifest: toml::Value = toml::from_str(&super::secrets_table(name)).unwrap();
+            let secrets = manifest["secrets"].as_table().unwrap();
+            assert_eq!(secrets.keys().collect::<Vec<_>>(), [name], "{name}");
+            assert!(secrets[name].as_table().unwrap().is_empty(), "{name}");
+        }
+    }
     /// CodeRabbit on #445 (mod.rs): an output file this run created but could
     /// not write or sync is removed, and the write's own error is kept. The
     /// refusal says so, and its advice, a rerun with the same --out, saves.

@@ -59,7 +59,7 @@ pub(super) fn unresolved_secret(
         ),
         Undeclared => (
             format!("{subject} is not declared under [secrets] in the manifest."),
-            format!("Add a [secrets.{name}] table to the manifest (the name only, never its value), then rerun."),
+            format!("Add a {} table to the manifest (the name only, never its value), then rerun.", super::secrets_table(name)),
         ),
         InvalidDeclarations => (
             format!("{subject} cannot be resolved: the manifest's [secrets] declarations are invalid."),
