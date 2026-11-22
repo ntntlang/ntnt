@@ -58,7 +58,10 @@ reports a runtime error in an imported module against that module's file.
   schemas (for example `public.audit_log`), with the same coverage and drift
   rules as the managed schema. An object dropped there out of band is now
   reported as drift, not as a pass. Other objects in those schemas are not
-  inspected (#420).
+  inspected. A foreign key from a table the history does not track into one
+  it creates outside the managed schema blocks execution with
+  `DB_EXTERNAL_DEPENDENCY`, as one into a managed table does, so a `DELETE`
+  cannot cascade into rows the plan never saw (#420).
 - **Statements outside the managed schema** run as written. A pending statement
   that may act outside the managed scope (a qualified name, an `IN SCHEMA` list,
   `search_path`, or SQL the parser cannot read) is flagged in the plan with the
@@ -111,7 +114,9 @@ reports a runtime error in an imported module against that module's file.
   --adopt-through` is refused because the target holds tables the history does
   not create, the advice names them. If one is the application's previous
   migration ledger, it gives the commands to retire it: on PostgreSQL, move it
-  to a schema of its own; on SQLite, copy it to another file and drop it.
+  to a schema outside the inspected scope; on SQLite, check that no table
+  refers to it, copy it to another file, and drop it only once the copy
+  matches.
   `DATABASE_MIGRATIONS.md` has a new section on retiring an application's
   previous ledger. Tested by adopting a copy of a real application's 33
   PostgreSQL migrations (#431).
@@ -141,7 +146,8 @@ unchanged, and secret values, row values and file contents are never shown.
 - **Secrets and files.** `DB_SECRET` names the connection secret, its role
   (target, scratch or approval) and the cause, such as an unset environment
   variable, a missing `[secrets.<NAME>]` table or `NTNT_ENV=production`
-  disabling the env provider. `DB_FILE_IDENTITY` names the secret whose SQLite
+  disabling the env provider. A suggested `[secrets]` table quotes a dotted
+  name, so it declares that secret. `DB_FILE_IDENTITY` names the secret whose SQLite
   path broke a rule, and which rule, never the path. The SQLite quick start
   uses `"$(pwd -P)/data/app.sqlite"`, because `$PWD` keeps a symlinked
   directory, which is refused (#422).
@@ -151,12 +157,16 @@ unchanged, and secret values, row values and file contents are never shown.
   `DB_HISTORY_DIVERGENT` name the migration and how to restore it. A
   migration merged in below the last applied ID is told to take an unused ID
   above it. `DB_PLAN_STALE` names the binding that changed, such as the
-  selected target (#423).
+  selected target. Advice to rename a migration also renames its `.toml`
+  sidecar, and a migration added below an adopted checkpoint is named, never
+  a covered one (#423).
 - **Approval and output.** `DB_APPROVAL_REQUIRED` says how to approve the plan,
   instead of advising a new plan, whose digest would fail the same way.
   `DB_OUTPUT` names the file, and an `--out` file that already exists, or
-  whose directory does not, is refused before any replay or migration runs
-  (#425).
+  whose directory does not or passes through a file, is refused before any
+  replay or migration runs. A report that cannot be written completely is
+  removed, so the same `--out` works on a rerun. An approval secret the
+  provider cannot read is refused for that cause (#425).
 - **`--help`.** Each `ntnt db` subcommand lists only the flags it takes.
   Command lines accepted before are still accepted (#432).
 - **SQLite errors.** A failing statement gives SQLite's own message where it
@@ -183,9 +193,9 @@ unchanged, and secret values, row values and file contents are never shown.
 
 ## Upgrading
 
-- Finish any `migrate` that stopped during a concurrent index build with
-  `ntnt db reconcile` before upgrading. A plan saved by 0.6.3 whose pending
-  migrations act outside the managed schema no longer validates in 0.6.4, so
-  0.6.4 cannot reconcile that attempt (#440).
+- Finish or reconcile any interrupted `migrate` with 0.6.3 before upgrading.
+  0.6.4 cannot reconcile an attempt whose plan 0.6.3 saved when its pending
+  migrations act outside the managed schema, or when its applied history
+  creates another schema (#440).
 
 See [NTNT v0.6.3](v0.6.3.md) for the previous release.
