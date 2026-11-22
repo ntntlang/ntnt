@@ -28,10 +28,10 @@ impl Adoption {
     fn new(inputs: &CapturedInputs, count: usize, kind: &str) -> Result<Self> {
         if inputs.config.adoption_checks.is_empty() {
             let table = format!("[databases.{}.adoption_checks]", inputs.database_name);
-            let schema = &inputs.config.schema;
+            let example = example_check(&inputs.config.engine, &inputs.config.schema);
             return Err(refuse(
                 &format!("Adoption needs at least one named check, and {table} declares none. No history is inferred or repaired."),
-                &format!("Add a {table} table to the manifest with at least one named check that the existing data must pass, such as no_null_email = \"SELECT NOT EXISTS (SELECT 1 FROM {schema}.accounts WHERE email IS NULL)\", then plan again. See docs/DATABASE_MIGRATIONS.md#explicit-adoption-of-existing-databases."),
+                &format!("Add a {table} table to the manifest with at least one named check that the existing data must pass, such as {example}, then plan again. See docs/DATABASE_MIGRATIONS.md#explicit-adoption-of-existing-databases."),
             ));
         }
         if !(kind == "adopt_baseline"
@@ -171,6 +171,26 @@ pub(super) fn format(engine: &str) -> &'static str {
     } else {
         "postgresql-adoption-v1"
     }
+}
+
+/// The example check that the advice for a manifest without adoption
+/// checks gives: a TOML key and basic string, whose SQL names the managed
+/// `schema` as `engine` writes it (`"user"` needs its quotes on PostgreSQL).
+fn example_check(engine: &str, schema: &str) -> String {
+    let sql = format!(
+        "SELECT NOT EXISTS (SELECT 1 FROM {}.accounts WHERE email IS NULL)",
+        sql_name(engine, schema)
+    );
+    let mut string = String::with_capacity(sql.len());
+    for c in sql.chars() {
+        match c {
+            '\\' => string.push_str("\\\\"),
+            '"' => string.push_str("\\\""),
+            c if c.is_control() => string.push_str(&format!("\\u{:04X}", u32::from(c))),
+            c => string.push(c),
+        }
+    }
+    format!("no_null_email = \"{string}\"")
 }
 
 /// Where the docs say how to retire an application's previous migration ledger.
@@ -503,6 +523,38 @@ mod tests {
                 "{differences}"
             );
         }
+    }
+
+    /// The example check in the advice for a manifest without adoption
+    /// checks names the schema as SQL needs it, inside a TOML string that
+    /// parses back to that SQL; an ordinary name such as `app` stays bare.
+    #[test]
+    fn the_example_adoption_check_writes_the_schema_as_sql_and_toml_need_it() {
+        for (engine, schema, written) in [
+            ("postgresql", "app", "app"),
+            ("postgresql", "user", "\"user\""),
+            ("postgresql", "we\"ird\\", "\"we\"\"ird\\\""),
+            ("sqlite", "main", "main"),
+        ] {
+            let example = example_check(engine, schema);
+            let sql =
+                format!("SELECT NOT EXISTS (SELECT 1 FROM {written}.accounts WHERE email IS NULL)");
+            let parsed: toml::Table = example.parse().unwrap();
+            assert_eq!(
+                parsed["no_null_email"].as_str(),
+                Some(sql.as_str()),
+                "{example}"
+            );
+            assert_eq!(parsed.len(), 1, "{example}");
+        }
+        assert_eq!(
+            example_check("postgresql", "user"),
+            r#"no_null_email = "SELECT NOT EXISTS (SELECT 1 FROM \"user\".accounts WHERE email IS NULL)""#
+        );
+        assert_eq!(
+            example_check("postgresql", "app"),
+            r#"no_null_email = "SELECT NOT EXISTS (SELECT 1 FROM app.accounts WHERE email IS NULL)""#
+        );
     }
 
     #[test]

@@ -69,8 +69,11 @@ disposable = true
         .unwrap();
         let mut conn = Client::connect(&target_url, NoTls).unwrap();
         if schema != "public" {
-            conn.batch_execute(&format!("CREATE SCHEMA {schema}"))
-                .unwrap();
+            conn.batch_execute(&format!(
+                "CREATE SCHEMA \"{}\"",
+                schema.replace('"', "\"\"")
+            ))
+            .unwrap();
         }
         Self {
             admin,

@@ -2373,6 +2373,52 @@ fn drift_names(r: &Value, object: &str, change: &str) -> bool {
         .any(|d| d["object"] == object && d["change"] == change)
 }
 
+/// CodeRabbit on #445 (adoption.rs:34): a managed schema named `user` needs
+/// quotes in SQL. An adoption with no adoption_checks is refused with an
+/// example check; added to the manifest as the advice gives it, the check is
+/// accepted: the adoption plans, and migrates with the check run and passed.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn the_example_adoption_check_quotes_a_schema_named_user() {
+    let f = Fixture::with_schema("user");
+    let accounts = "CREATE TABLE \"user\".accounts (id int PRIMARY KEY, email text NOT NULL);";
+    f.sql("0001_accounts.sql", accounts);
+    f.target()
+        .batch_execute(&format!(
+            "{accounts} INSERT INTO \"user\".accounts VALUES (1, 'a@example.com');"
+        ))
+        .unwrap();
+    let refused = f.command_args("plan", &["--adopt-through", "1"]);
+    assert!(code(&refused, "DB_ADOPTION_INPUT"), "{refused}");
+    let advice = refused["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_ADOPTION_INPUT")
+        .unwrap()["next_action"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let example = advice
+        .split_once("such as ")
+        .and_then(|(_, rest)| rest.split_once(", then plan again"))
+        .map(|(example, _)| example)
+        .unwrap_or_else(|| panic!("no example check in {advice:?}"));
+    let manifest = f.root.path().join("ntnt.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str(&format!("\n[databases.app.adoption_checks]\n{example}\n"));
+    std::fs::write(&manifest, text).unwrap();
+    let plan = f.command_args("plan", &["--adopt-through", "1", "--out", "adoption.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let adopted = f.apply("adoption.json", plan["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{example}: {adopted}");
+    assert_eq!(adopted["assertions"]["executed"], 1, "{adopted}");
+    assert_eq!(
+        example,
+        r#"no_null_email = "SELECT NOT EXISTS (SELECT 1 FROM \"user\".accounts WHERE email IS NULL)""#
+    );
+}
+
 /// #420: a schema the history creates is managed through its whole life: a
 /// foreign key from it into the managed schema is not an external dependency,
 /// a later rename or DROP SCHEMA replays like any other change, and drift is
