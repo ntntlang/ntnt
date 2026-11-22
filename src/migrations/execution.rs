@@ -2,7 +2,7 @@
 //! The caller retains progress across cancellation; sessions are never pooled.
 use super::adapter::{self, Access, Adapter, Identity};
 use super::adoption::{self, Adoption};
-use super::inventory::{json_digest, CapturedInputs};
+use super::inventory::{json_digest, CapturedInputs, CatalogDigests};
 use super::model::History;
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
@@ -61,10 +61,11 @@ pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> 
         })
         .map(|m| {
             let mut s = m.summary();
-            s["analysis"] = json!(super::analysis::analyze_for(
+            s["analysis"] = json!(super::analysis::analyze_in_scope(
                 &inputs.config.engine,
                 &m.sql,
-                &inputs.config.schema
+                &inputs.config.schema,
+                &inputs.history_schemas
             ));
             s
         })
@@ -109,6 +110,7 @@ pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> 
         || b["target_name"] != inputs.target_name
         || b["managed_schema"] != inputs.config.schema
         || !limits_match(inputs, plan)
+        || outside_objects(saved).is_err()
         || plan["pending"] != json!(pending)
         || inputs.migrations.iter().take(end).any(|m| {
             !super::analysis::analyze_for(&inputs.config.engine, &m.sql, &inputs.config.schema)
@@ -118,6 +120,33 @@ pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> 
         return Err(stale());
     }
     Ok(base)
+}
+
+/// The objects outside the managed scope a plan inspects on the target, by
+/// catalog key: everything its replay found the history creates there
+/// (`report::Replayed::outside`). A plan without the field inspects none:
+/// its history creates nothing there, or it was saved before plans recorded
+/// them and inspected none either.
+fn outside_objects(saved: &Value) -> Result<Vec<String>> {
+    let Some(list) = saved["plan"]["execution"].get("outside_objects") else {
+        return Ok(vec![]);
+    };
+    let keys: Option<Vec<String>> =
+        list.as_array()
+            .filter(|keys| !keys.is_empty())
+            .and_then(|keys| {
+                keys.iter()
+                    .map(|key| {
+                        key.as_str()
+                            .filter(|key| !key.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .collect()
+            });
+    match keys {
+        Some(keys) if keys.windows(2).all(|pair| pair[0] < pair[1]) => Ok(keys),
+        _ => Err(stale()),
+    }
 }
 
 /// A plan binds the effective limits. One saved before plans recorded them
@@ -162,8 +191,16 @@ fn pending_concurrent_index(
 /// Validation result: applied count, history, identity, adoption already recorded.
 type Prefix = (usize, History, Identity, bool);
 
-async fn locked_prefix(db: &Adapter, inputs: &CapturedInputs, saved: &Value) -> Result<Prefix> {
-    let base = validate(inputs, saved)?;
+/// `base` is `validate(inputs, saved)`. The plan and captured inputs never
+/// change during a run, so callers validate once, not for every migration.
+/// `digests` fingerprints the target catalog, reusing unchanged objects.
+async fn locked_prefix(
+    db: &Adapter,
+    inputs: &CapturedInputs,
+    saved: &Value,
+    base: usize,
+    digests: &mut CatalogDigests,
+) -> Result<Prefix> {
     let action = Adoption::from_plan(inputs, saved)?;
     db.begin_migration(&inputs.config.schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
@@ -183,13 +220,19 @@ async fn locked_prefix(db: &Adapter, inputs: &CapturedInputs, saved: &Value) -> 
             .await?
     };
     let applied = super::report::prefix(&history, inputs)?;
-    let catalog = db
-        .catalog(&inputs.config.schema, &inputs.endpoint.role)
+    let outside = outside_objects(saved)?;
+    let (uncovered, fingerprint) = db
+        .fingerprint(
+            &inputs.config.schema,
+            &inputs.history_schemas,
+            &outside,
+            &inputs.endpoint.role,
+            digests,
+        )
         .await?;
     let adopted = if let Some(action) = &action {
-        if !catalog.uncovered.is_empty()
-            || json_digest(&catalog)
-                != saved["plan"]["execution"]["prefix_fingerprints"][action.count]
+        if !uncovered.is_empty()
+            || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][action.count]
         {
             return Err(stale());
         }
@@ -204,9 +247,9 @@ async fn locked_prefix(db: &Adapter, inputs: &CapturedInputs, saved: &Value) -> 
         }
     } else {
         // An index nobody recorded an attempt for is drift, not progress.
-        if !catalog.uncovered.is_empty()
+        if !uncovered.is_empty()
             || applied < base
-            || json_digest(&catalog) != saved["plan"]["execution"]["prefix_fingerprints"][applied]
+            || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][applied]
             || (applied == base
                 && json_digest(&history) != saved["plan"]["binding"]["base_history_digest"])
         {
@@ -214,7 +257,8 @@ async fn locked_prefix(db: &Adapter, inputs: &CapturedInputs, saved: &Value) -> 
         }
         false
     };
-    db.validate_execution_scope(&inputs.config.schema).await?;
+    db.validate_execution_scope(&inputs.config.schema, &inputs.history_schemas, &outside)
+        .await?;
     Ok((applied, history, identity, adopted))
 }
 
@@ -256,9 +300,11 @@ async fn reconcile(
     report: &mut Value,
     attempted: usize,
 ) -> Result<()> {
+    let base = validate(inputs, saved)?;
     let db = connect(inputs, saved).await?;
     db.own_migrations(inputs.limits().migrator_wait()).await?;
-    let (count, history, identity, adopted) = locked_prefix(&db, inputs, saved).await?;
+    let (count, history, identity, adopted) =
+        locked_prefix(&db, inputs, saved, base, &mut CatalogDigests::default()).await?;
     db.rollback().await?;
     report["target"]["identity"] = json!(identity);
     if Adoption::from_plan(inputs, saved)?.is_some() {
@@ -309,7 +355,8 @@ async fn connect(inputs: &CapturedInputs, saved: &Value) -> Result<Adapter> {
 async fn checks(
     db: &Adapter,
     checks: &std::collections::BTreeMap<String, String>,
-    schema: &str,
+    inputs: &CapturedInputs,
+    outside: &[String],
     source: &str,
     phase: &str,
     report: &mut Value,
@@ -317,6 +364,7 @@ async fn checks(
     if checks.is_empty() {
         return Ok(());
     }
+    let schema = inputs.config.schema.as_str();
     let mut tables: Vec<_> = checks
         .values()
         .flat_map(|sql| super::analysis::check_tables(sql, schema))
@@ -324,7 +372,8 @@ async fn checks(
     tables.sort();
     tables.dedup();
     db.lock_for_checks(&tables).await?;
-    db.check_purity(schema).await?;
+    db.check_purity(schema, &inputs.history_schemas, outside)
+        .await?;
     for (name, sql) in checks {
         let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
         report["assertions"]["executed"] = json!(count + 1);
@@ -425,20 +474,24 @@ fn lock_backoff(attempt: u32) -> std::time::Duration {
 
 async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
     let action = Adoption::from_plan(inputs, saved)?;
+    let base = validate(inputs, saved)?;
+    let outside = outside_objects(saved)?;
     let db = connect(inputs, saved).await?;
     db.own_migrations(inputs.limits().migrator_wait()).await?;
+    let mut digests = CatalogDigests::default();
     let mut lock_retries = 0u32;
     loop {
         let assertions_before = report["assertions"].clone();
-        let (applied, history, identity, adopted) = match locked_prefix(&db, inputs, saved).await {
-            Err(d) if d.code == "DB_LOCK_CONFLICT" && lock_retries + 1 < LOCK_ATTEMPTS => {
-                db.rollback().await?;
-                tokio::time::sleep(lock_backoff(lock_retries)).await;
-                lock_retries += 1;
-                continue;
-            }
-            other => other?,
-        };
+        let (applied, history, identity, adopted) =
+            match locked_prefix(&db, inputs, saved, base, &mut digests).await {
+                Err(d) if d.code == "DB_LOCK_CONFLICT" && lock_retries + 1 < LOCK_ATTEMPTS => {
+                    db.rollback().await?;
+                    tokio::time::sleep(lock_backoff(lock_retries)).await;
+                    lock_retries += 1;
+                    continue;
+                }
+                other => other?,
+            };
         report["capabilities"] = identity.capabilities();
         report["target"]["identity"] = json!(identity);
         if action.is_some() {
@@ -491,7 +544,8 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 checks(
                     &db,
                     &inputs.config.adoption_checks,
-                    &inputs.config.schema,
+                    inputs,
+                    &outside,
                     "manifest",
                     "adoption",
                     report,
@@ -502,7 +556,8 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 checks(
                     &db,
                     &migration.requires,
-                    &inputs.config.schema,
+                    inputs,
+                    &outside,
                     &migration.name,
                     "requires",
                     report,
@@ -517,7 +572,8 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 checks(
                     &db,
                     &migration.ensures,
-                    &inputs.config.schema,
+                    inputs,
+                    &outside,
                     &migration.name,
                     "ensures",
                     report,
@@ -525,12 +581,17 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 .await?;
             }
             locks = db.relation_locks(&inputs.config.schema).await?;
-            let catalog = db
-                .catalog(&inputs.config.schema, &inputs.endpoint.role)
+            let (uncovered, fingerprint) = db
+                .fingerprint(
+                    &inputs.config.schema,
+                    &inputs.history_schemas,
+                    &outside,
+                    &inputs.endpoint.role,
+                    &mut digests,
+                )
                 .await?;
-            if !catalog.uncovered.is_empty()
-                || json_digest(&catalog)
-                    != saved["plan"]["execution"]["prefix_fingerprints"][reference]
+            if !uncovered.is_empty()
+                || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][reference]
             {
                 return Err(stale());
             }
@@ -729,7 +790,12 @@ async fn locked_attempt(
         return Err(stale());
     }
     let catalog = db
-        .catalog(&inputs.config.schema, &inputs.endpoint.role)
+        .catalog(
+            &inputs.config.schema,
+            &inputs.history_schemas,
+            &outside_objects(saved)?,
+            &inputs.endpoint.role,
+        )
         .await?;
     Ok((position, catalog))
 }
@@ -802,7 +868,14 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
         d.source = Some(index.name.clone());
         return Err(d);
     }
-    let mut catalog = db.catalog(schema, &inputs.endpoint.role).await?;
+    let mut catalog = db
+        .catalog(
+            schema,
+            &inputs.history_schemas,
+            &outside_objects(saved)?,
+            &inputs.endpoint.role,
+        )
+        .await?;
     if !catalog.uncovered.is_empty() {
         return Err(mismatch(&index.name));
     }
@@ -1063,5 +1136,37 @@ role = "owner"
         assert_eq!(uncertain_commit(&progress), Some(1));
         progress["progress"][1]["state"] = json!("committed");
         assert_eq!(uncertain_commit(&progress), None);
+    }
+
+    /// A plan records every outside object its replay found, whatever the
+    /// length of its key (a routine's identity arguments can run to
+    /// thousands of characters) or the number of keys, so `migrate` must
+    /// accept what `plan` wrote (#420, review r4654889050).
+    #[test]
+    fn plans_keep_every_outside_object_key_planning_records() {
+        let long = format!(
+            "public.routine:record({})",
+            vec!["at timestamp with time zone"; 70].join(", ")
+        );
+        assert!(long.len() > 1024);
+        let many: Vec<String> = (0..10_001)
+            .map(|i| format!("public.relation:t{i:05}"))
+            .collect();
+        for keys in [vec![long], many] {
+            let saved = json!({"plan": {"execution": {"outside_objects": keys.clone()}}});
+            assert_eq!(outside_objects(&saved).unwrap(), keys);
+        }
+        // Still stale: an empty list, an empty key, keys out of order or
+        // repeated, and a value that is not a list.
+        for bad in [
+            json!([]),
+            json!([""]),
+            json!(["b", "a"]),
+            json!(["a", "a"]),
+            json!("a"),
+        ] {
+            let saved = json!({"plan": {"execution": {"outside_objects": bad.clone()}}});
+            assert!(outside_objects(&saved).is_err(), "{bad}");
+        }
     }
 }

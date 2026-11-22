@@ -18,6 +18,25 @@ See [unreleased notes](docs/release-notes/unreleased.md).
 - `ntnt db new` holds the `ntnt.toml` lock while it numbers a migration, so
   concurrent runs cannot take the same ID; a run that finds the lock held fails
   with the new `DB_NEW_CONFLICT` and creates nothing (#388).
+- `ntnt db` (SQLite): a drop that would run ON DELETE actions on child tables is
+  refused with DB_REBUILD_REQUIRED unless the migration uses sqlite_rebuild
+  (#419).
+- `ntnt db` (SQLite): migrations on a target run under `statement_seconds` (90 s
+  by default) instead of a fixed 5 s; DB_STATEMENT_LIMIT names the statement
+  (#429).
+- `ntnt db`: a migration with no statements fails with DB_MIGRATION_EMPTY
+  (#428).
+- `ntnt db` (PostgreSQL): inspection covers the schemas the history creates and
+  the objects it creates in other schemas; statements outside the managed scope
+  run as written and are flagged in the plan (OUTSIDE_MANAGED_SCOPE);
+  DB_OUTSIDE_SCOPE refuses only changes to `_ntnt` and system schemas;
+  DB_TARGET_CHANGED reports a target that changed between verify's two reads
+  (#420).
+- `ntnt db` (SQLite): replay inspection reuses unchanged work, so long
+  histories, including ones dense in foreign keys, plan in seconds; SQLite
+  operations get an 8 MiB stack (#421).
+- `ntnt db` (PostgreSQL): a policy that calls a routine outside the managed scope
+  is uncovered (#434).
 - `ntnt run`: a runtime error raised in an imported module names that module's
   file and line, shows its source, and lists the call sites that led there
   (#412).

@@ -43,6 +43,90 @@ pub(crate) fn json_digest(value: &impl Serialize) -> String {
     digest(&[&serde_json::to_vec(&value).expect("serializable migration model")])
 }
 
+/// `json_digest` of successive catalogs that reuses each object's serialized
+/// form while the object is unchanged. Replay fingerprints the whole catalog
+/// after every migration; serializing every object again each time made that
+/// quadratic in serialization work. Hashing still reads every byte.
+#[derive(Default)]
+pub(crate) struct CatalogDigests {
+    objects: std::collections::HashMap<String, (serde_json::Value, Vec<u8>)>,
+}
+impl CatalogDigests {
+    /// Exactly `json_digest(catalog)`.
+    pub fn digest(&mut self, catalog: &super::model::Catalog) -> String {
+        // `json_digest` sorts object keys; `serde_json` maps already iterate in
+        // key order, as does the catalog's own map, so each object serializes
+        // to the same bytes on its own.
+        let mut previous = std::mem::take(&mut self.objects);
+        for (key, value) in &catalog.objects {
+            let entry = match previous.remove(key) {
+                Some(entry) if entry.0 == *value => entry,
+                _ => {
+                    let mut bytes = serde_json::to_vec(key).expect("catalog keys serialize");
+                    bytes.push(b':');
+                    serde_json::to_writer(&mut bytes, value).expect("catalog values serialize");
+                    (value.clone(), bytes)
+                }
+            };
+            self.objects.insert(key.clone(), entry);
+        }
+        catalog_digest(
+            catalog
+                .objects
+                .keys()
+                .map(|key| self.objects[key].1.as_slice()),
+            &catalog.uncovered,
+        )
+    }
+}
+
+/// `json_digest` of a catalog given each object's serialized `"key":value`
+/// form, in key order, and its uncovered keys.
+pub(crate) fn catalog_digest<'a>(
+    objects: impl Iterator<Item = &'a [u8]> + Clone,
+    uncovered: &[String],
+) -> String {
+    const OBJECTS: &[u8] = b"{\"objects\":{";
+    const UNCOVERED: &[u8] = b"},\"uncovered\":[";
+    const END: &[u8] = b"]}";
+    let uncovered: Vec<Vec<u8>> = uncovered
+        .iter()
+        .map(|key| serde_json::to_vec(key).expect("catalog keys serialize"))
+        .collect();
+    let separated = |lengths: &mut dyn Iterator<Item = usize>| {
+        lengths.fold((0usize, 0usize), |(total, n), length| {
+            (total + length, n + 1)
+        })
+    };
+    let (objects_length, objects_count) = separated(&mut objects.clone().map(<[u8]>::len));
+    let (uncovered_length, uncovered_count) = separated(&mut uncovered.iter().map(Vec::len));
+    let length = OBJECTS.len()
+        + objects_length
+        + objects_count.saturating_sub(1)
+        + UNCOVERED.len()
+        + uncovered_length
+        + uncovered_count.saturating_sub(1)
+        + END.len();
+    let mut hash = Sha256::new();
+    hash.update((length as u64).to_be_bytes());
+    hash.update(OBJECTS);
+    for (i, object) in objects.enumerate() {
+        if i > 0 {
+            hash.update(b",");
+        }
+        hash.update(object);
+    }
+    hash.update(UNCOVERED);
+    for (i, key) in uncovered.iter().enumerate() {
+        if i > 0 {
+            hash.update(b",");
+        }
+        hash.update(key);
+    }
+    hash.update(END);
+    hex::encode(hash.finalize())
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Endpoint {
@@ -97,8 +181,9 @@ fn default_migrator_wait_seconds() -> u64 {
     DEFAULT_MIGRATOR_WAIT_SECONDS
 }
 
-/// PostgreSQL `[databases.<name>.limits]` for `migrate` and `reconcile` on
-/// the target, in whole seconds. Omitted fields keep their defaults.
+/// `[databases.<name>.limits]` for `migrate` and `reconcile` on the target, in
+/// whole seconds. PostgreSQL takes both fields; SQLite takes `statement_seconds`
+/// for one migration script (#429). Omitted fields keep their defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Limits {
@@ -156,11 +241,12 @@ impl Limits {
             "total_deadline_seconds": self.total_deadline().as_secs(),
         })
     }
-    fn validate(&self, database: &str, engine: &str) -> Result<()> {
+    fn validate(&self, database: &str, engine: &str, declares_wait: bool) -> Result<()> {
         let table = format!("[databases.{database}.limits]");
-        if engine != "postgresql" {
+        // SQLite has no migrator advisory lock to wait for.
+        if engine != "postgresql" && declares_wait {
             return Err(invalid(&format!(
-                "{table} applies only to PostgreSQL; SQLite keeps its fixed operation limits."
+                "{table} migrator_wait_seconds applies only to PostgreSQL; SQLite takes statement_seconds only."
             )));
         }
         for (field, value, min, max) in [
@@ -232,6 +318,9 @@ pub(crate) struct CapturedInputs {
     pub endpoint: Endpoint,
     pub document: toml::Value,
     pub migrations: Vec<Migration>,
+    /// PostgreSQL: the schemas the captured history creates, inspected with
+    /// the managed schema (see `analysis::history_schemas`). Empty for SQLite.
+    pub history_schemas: Vec<String>,
     pub input_digest: String,
     pub policy_digest: String,
 }
@@ -298,9 +387,16 @@ impl CapturedInputs {
     pub fn limits(&self) -> Limits {
         self.config.limits.unwrap_or_default()
     }
-    /// The limits a plan binds. SQLite has none: it keeps fixed limits.
+    /// The limits a plan binds. PostgreSQL binds its effective limits. SQLite
+    /// binds `statement_seconds` only when the manifest declares the table, so
+    /// plans saved without one keep their digests (#429).
     pub fn plan_limits(&self) -> Option<serde_json::Value> {
-        (self.config.engine == "postgresql").then(|| serde_json::json!(self.limits()))
+        if self.config.engine == "postgresql" {
+            return Some(serde_json::json!(self.limits()));
+        }
+        self.config
+            .limits
+            .map(|limits| serde_json::json!({ "statement_seconds": limits.statement_seconds }))
     }
     /// Bind the exact covered source prefix without claiming its SQL was executed.
     pub fn checkpoint(&self, count: usize) -> Result<super::model::HistoryEntry> {
@@ -418,7 +514,11 @@ impl CapturedInputs {
             )),
         }
         if let Some(limits) = &config.limits {
-            limits.validate(&database_name, &config.engine)?;
+            let declares_wait = raw
+                .get("limits")
+                .and_then(|limits| limits.get("migrator_wait_seconds"))
+                .is_some();
+            limits.validate(&database_name, &config.engine, declares_wait)?;
         }
         if config.adoption_checks.len() > 64
             || config.adoption_checks.iter().any(|(name, sql)| {
@@ -646,6 +746,14 @@ impl CapturedInputs {
             database_name.as_bytes(),
             json_digest(&summaries).as_bytes(),
         ]);
+        let history_schemas = if config.engine == "postgresql" {
+            super::analysis::history_schemas(
+                migrations.iter().map(|m| m.sql.as_str()),
+                &config.schema,
+            )
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             config,
             database_name,
@@ -653,6 +761,7 @@ impl CapturedInputs {
             endpoint,
             document,
             migrations,
+            history_schemas,
             input_digest,
             policy_digest,
         })
@@ -691,6 +800,56 @@ role="target_role"
         )
         .unwrap();
         manifest
+    }
+    fn sqlite_project(limits: Option<&str>) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("migrations")).unwrap();
+        let limits = limits.map_or(String::new(), |l| format!("[databases.app.limits]\n{l}\n"));
+        std::fs::write(
+            root.path().join("ntnt.toml"),
+            format!("[databases.app]\nengine = \"sqlite\"\nschema = \"main\"\nmigrations_dir = \"migrations\"\n[databases.app.targets.local]\nconnection_secret = \"DB_TARGET\"\n{limits}[secrets.DB_TARGET]\n"),
+        )
+        .unwrap();
+        root
+    }
+    #[test]
+    fn sqlite_takes_statement_seconds_and_binds_it_only_when_declared() {
+        let load = |root: &tempfile::TempDir| {
+            CapturedInputs::load(&root.path().join("ntnt.toml"), "local", None)
+        };
+        // Without the table nothing is bound, so earlier SQLite plans keep their digests.
+        let absent = load(&sqlite_project(None)).unwrap();
+        assert_eq!(absent.plan_limits(), None);
+        assert_eq!(absent.limits().statement().as_secs(), 90);
+        let declared = load(&sqlite_project(Some("statement_seconds = 600"))).unwrap();
+        assert_eq!(
+            declared.plan_limits(),
+            Some(serde_json::json!({"statement_seconds": 600}))
+        );
+        assert_eq!(declared.limits().statement().as_secs(), 600);
+        assert_ne!(declared.policy_digest, absent.policy_digest);
+        // SQLite has no migrator advisory lock to wait for.
+        let Err(error) = load(&sqlite_project(Some("migrator_wait_seconds = 10"))) else {
+            panic!("SQLite accepted migrator_wait_seconds");
+        };
+        assert_eq!(error.code, "DB_CONFIG");
+        assert!(
+            error
+                .message
+                .contains("migrator_wait_seconds applies only to PostgreSQL"),
+            "{}",
+            error.message
+        );
+        let Err(error) = load(&sqlite_project(Some("statement_seconds = 1"))) else {
+            panic!("SQLite accepted statement_seconds = 1");
+        };
+        assert!(
+            error
+                .message
+                .contains("statement_seconds must be from 2 to 86400"),
+            "{}",
+            error.message
+        );
     }
     #[test]
     fn absent_limits_keep_the_defaults_and_the_earlier_digests() {
@@ -840,23 +999,60 @@ role="target_role"
         );
     }
     #[test]
-    fn sqlite_rejects_limits_it_would_not_apply() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("migrations")).unwrap();
-        let manifest = root.path().join("ntnt.toml");
-        std::fs::write(
-            &manifest,
-            "[databases.app]\nengine=\"sqlite\"\nschema=\"main\"\nmigrations_dir=\"migrations\"\n[databases.app.targets.local]\nconnection_secret=\"TEST_FILE\"\n[secrets.TEST_FILE]\n",
-        )
-        .unwrap();
-        let sqlite = CapturedInputs::load(&manifest, "local", None).unwrap();
-        assert_eq!(sqlite.plan_limits(), None);
-        let manifest = with_limits(&root, "statement_seconds = 600");
-        let d = CapturedInputs::load(&manifest, "local", None)
-            .err()
-            .unwrap();
-        assert_eq!(d.code, "DB_CONFIG");
-        assert!(d.message.contains("only to PostgreSQL"), "{}", d.message);
+    fn catalog_digests_equal_json_digest_as_objects_change() {
+        use super::super::model::Catalog;
+        use serde_json::json;
+        let mut digests = CatalogDigests::default();
+        let mut catalog = Catalog::default();
+        // An empty catalog, then objects and uncovered keys added, changed and
+        // removed, with keys and values that need escaping or are not ASCII.
+        assert_eq!(digests.digest(&catalog), json_digest(&catalog));
+        type Step = Box<dyn Fn(&mut Catalog)>;
+        let steps: Vec<Step> = vec![
+            Box::new(|c| {
+                c.objects
+                    .insert("schema:main".into(), json!({"engine":"sqlite"}));
+            }),
+            Box::new(|c| {
+                c.objects.insert(
+                    "table:\"t \\\"q\\\"\"".into(),
+                    json!({"z":1,"a":[1.5,null,true,{"y":"\u{1}\n","b":"é"}],"m":{"k":-3}}),
+                );
+                c.objects.insert(
+                    "column:\"t\".\"x\"".into(),
+                    json!([0, "x", "TEXT", 0, null, 0, 0]),
+                );
+            }),
+            Box::new(|c| c.uncovered.push("table:\"t\"".into())),
+            Box::new(|c| {
+                c.objects.insert(
+                    "column:\"t\".\"x\"".into(),
+                    json!([0, "x", "TEXT", 1, null, 0, 0]),
+                );
+                c.uncovered.push("view:\"v\"".into());
+            }),
+            Box::new(|c| {
+                c.objects.remove("schema:main");
+                c.uncovered.clear();
+            }),
+            Box::new(|c| {
+                c.objects.insert(
+                    "index:\"ü\"".into(),
+                    json!({"table":"t","columns":[[0,1,"x",0,"BINARY",1]]}),
+                );
+            }),
+            Box::new(|c| c.objects.clear()),
+        ];
+        for step in steps {
+            step(&mut catalog);
+            assert_eq!(
+                digests.digest(&catalog),
+                json_digest(&catalog),
+                "{catalog:?}"
+            );
+            // Digesting the same catalog again reuses every object.
+            assert_eq!(digests.digest(&catalog), json_digest(&catalog));
+        }
     }
     #[test]
     fn json_identity_uses_sorted_object_keys_not_rust_field_order() {

@@ -2357,3 +2357,626 @@ fn migrator_wait_bounds_the_wait_for_a_competing_migrator() {
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["progress"][0]["state"], "committed", "{r}");
 }
+
+/// Migrate a fresh history, asserting each step passes.
+fn migrate_all(f: &Fixture, path: &str) -> Value {
+    let plan = f.plan(path);
+    let r = f.apply(path, plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    r
+}
+fn drift_names(r: &Value, object: &str, change: &str) -> bool {
+    r["drift"]["differences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["object"] == object && d["change"] == change)
+}
+
+/// #420: a schema the history creates is managed through its whole life: a
+/// foreign key from it into the managed schema is not an external dependency,
+/// a later rename or DROP SCHEMA replays like any other change, and drift is
+/// reported under its current name.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn created_schemas_are_managed_across_foreign_keys_renames_and_drops() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);
+CREATE SCHEMA audit;
+CREATE TABLE audit.log (id int PRIMARY KEY, account int REFERENCES app.accounts(id));",
+    );
+    migrate_all(&f, "first.json");
+    // The next migration runs while audit.log references app.accounts.
+    f.sql(
+        "0002_email.sql",
+        "ALTER TABLE app.accounts ADD COLUMN email text;",
+    );
+    migrate_all(&f, "second.json");
+    f.sql(
+        "0003_archive.sql",
+        "ALTER SCHEMA audit RENAME TO audit_archive;",
+    );
+    migrate_all(&f, "third.json");
+    let renamed = f.command("verify");
+    assert_eq!(renamed["outcome"], "pass", "{renamed}");
+    let objects = renamed["catalog"]["objects"].as_object().unwrap();
+    assert!(
+        objects.contains_key("audit_archive.relation:log"),
+        "{:?}",
+        objects.keys()
+    );
+    assert!(
+        !objects
+            .keys()
+            .any(|k| k.starts_with("audit.") || k == "schema:audit"),
+        "{:?}",
+        objects.keys()
+    );
+    // A privilege change out of band is drift under the schema's new name.
+    f.target()
+        .batch_execute("GRANT SELECT ON audit_archive.log TO PUBLIC")
+        .unwrap();
+    let drift = f.command("verify");
+    assert_eq!(drift["outcome"], "fail", "{drift}");
+    assert!(
+        drift_names(&drift, "audit_archive.relation:log", "changed"),
+        "{}",
+        drift["drift"]
+    );
+    f.target()
+        .batch_execute("REVOKE SELECT ON audit_archive.log FROM PUBLIC")
+        .unwrap();
+    f.sql(
+        "0004_retire.sql",
+        "DROP TABLE audit_archive.log; DROP SCHEMA audit_archive;",
+    );
+    migrate_all(&f, "fourth.json");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    // Recreating the dropped schema out of band is drift too.
+    f.target()
+        .batch_execute("CREATE SCHEMA audit_archive")
+        .unwrap();
+    let recreated = f.command("verify");
+    assert_eq!(recreated["outcome"], "fail", "{recreated}");
+    assert!(
+        drift_names(&recreated, "schema:audit_archive", "unexpected"),
+        "{}",
+        recreated["drift"]
+    );
+}
+
+/// Adopting an existing database compares the schemas the history creates.
+/// A managed view over one of them is covered, so adoption checks may run.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn adoption_compares_the_schemas_the_history_creates() {
+    use std::io::Write;
+    let f = Fixture::new();
+    let schema = "CREATE TABLE app.accounts (id int PRIMARY KEY);
+CREATE SCHEMA audit;
+CREATE TABLE audit.log (id int PRIMARY KEY, msg text);
+CREATE VIEW app.recent AS SELECT id, msg FROM audit.log;";
+    f.sql("0001_initial.sql", schema);
+    f.target().batch_execute(schema).unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.root.path().join("ntnt.toml"))
+            .unwrap(),
+        "\n[databases.app.adoption_checks]\naccounts='SELECT count(*)=0 FROM app.accounts'"
+    )
+    .unwrap();
+    f.target()
+        .batch_execute("ALTER TABLE audit.log ADD COLUMN unplanned text")
+        .unwrap();
+    let blocked = f.command_args("plan", &["--adopt-through", "1"]);
+    assert_eq!(blocked["outcome"], "fail", "{blocked}");
+    assert!(
+        drift_names(&blocked, "audit.column:log.unplanned", "unexpected"),
+        "{}",
+        blocked["drift"]
+    );
+    f.target()
+        .batch_execute("ALTER TABLE audit.log DROP COLUMN unplanned")
+        .unwrap();
+    let plan = f.command_args("plan", &["--adopt-through", "1", "--out", "adopt.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let r = f.apply("adopt.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+/// `reconcile` compares the schemas the history creates, like migrate.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn reconcile_compares_the_schemas_the_history_creates() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t (id int); CREATE SCHEMA audit; CREATE TABLE audit.log (id int);",
+    );
+    migrate_all(&f, "initial.json");
+    f.sql(
+        "0002_index.sql",
+        "CREATE INDEX CONCURRENTLY t_id ON app.t(id);",
+    );
+    let plan = f.plan("upgrade.json");
+    assert_eq!(
+        plan["plan"]["pending"][0]["analysis"]["non_transactional"], true,
+        "{plan}"
+    );
+    // The state migrate leaves when it stops after recording the attempt and
+    // before the build starts.
+    f.target()
+        .execute(
+            "INSERT INTO _ntnt.schema_migrations_v2 VALUES (2, '2', '0002_index.sql', $1, 'running', 'app', 'app')",
+            &[&plan["source"]["migrations"][1]["checksum"].as_str().unwrap()],
+        )
+        .unwrap();
+    f.target()
+        .batch_execute("ALTER TABLE audit.log ADD COLUMN unplanned int")
+        .unwrap();
+    let mismatch = reconcile(&f, &plan);
+    assert!(code(&mismatch, "DB_RECONCILE_MISMATCH"), "{mismatch}");
+    assert_eq!(attempt_state(&f).as_deref(), Some("running"));
+    f.target()
+        .batch_execute("ALTER TABLE audit.log DROP COLUMN unplanned")
+        .unwrap();
+    let r = reconcile(&f, &plan);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["reconciliation"]["resolution"], "not_started", "{r}");
+    let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+/// Josh's decision on #420 (2026-11-21): statements outside the managed
+/// scope run on the target as they did before #420. REVOKE and GRANT on
+/// public, a GRANT on a table the history creates there and a DROP of
+/// another application's table plan, migrate and verify.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn statements_outside_the_managed_scope_migrate_and_verify() {
+    let f = Fixture::new();
+    // Another application's table in public.
+    f.target()
+        .batch_execute("CREATE TABLE public.legacy (id int)")
+        .unwrap();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO PUBLIC;
+CREATE TABLE public.audit_log (id int PRIMARY KEY, account int);
+GRANT SELECT ON public.audit_log TO PUBLIC;
+DROP TABLE IF EXISTS public.legacy;",
+    );
+    migrate_all(&f, "first.json");
+    // Each statement ran on the target as written.
+    assert!(f
+        .target()
+        .query_one(
+            "SELECT to_regclass('public.legacy') IS NULL AND has_table_privilege('public', 'public.audit_log', 'SELECT')",
+            &[]
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+    let verified = f.command("verify");
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["diagnostics"], serde_json::json!([]), "{verified}");
+    // A later migration drops the table it created there.
+    f.sql("0002_retire.sql", "DROP TABLE public.audit_log;");
+    migrate_all(&f, "second.json");
+    let verified = f.command("verify");
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["diagnostics"], serde_json::json!([]), "{verified}");
+}
+
+/// A history applied before #420 that revokes CREATE on public keeps
+/// verifying with no diagnostic. #420 refused the statement when replay
+/// reached it, so verify could no longer replay the applied prefix.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn an_applied_history_that_revokes_create_on_public_keeps_verifying() {
+    let f = Fixture::new();
+    f.seed_first("CREATE TABLE app.t (id int);\nREVOKE CREATE ON SCHEMA public FROM PUBLIC;");
+    let verified = f.command("verify");
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["history"]["applied_count"], 1, "{verified}");
+    assert_eq!(verified["diagnostics"], serde_json::json!([]), "{verified}");
+}
+
+/// A pending statement that may act outside the managed scope is flagged in
+/// the plan the way a destructive change is: a hazard on the migration, and
+/// an `outside_scope` entry naming the statement and the schema for each
+/// qualified name or IN SCHEMA list, each search_path that names another
+/// schema, and each schema-qualified name in SQL NTNT cannot analyze. Nothing
+/// is refused: the plan stays reviewable, is approved and migrates, and once
+/// applied the migration is not flagged again.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn pending_statements_outside_the_managed_scope_are_flagged_for_review() {
+    let f = Fixture::new();
+    f.target()
+        .batch_execute("CREATE TABLE public.legacy (id int)")
+        .unwrap();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t (id int);");
+    migrate_all(&f, "first.json");
+    f.sql(
+        "0002_outside.sql",
+        "REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+SET LOCAL search_path TO public;
+DROP TABLE IF EXISTS legacy;
+SELECT pg_catalog.set_config('search_path', 'app', true);
+ALTER SEQUENCE IF EXISTS public.s RESTART WITH 5;
+GRANT EXECUTE ON ALL ROUTINES IN SCHEMA public TO PUBLIC;
+ALTER TABLE app.t ADD COLUMN note text;",
+    );
+    let plan = f.plan("second.json");
+    assert_eq!(plan["plan"]["classification"], "requires_review", "{plan}");
+    let pending = plan["plan"]["pending"].as_array().unwrap();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["source"], "0002_outside.sql");
+    let analysis = &pending[0]["analysis"];
+    assert!(
+        names_in(&analysis["hazards"]).contains(&"OUTSIDE_MANAGED_SCOPE"),
+        "{analysis}"
+    );
+    assert_eq!(
+        analysis["outside_scope"],
+        serde_json::json!([
+            {"statement": 1, "schema": "public", "via": "name"},
+            {"statement": 2, "schema": "public", "via": "search_path"},
+            {"statement": 5, "schema": "public", "via": "token"},
+            {"statement": 6, "schema": "public", "via": "token"}
+        ]),
+        "{analysis}"
+    );
+    // The human plan names each one under its migration.
+    let human = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["db", "plan", "--target", "test"])
+        .env("DB_TARGET", &f.target_url)
+        .env("DB_SCRATCH", &f.scratch_url)
+        .env_remove("DB_APPROVAL")
+        .env("NTNT_SECRETS_PROVIDER", "env")
+        .env("NTNT_ENV", "development")
+        .current_dir(f.root.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&human.stdout);
+    for line in [
+        "Pending \"0002_outside.sql\"",
+        "  Outside the managed scope: statement 1 names schema \"public\"",
+        "  Outside the managed scope: statement 2 puts schema \"public\" on the search path",
+        "  Outside the managed scope: statement 5 names schema \"public\" in SQL NTNT does not analyze",
+    ] {
+        assert!(text.contains(line), "{line}\n{text}");
+    }
+    let applied = f.apply("second.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    // The statements ran as written: statement 3 dropped public.legacy.
+    assert!(f
+        .target()
+        .query_one("SELECT to_regclass('public.legacy') IS NULL", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+    let verified = f.command("verify");
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+    assert_eq!(verified["diagnostics"], serde_json::json!([]), "{verified}");
+    let again = f.command("plan");
+    assert_eq!(again["plan"]["pending"], serde_json::json!([]), "{again}");
+}
+
+fn names_in(list: &Value) -> Vec<&str> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+/// Item 2 of Josh's decision on #420: an object the history creates in a
+/// schema it did not create (public here) is inspected, and only that. Its
+/// columns, constraints, indexes and privileges follow it, a managed view
+/// over it is covered, and its foreign key into the managed schema is no
+/// external dependency. Other objects in public, such as another
+/// application's tables, and public itself are never reported.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn objects_the_history_creates_outside_the_scope_are_inspected() {
+    let f = Fixture::new();
+    // Another application's table in public, there before the first plan.
+    f.target()
+        .batch_execute("CREATE TABLE public.other_app (id int)")
+        .unwrap();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);
+CREATE TABLE public.audit_log (id int PRIMARY KEY, account int REFERENCES app.accounts (id), msg text);
+CREATE INDEX audit_log_msg ON public.audit_log (msg);
+CREATE VIEW app.recent AS SELECT id, msg FROM public.audit_log;",
+    );
+    let plan = f.plan("first.json");
+    assert_eq!(
+        plan["plan"]["execution"]["outside_objects"],
+        serde_json::json!(["public.relation:audit_log"]),
+        "{plan}"
+    );
+    let applied = f.apply("first.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let clean = f.command("verify");
+    assert_eq!(clean["outcome"], "pass", "{clean}");
+    assert_eq!(clean["diagnostics"], serde_json::json!([]), "{clean}");
+    assert_eq!(
+        clean["target"]["outside_objects"],
+        serde_json::json!(["public.relation:audit_log"])
+    );
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "public.relation:audit_log",
+        "public.column:audit_log.msg",
+        "public.constraint:audit_log.audit_log_account_fkey",
+        "public.index:audit_log_pkey",
+        "public.index:audit_log_msg",
+        "view:recent",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    assert!(
+        !objects
+            .keys()
+            .any(|k| k.contains("other_app") || k == "schema:public"),
+        "{:?}",
+        objects.keys()
+    );
+    // The next migration runs while public.audit_log references app.accounts.
+    f.sql(
+        "0002_email.sql",
+        "ALTER TABLE app.accounts ADD COLUMN email text;",
+    );
+    migrate_all(&f, "second.json");
+    // Objects in public the history did not create, and public's own
+    // privileges, are never reported.
+    f.target()
+        .batch_execute(
+            "CREATE TABLE public.unrelated (id int); GRANT CREATE ON SCHEMA public TO PUBLIC",
+        )
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    for (change, object, kind, undo) in [
+        (
+            "ALTER TABLE public.audit_log ADD COLUMN extra int",
+            "public.column:audit_log.extra",
+            "unexpected",
+            "ALTER TABLE public.audit_log DROP COLUMN extra",
+        ),
+        (
+            "CREATE INDEX audit_log_extra ON public.audit_log (id, msg)",
+            "public.index:audit_log_extra",
+            "unexpected",
+            "DROP INDEX public.audit_log_extra",
+        ),
+        (
+            "GRANT SELECT ON public.audit_log TO PUBLIC",
+            "public.relation:audit_log",
+            "changed",
+            "REVOKE SELECT ON public.audit_log FROM PUBLIC",
+        ),
+        (
+            "DROP VIEW app.recent; DROP TABLE public.audit_log",
+            "public.relation:audit_log",
+            "missing",
+            "",
+        ),
+    ] {
+        f.target().batch_execute(change).unwrap();
+        let r = f.command("verify");
+        assert_eq!(r["outcome"], "fail", "{change}: {r}");
+        assert!(code(&r, "DB_DRIFT"), "{change}: {r}");
+        assert!(drift_names(&r, object, kind), "{change}: {}", r["drift"]);
+        if !undo.is_empty() {
+            f.target().batch_execute(undo).unwrap();
+            let r = f.command("verify");
+            assert_eq!(r["outcome"], "pass", "{undo}: {r}");
+        }
+    }
+}
+
+/// Objects a migration creates outside the managed scope without naming the
+/// schema in a statement NTNT reads, through search_path, a DO block or SQL
+/// sqlparser does not parse, are found by replay and inspected alike.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn objects_created_outside_through_search_path_do_or_unparsed_sql_are_inspected() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t (id int);
+SET LOCAL search_path TO public;
+CREATE TABLE via_search_path (id int);",
+    );
+    f.sql(
+        "0002_do.sql",
+        "DO $$ BEGIN CREATE TABLE public.via_do (id int); END $$;",
+    );
+    f.sql(
+        "0003_unparsed.sql",
+        "CREATE TABLE public.via_unparsed (id int) USING heap;",
+    );
+    let plan = f.plan("plan.json");
+    assert_eq!(
+        plan["plan"]["pending"][2]["analysis"]["unknowns"],
+        serde_json::json!(["LOCKS_NOT_PREDICTED", "SQL_NOT_PARSED"]),
+        "{plan}"
+    );
+    assert_eq!(
+        plan["plan"]["execution"]["outside_objects"],
+        serde_json::json!([
+            "public.relation:via_do",
+            "public.relation:via_search_path",
+            "public.relation:via_unparsed"
+        ]),
+        "{plan}"
+    );
+    let applied = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    for table in ["via_search_path", "via_do", "via_unparsed"] {
+        f.target()
+            .batch_execute(&format!("ALTER TABLE public.{table} RENAME TO moved"))
+            .unwrap();
+        let r = f.command("verify");
+        assert_eq!(r["outcome"], "fail", "{table}: {r}");
+        assert!(
+            drift_names(&r, &format!("public.relation:{table}"), "missing"),
+            "{table}: {}",
+            r["drift"]
+        );
+        // The renamed table is no longer one the history created.
+        assert!(
+            !r["drift"].to_string().contains("moved"),
+            "{table}: {}",
+            r["drift"]
+        );
+        f.target()
+            .batch_execute(&format!("ALTER TABLE public.moved RENAME TO {table}"))
+            .unwrap();
+        assert_eq!(f.command("verify")["outcome"], "pass", "{table}");
+    }
+}
+
+/// Histories that create nothing outside the managed scope inspect and plan
+/// exactly as before: no outside_objects in the plan or the report.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn histories_that_create_nothing_outside_record_no_outside_objects() {
+    for history in [
+        "CREATE TABLE app.t (id int PRIMARY KEY); CREATE INDEX t_id ON app.t (id);",
+        "CREATE TABLE app.t (id int); CREATE SCHEMA audit; CREATE TABLE audit.log (id int); REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
+    ] {
+        let f = Fixture::new();
+        f.sql("0001_initial.sql", history);
+        let plan = f.plan("plan.json");
+        let keys: Vec<&String> = plan["plan"]["execution"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(keys, ["format", "limits", "prefix_fingerprints"], "{history}");
+        assert!(plan["target"].get("outside_objects").is_none(), "{history}");
+        let applied = f.apply("plan.json", plan["plan_digest"].as_str());
+        assert_eq!(applied["outcome"], "pass", "{applied}");
+        let verified = f.command("verify");
+        assert_eq!(verified["outcome"], "pass", "{verified}");
+        assert!(verified["target"].get("outside_objects").is_none(), "{history}");
+    }
+}
+
+/// A check runs after migrations whose managed objects refer to an object the
+/// history created outside the managed scope: check purity inspects those
+/// objects as plan, verify and migrate do (#420, review r4654889022).
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_run_after_managed_objects_refer_to_objects_created_outside() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE public.audit_log (id int PRIMARY KEY, msg text);
+CREATE TABLE app.entries (id int PRIMARY KEY, log int REFERENCES public.audit_log (id));
+CREATE VIEW app.recent AS SELECT id, msg FROM public.audit_log;",
+    );
+    f.sql("0002_seed.sql", "INSERT INTO app.entries VALUES (1, NULL);");
+    std::fs::write(
+        f.root.path().join("migrations/0002_seed.toml"),
+        "[ensures]\nseeded = 'SELECT EXISTS (SELECT 1 FROM app.entries)'\n",
+    )
+    .unwrap();
+    let plan = f.plan("checked.json");
+    assert_eq!(
+        plan["plan"]["execution"]["outside_objects"],
+        serde_json::json!(["public.relation:audit_log"]),
+        "{plan}"
+    );
+    let applied = f.apply("checked.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(applied["assertions"]["executed"], 1, "{applied}");
+}
+
+/// A check may read a managed view, and the views it can reach may call only
+/// builtin non-volatile functions. That holds in every schema inspected: the
+/// managed schema, a schema the history creates, and the objects the history
+/// creates in other schemas (here `public`). A managed view over a view there
+/// that calls a writing function is refused before any check runs, so the
+/// function never writes; a chain of builtin-only views across the same
+/// schemas passes (#420, review r4654895923).
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_refuse_views_that_reach_a_writing_function_in_any_inspected_schema() {
+    for (create, s) in [("CREATE SCHEMA audit;\n", "audit"), ("", "public")] {
+        let f = Fixture::new();
+        // The writing function and what it writes exist from the first
+        // migration on, so a refused second migration leaves them to inspect.
+        // A sequence advance survives the rollback that a refusal causes.
+        f.sql(
+            "0001_initial.sql",
+            &format!(
+                "{create}CREATE TABLE {s}.calls (n bigint);
+CREATE SEQUENCE {s}.call_count;
+CREATE FUNCTION {s}.touch() RETURNS boolean VOLATILE LANGUAGE sql
+  AS $$ INSERT INTO {s}.calls VALUES (nextval('{s}.call_count')) RETURNING true $$;
+CREATE VIEW {s}.pure AS SELECT lower('A') = 'a' AS ok;
+CREATE VIEW app.pure AS SELECT ok FROM {s}.pure;"
+            ),
+        );
+        std::fs::write(
+            f.root.path().join("migrations/0001_initial.toml"),
+            "[ensures]\npure = 'SELECT EXISTS (SELECT 1 FROM app.pure WHERE ok)'\n",
+        )
+        .unwrap();
+        f.sql(
+            "0002_writes.sql",
+            &format!(
+                "CREATE VIEW {s}.writes AS SELECT {s}.touch() AS ok;
+CREATE VIEW app.writes AS SELECT ok FROM {s}.writes;"
+            ),
+        );
+        std::fs::write(
+            f.root.path().join("migrations/0002_writes.toml"),
+            "[ensures]\nwrites = 'SELECT EXISTS (SELECT 1 FROM app.writes WHERE ok)'\n",
+        )
+        .unwrap();
+        let plan = f.plan("plan.json");
+        assert_eq!(plan["outcome"], "pass", "{s}: {plan}");
+        if s == "public" {
+            let outside = names_in(&plan["plan"]["execution"]["outside_objects"]);
+            for key in ["public.relation:writes", "public.routine:touch()"] {
+                assert!(outside.contains(&key), "{key}: {outside:?}");
+            }
+        }
+        let r = f.apply("plan.json", plan["plan_digest"].as_str());
+        assert!(code(&r, "DB_CHECK_UNSUPPORTED"), "{s}: {r}");
+        // The builtin-only chain was checked and committed; the check that
+        // reads the writing chain never ran.
+        assert_eq!(r["progress"][0]["state"], "committed", "{s}: {r}");
+        assert_eq!(r["progress"][1]["state"], "failed", "{s}: {r}");
+        assert_eq!(r["assertions"]["executed"], 1, "{s}: {r}");
+        let row = f
+            .target()
+            .query_one(
+                &format!(
+                    "SELECT (SELECT count(*) FROM {s}.calls), (SELECT is_called FROM {s}.call_count)"
+                ),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            (row.get::<_, i64>(0), row.get::<_, bool>(1)),
+            (0, false),
+            "{s}: the function ran"
+        );
+    }
+}

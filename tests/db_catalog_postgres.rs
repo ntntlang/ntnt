@@ -832,3 +832,506 @@ fn sql_errors_and_unrecognized_ledger_values_do_not_leak_literals() {
     assert!(has_code(&r, "DB_HISTORY_DIVERGENT"));
     assert!(!r.to_string().contains("ntnt245_private_ledger"));
 }
+
+fn diagnostic<'a>(r: &'a Value, code: &str) -> Option<&'a Value> {
+    r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == code)
+}
+
+fn names(list: &Value) -> Vec<&str> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+/// #420: a schema the migration history creates belongs to the managed scope.
+/// An out-of-band change there is drift on the named object, exactly as in
+/// the managed schema, never a pass.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn objects_in_a_schema_the_history_creates_are_inspected() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);\nCREATE SCHEMA audit;\nCREATE TABLE audit.log (id int PRIMARY KEY, msg text);\n",
+    );
+    let plan = f.plan("plan.json");
+    let applied = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let clean = f.command("verify");
+    assert_eq!(clean["outcome"], "pass", "{clean}");
+    for (change, object) in [
+        (
+            "ALTER TABLE audit.log DROP COLUMN msg",
+            "audit.column:log.msg",
+        ),
+        ("DROP TABLE audit.log", "audit.relation:log"),
+    ] {
+        f.target().batch_execute(change).unwrap();
+        let r = f.command("verify");
+        assert_eq!(r["outcome"], "fail", "{change}: {r}");
+        assert!(has_code(&r, "DB_DRIFT"), "{change}: {r}");
+        assert!(
+            r["drift"]["differences"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["object"] == object && d["change"] == "missing"),
+            "{change}: {}",
+            r["drift"]["differences"]
+        );
+    }
+    // Keys in a created schema are qualified; the managed schema's are not.
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "schema:app",
+        "schema:audit",
+        "relation:accounts",
+        "audit.relation:log",
+        "audit.column:log.msg",
+        "audit.index:log_pkey",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    assert_eq!(
+        clean["target"]["history_schemas"],
+        serde_json::json!(["audit"])
+    );
+}
+
+/// Coverage and privileges apply in a created schema as in the managed one.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn uncovered_objects_and_grants_in_a_created_schema_are_reported() {
+    let f = Fixture::new();
+    f.seed_first("CREATE SCHEMA audit; CREATE TABLE audit.log (id int);");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    f.target()
+        .batch_execute("GRANT SELECT ON audit.log TO PUBLIC")
+        .unwrap();
+    let granted = f.command("verify");
+    assert_eq!(granted["drift"]["outcome"], "fail", "{granted}");
+    assert!(
+        granted["drift"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["object"] == "audit.relation:log" && d["change"] == "changed"),
+        "{}",
+        granted["drift"]["differences"]
+    );
+    f.target()
+        .batch_execute("REVOKE SELECT ON audit.log FROM PUBLIC")
+        .unwrap();
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    f.target()
+        .batch_execute("CREATE MATERIALIZED VIEW audit.summary AS SELECT 1 AS n")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["drift"]["outcome"], "unknown", "{r}");
+    let coverage = diagnostic(&r, "DB_COVERAGE_INCOMPLETE").unwrap_or_else(|| panic!("{r}"));
+    assert!(
+        names(&coverage["objects"]).contains(&"audit.view:summary"),
+        "{coverage}"
+    );
+    assert!(
+        names(&r["catalog"]["uncovered"]).contains(&"audit.view:summary"),
+        "{r}"
+    );
+}
+
+/// Managed objects may refer to a schema the history creates: such foreign
+/// keys, defaults, triggers and views are covered, a change in what they refer
+/// to is drift, and same-named objects in both schemas keep distinct keys.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn references_between_schemas_of_the_scope_are_covered() {
+    let f = Fixture::new();
+    f.seed_first(
+        "CREATE SCHEMA audit;
+CREATE TABLE audit.log (id int PRIMARY KEY);
+CREATE TABLE app.log (id int PRIMARY KEY);
+CREATE FUNCTION audit.stamp() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE FUNCTION audit.next_id() RETURNS int LANGUAGE sql AS 'SELECT 1';
+CREATE TABLE app.entries (id int DEFAULT audit.next_id(), log int REFERENCES audit.log (id));
+CREATE TRIGGER entries_stamp BEFORE INSERT ON app.entries FOR EACH ROW EXECUTE FUNCTION audit.stamp();
+CREATE VIEW app.logged AS SELECT e.id FROM app.entries e JOIN audit.log l ON l.id = e.log;",
+    );
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["catalog"]["uncovered"], serde_json::json!([]), "{r}");
+    let objects = r["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "relation:log",
+        "audit.relation:log",
+        "constraint:entries.entries_log_fkey",
+        "trigger:entries.entries_stamp",
+        "view:logged",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    f.target()
+        .batch_execute(
+            "CREATE OR REPLACE FUNCTION audit.next_id() RETURNS int LANGUAGE sql AS 'SELECT 2'",
+        )
+        .unwrap();
+    let d = f.command("verify");
+    assert_eq!(d["outcome"], "fail", "{d}");
+    assert!(
+        d["drift"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["object"] == "audit.routine:next_id()" && x["change"] == "changed"),
+        "{}",
+        d["drift"]
+    );
+}
+
+/// Josh's decision on #420 (2026-11-21): statements that create, change,
+/// drop, grant, revoke or comment on schemas or objects outside the managed
+/// scope run as they did before #420. None is refused, whether it names the
+/// other schema, reaches it through search_path or a DO block, or is SQL
+/// NTNT does not parse, and planning never touches the target.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn statements_outside_the_managed_scope_are_not_refused() {
+    let f = Fixture::new();
+    // A shared schema and a table in public that exist on the target only.
+    f.target()
+        .batch_execute("CREATE SCHEMA shared; CREATE TABLE public.legacy (id int)")
+        .unwrap();
+    for sql in [
+        "CREATE TABLE public.leak (id int);",
+        // No-ops in scratch; on the target they act on public.legacy.
+        "DROP TABLE IF EXISTS public.legacy;",
+        "ALTER TABLE IF EXISTS public.legacy ADD COLUMN note text;",
+        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO PUBLIC;",
+        "REVOKE CREATE ON SCHEMA public FROM PUBLIC;",
+        "GRANT USAGE ON SCHEMA public TO PUBLIC;",
+        "COMMENT ON SCHEMA public IS 'shared';",
+        "CREATE TABLE public.leak (id int); TRUNCATE public.leak; DROP TABLE public.leak;",
+        "DO $$ BEGIN CREATE TABLE public.leak (id int); END $$;",
+        "DO $$ BEGIN GRANT CREATE ON SCHEMA public TO PUBLIC; END $$;",
+        "SET LOCAL search_path = public; CREATE TABLE leak (id int);",
+        "SELECT pg_catalog.set_config('search_path', 'public', true); DROP TABLE IF EXISTS legacy;",
+        // SQL sqlparser does not parse.
+        "ALTER SEQUENCE IF EXISTS public.s RESTART WITH 5;",
+        "DROP ROUTINE IF EXISTS public.cleanup();",
+    ] {
+        f.sql(
+            "0001_initial.sql",
+            &format!("CREATE TABLE app.t (id int);\n{sql}\n"),
+        );
+        let r = f.command("plan");
+        assert_eq!(r["outcome"], "pass", "{sql}: {}", r["diagnostics"]);
+        assert!(!has_code(&r, "DB_OUTSIDE_SCOPE"), "{sql}: {r}");
+    }
+    // A schema that exists only on the target is no refusal either: replay
+    // fails for lack of it in scratch, as it did before #420.
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t (id int);\nCREATE TABLE shared.leak (id int);\n",
+    );
+    let r = f.command("plan");
+    assert!(has_code(&r, "DB_POSTGRES"), "{r}");
+    assert!(!has_code(&r, "DB_OUTSIDE_SCOPE"), "{r}");
+    // Planning never touched the target's objects outside the scope.
+    assert!(f
+        .target()
+        .query_one("SELECT to_regclass('public.legacy') IS NOT NULL AND to_regclass('public.leak') IS NULL AND to_regclass('shared.leak') IS NULL AND (SELECT count(*) FROM pg_attribute WHERE attrelid = 'public.legacy'::regclass AND attnum > 0) = 1", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+}
+
+/// What would break NTNT's own guarantees stays refused: changes to `_ntnt`,
+/// the schema that holds NTNT's ledger, and to PostgreSQL's system schemas.
+/// Each statement is a no-op or fails in scratch, which has no `_ntnt` and
+/// whose unprivileged role cannot change system schemas, yet would act on a
+/// target, so it is refused by name before it runs; replay catches a `_ntnt`
+/// that a DO block creates.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn changes_to_the_ledger_schema_and_system_schemas_are_refused() {
+    let f = Fixture::new();
+    for (sql, object) in [
+        ("CREATE SCHEMA IF NOT EXISTS _ntnt;", "_ntnt"),
+        (
+            "DROP TABLE IF EXISTS _ntnt.schema_migrations_v2;",
+            "_ntnt.schema_migrations_v2",
+        ),
+        (
+            "ALTER TABLE IF EXISTS _ntnt.schema_migrations_v2 ADD COLUMN note text;",
+            "_ntnt.schema_migrations_v2",
+        ),
+        // Unqualified names that resolve in _ntnt.
+        (
+            "SET LOCAL search_path TO _ntnt; ALTER TABLE IF EXISTS schema_migrations_v2 ADD COLUMN note text;",
+            "_ntnt",
+        ),
+        (
+            "SELECT set_config('search_path', '_ntnt', true); ALTER TABLE IF EXISTS schema_migrations_v2 ADD COLUMN note text;",
+            "_ntnt",
+        ),
+        // SQL sqlparser does not parse.
+        (
+            "ALTER SEQUENCE IF EXISTS _ntnt.positions RESTART WITH 5;",
+            "_ntnt.positions",
+        ),
+        ("GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;", "pg_catalog"),
+        (
+            "REVOKE SELECT ON ALL TABLES IN SCHEMA information_schema FROM PUBLIC;",
+            "information_schema",
+        ),
+        // Statement text the analysis cannot see into: replay observes it.
+        ("DO $$ BEGIN CREATE SCHEMA _ntnt; END $$;", "schema:_ntnt"),
+    ] {
+        f.sql(
+            "0001_initial.sql",
+            &format!("CREATE TABLE app.t (id int);\n{sql}\n"),
+        );
+        let r = f.command("plan");
+        assert_ne!(r["outcome"], "pass", "{sql}: {r}");
+        assert_eq!(r["plan"]["candidate"]["outcome"], "unknown", "{sql}: {r}");
+        let refused = diagnostic(&r, "DB_OUTSIDE_SCOPE")
+            .unwrap_or_else(|| panic!("{sql}: {}", r["diagnostics"]));
+        assert_eq!(refused["source"], "0001_initial.sql", "{refused}");
+        assert!(
+            names(&refused["objects"]).contains(&object),
+            "{sql}: {refused}"
+        );
+    }
+}
+
+/// Managed objects may refer to objects the history creates outside the
+/// managed scope, as they may to a created schema: such foreign keys,
+/// defaults, checks, indexes, triggers, policies and views are covered, and a
+/// change to what they refer to is drift on the outside object.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn references_to_objects_the_history_creates_outside_are_covered() {
+    let f = Fixture::new();
+    f.seed_first(
+        "CREATE TABLE public.audit_log (id int PRIMARY KEY);
+CREATE FUNCTION public.stamp() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE FUNCTION public.next_id() RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT 1';
+CREATE TABLE app.entries (id int DEFAULT public.next_id() CHECK (public.next_id() > 0), log int REFERENCES public.audit_log (id));
+CREATE INDEX entries_next ON app.entries ((id + public.next_id()));
+CREATE TRIGGER entries_stamp BEFORE INSERT ON app.entries FOR EACH ROW EXECUTE FUNCTION public.stamp();
+ALTER TABLE app.entries ENABLE ROW LEVEL SECURITY;
+CREATE POLICY entries_all ON app.entries USING (public.next_id() = 1);
+CREATE VIEW app.logged AS SELECT e.id FROM app.entries e JOIN public.audit_log l ON l.id = e.log;",
+    );
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["catalog"]["uncovered"], serde_json::json!([]), "{r}");
+    assert_eq!(
+        r["target"]["outside_objects"],
+        serde_json::json!([
+            "public.relation:audit_log",
+            "public.routine:next_id()",
+            "public.routine:stamp()"
+        ]),
+        "{r}"
+    );
+    let objects = r["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "public.relation:audit_log",
+        "public.routine:next_id()",
+        "public.routine:stamp()",
+        "constraint:entries.entries_log_fkey",
+        "index:entries_next",
+        "trigger:entries.entries_stamp",
+        "policy:entries.entries_all",
+        "view:logged",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    f.target()
+        .batch_execute(
+            "CREATE OR REPLACE FUNCTION public.next_id() RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT 2'",
+        )
+        .unwrap();
+    let d = f.command("verify");
+    assert_eq!(d["outcome"], "fail", "{d}");
+    assert!(
+        d["drift"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["object"] == "public.routine:next_id()" && x["change"] == "changed"),
+        "{}",
+        d["drift"]
+    );
+}
+
+/// An extension a migration installs outside the managed scope is not
+/// covered, as before #420, and its members follow it: the diagnostic names
+/// the extension, not each routine and type it put in public.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn an_extension_installed_outside_the_scope_is_uncovered_as_one_object() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.t (id int);\nCREATE EXTENSION hstore WITH SCHEMA public;\n",
+    );
+    let r = f.command("plan");
+    assert_eq!(r["plan"]["candidate"]["outcome"], "unknown", "{r}");
+    let coverage = diagnostic(&r, "DB_COVERAGE_INCOMPLETE").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(coverage["source"], "0001_initial.sql", "{coverage}");
+    assert_eq!(
+        names(&coverage["objects"]),
+        ["extension:hstore"],
+        "{coverage}"
+    );
+    assert!(!has_code(&r, "DB_OUTSIDE_SCOPE"), "{r}");
+}
+
+/// Two migrations of a single-schema history. It reaches every catalog query
+/// whose SQL #420 changed.
+const SINGLE_SCHEMA_HISTORY: [(&str, &str); 2] = [
+    (
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id integer PRIMARY KEY, email text NOT NULL UNIQUE, parent integer REFERENCES app.accounts(id), CHECK (id > 0));
+CREATE INDEX accounts_email_lower ON app.accounts (lower(email)) WHERE email <> '';
+CREATE TABLE app.events (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, account integer NOT NULL REFERENCES app.accounts(id) ON DELETE CASCADE);
+CREATE VIEW app.account_emails AS SELECT id, email FROM app.accounts;
+CREATE SEQUENCE app.counter;
+CREATE FUNCTION app.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+CREATE TRIGGER accounts_touch BEFORE UPDATE ON app.accounts FOR EACH ROW EXECUTE FUNCTION app.touch();
+ALTER TABLE app.accounts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY accounts_all ON app.accounts USING (true);
+GRANT SELECT ON app.account_emails TO PUBLIC;
+",
+    ),
+    (
+        "0002_created.sql",
+        "ALTER TABLE app.accounts ADD COLUMN created timestamp DEFAULT now();",
+    ),
+];
+
+/// A history without CREATE SCHEMA keeps exactly the catalog it had before
+/// #420, so plans saved by earlier releases keep validating. The
+/// fingerprints were recorded with ntnt 0.6.4 before #420 (81a5ad0). They
+/// differ between PostgreSQL major versions (for example the default table
+/// privileges gained MAINTAIN in 17), never within one.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn single_schema_catalog_fingerprints_are_unchanged() {
+    let mut f = Fixture::new();
+    for (name, sql) in SINGLE_SCHEMA_HISTORY {
+        f.sql(name, sql);
+    }
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let major = f
+        .admin
+        .query_one(
+            "SELECT current_setting('server_version_num')::int / 10000",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i32>(0);
+    let empty = "e0b5e359882940c7b4bc8008309032618468ec05ea2b92f0435e3d4ae3ec82d7";
+    let expected = match major {
+        16 => [
+            empty,
+            "fa27beb077d616c4dc1ba83c0f922432668c5f0a4501b2012a457eed579b878d",
+            "91c98d8aac0941393b1983539e57a22461e93321e80f732059ae9b5e755f3615",
+        ],
+        17 => [
+            empty,
+            "ace2b9aae2336edacbe65862d184d70af85f9dc489ef785562e3c765807234a0",
+            "10e838513cc36a4e69753c906b42a05152998f7e1d661ee321626edcdd849e5f",
+        ],
+        18 => [
+            empty,
+            "d47d0d362be207d3759c1947cdea743a9511573519bb83dae68f667990f482b3",
+            "7f7835ca0326767f0776785a3ce3386a3ea435c79263524d13a11d4d258e7423",
+        ],
+        other => panic!("no recorded fingerprints for PostgreSQL {other}"),
+    };
+    assert_eq!(
+        r["plan"]["execution"]["prefix_fingerprints"],
+        serde_json::json!(expected),
+        "PostgreSQL {major}"
+    );
+    // Nor did the plan or its binding gain a field.
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(
+        keys(&r["plan"]),
+        [
+            "authorized",
+            "automatic_safe",
+            "binding",
+            "candidate",
+            "classification",
+            "data_checks",
+            "executable",
+            "execution",
+            "pending",
+            "required_authority"
+        ]
+    );
+    assert_eq!(
+        keys(&r["plan"]["binding"]),
+        [
+            "adapter",
+            "applied_count",
+            "base_catalog_digest",
+            "base_history_digest",
+            "canonicalization_version",
+            "database",
+            "expected_base_digest",
+            "format_version",
+            "input_digest",
+            "managed_schema",
+            "policy_digest",
+            "target",
+            "target_name"
+        ]
+    );
+    assert!(
+        r["target"].get("history_schemas").is_none(),
+        "{}",
+        r["target"]
+    );
+}
+
+/// #434: a policy whose expression calls a routine outside pg_catalog and the
+/// managed scope depends on code `ntnt db` does not inspect, so it is
+/// uncovered. The coverage query compared the policy's dependency with the
+/// routine's own OID (the inner alias shadowed the policy's), so every policy
+/// read as covered.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_policy_calling_a_routine_outside_the_scope_is_uncovered() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_rls.sql",
+        "CREATE TABLE app.t(id int PRIMARY KEY); ALTER TABLE app.t ENABLE ROW LEVEL SECURITY; \
+         CREATE POLICY t_read ON app.t USING (information_schema._pg_numeric_precision(23, -1) IS NOT NULL);",
+    );
+    let r = f.command("plan");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_COVERAGE_INCOMPLETE")
+        .unwrap_or_else(|| panic!("no DB_COVERAGE_INCOMPLETE in {r}"));
+    assert!(
+        d["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o.as_str().unwrap().contains("t_read")),
+        "{d}"
+    );
+}

@@ -1389,8 +1389,12 @@ fn sqlite_failed_statement_is_numbered() {
 /// instead of leaving CI waiting on a query that would run for hours.
 const HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// The JSON `command` prints, failing the test if it outlives `HANG_GUARD`.
-fn json_within_hang_guard(mut command: std::process::Command) -> Value {
+/// Hang guard for the target statement-limit test: below the 90-second default,
+/// so a configured limit that is not applied shows as a hang (#429).
+const LIMIT_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The JSON `command` prints, failing the test if it outlives `guard`.
+fn json_within_hang_guard(mut command: std::process::Command, guard: std::time::Duration) -> Value {
     use std::io::Read;
     let mut child = command
         .stdout(std::process::Stdio::piped())
@@ -1408,10 +1412,10 @@ fn json_within_hang_guard(mut command: std::process::Command) -> Value {
     let stderr = drain(Box::new(child.stderr.take().unwrap()));
     let started = std::time::Instant::now();
     while child.try_wait().unwrap().is_none() {
-        if started.elapsed() > HANG_GUARD {
+        if started.elapsed() > guard {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("`ntnt db plan` still ran after HANG_GUARD ({HANG_GUARD:?}): the replay deadline never fired");
+            panic!("`ntnt db` still ran after its hang guard ({guard:?}): a deadline never fired");
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -1447,7 +1451,7 @@ fn sqlite_replay_timeout_is_not_masked_by_its_cleanup() {
              INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3, main.a AS a4, main.a AS a5, main.a AS a6;"
         ),
     );
-    let r = json_within_hang_guard(f.process("plan"));
+    let r = json_within_hang_guard(f.process("plan"), HANG_GUARD);
     assert_ne!(r["outcome"], "pass", "{r}");
     let codes: Vec<&str> = r["diagnostics"]
         .as_array()
@@ -1455,7 +1459,12 @@ fn sqlite_replay_timeout_is_not_masked_by_its_cleanup() {
         .iter()
         .map(|d| d["code"].as_str().unwrap())
         .collect();
-    assert_eq!(codes.first(), Some(&"DB_TIMEOUT"), "{r}");
+    assert_eq!(codes.first(), Some(&"DB_STATEMENT_LIMIT"), "{r}");
+    let message = r["diagnostics"][0]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Statement 4 did not finish within the 5-second replay limit"),
+        "{message}"
+    );
     // Anything after the timeout is the failed cleanup of a discarded session.
     assert!(codes[1..].iter().all(|c| *c == "DB_CANCELLED"), "{r}");
     let cleanup = if codes.len() == 1 { "pass" } else { "unknown" };
@@ -1513,4 +1522,222 @@ fn sqlite_refusals_are_named_where_the_statement_compiles_them() {
             0
         );
     }
+}
+
+/// #419: SQLite's DROP TABLE deletes every row first, which runs the ON DELETE
+/// actions of the tables that reference it. Outside sqlite_rebuild mode a
+/// migration that drops such a table is refused before it runs, naming each
+/// child table and its action; the target keeps every row.
+#[test]
+fn sqlite_dropping_a_table_with_on_delete_children_requires_rebuild_mode() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_base.sql",
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL); \
+         CREATE TABLE posts(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE); \
+         CREATE TABLE comments(id INTEGER PRIMARY KEY, account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL); \
+         CREATE TABLE tags(id INTEGER PRIMARY KEY, account_id INTEGER REFERENCES accounts(id));",
+    );
+    let base = f.plan("base.json");
+    assert_eq!(
+        f.apply("base.json", base["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("INSERT INTO accounts VALUES(1, 'A@example.com'); INSERT INTO posts VALUES(1, 1); INSERT INTO comments VALUES(1, 1);")
+        .unwrap();
+    f.sql(
+        "0002_rebuild.sql",
+        "CREATE TABLE accounts_new(id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE); \
+         INSERT INTO accounts_new SELECT id, lower(email) FROM accounts; \
+         DROP TABLE accounts; \
+         ALTER TABLE accounts_new RENAME TO accounts;",
+    );
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_REBUILD_REQUIRED");
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Statement 3 drops table `accounts`"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`comments` (ON DELETE SET NULL)"),
+        "{message}"
+    );
+    assert!(message.contains("`posts` (ON DELETE CASCADE)"), "{message}");
+    assert!(!message.contains("tags"), "{message}");
+    assert_eq!(d["source"], "0002_rebuild.sql", "{d}");
+    let kept: i64 = f
+        .target()
+        .query_row("SELECT (SELECT count(*) FROM posts) + (SELECT count(*) FROM comments WHERE account_id = 1)", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kept, 2);
+}
+
+/// #419: the refusal is only for drops that would run ON DELETE actions. A
+/// parent dropped after its children, a child without an action, and a
+/// self-reference stay allowed.
+#[test]
+fn sqlite_drops_that_run_no_on_delete_actions_stay_allowed() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_base.sql",
+        "CREATE TABLE parents(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id) ON DELETE CASCADE); \
+         CREATE TABLE children(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id) ON DELETE CASCADE); \
+         CREATE TABLE others(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parents(id));",
+    );
+    let base = f.plan("base.json");
+    assert_eq!(
+        f.apply("base.json", base["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0002_drop.sql",
+        "DROP TABLE others; DROP TABLE children; DROP TABLE parents;",
+    );
+    let plan = f.plan("drop.json");
+    let applied = f.apply("drop.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
+/// #429: on a target, a SQLite migration runs under the plan's statement limit
+/// (`statement_seconds`, 90 seconds by default) instead of a fixed 5 seconds.
+/// The plan binds a declared limit; a statement past it fails with
+/// DB_STATEMENT_LIMIT naming it, nothing from that migration is committed, and
+/// a changed limit makes the plan stale. The migration's second statement is a
+/// cross join of 2.7 * 10^13 rows on the target's data (instant on the empty
+/// scratch), so it always reaches the limit; the row its first statement
+/// wrote is rolled back with it.
+#[test]
+fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE a(x INTEGER); CREATE TABLE b(n INTEGER);",
+    );
+    let initial = f.plan("initial.json");
+    assert!(
+        initial["plan"]["execution"].get("limits").is_none(),
+        "{initial}"
+    );
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 30000) INSERT INTO a SELECT x FROM n;")
+        .unwrap();
+    let manifest = f.root.path().join("ntnt.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        format!("{text}\n[databases.app.limits]\nstatement_seconds = 2\n"),
+    )
+    .unwrap();
+    f.sql(
+        "0002_count.sql",
+        "INSERT INTO b VALUES (0); INSERT INTO b SELECT count(*) FROM main.a, main.a AS a2, main.a AS a3;",
+    );
+    let plan = f.plan("limit.json");
+    assert_eq!(
+        plan["plan"]["execution"]["limits"],
+        serde_json::json!({"statement_seconds": 2}),
+        "{plan}"
+    );
+    let mut migrate = f.process("migrate");
+    migrate
+        .args(["--plan", "limit.json"])
+        .env("DB_APPROVAL", plan["plan_digest"].as_str().unwrap());
+    let r = json_within_hang_guard(migrate, LIMIT_HANG_GUARD);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_STATEMENT_LIMIT");
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Statement 2 did not finish within the 2-second statement limit"),
+        "{message}"
+    );
+    assert_eq!(d["source"], "0002_count.sql", "{d}");
+    assert_eq!(
+        f.target()
+            .query_row("SELECT count(*) FROM b", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    // The limit is part of the plan: a different declared limit makes it stale.
+    std::fs::write(
+        &manifest,
+        format!("{text}\n[databases.app.limits]\nstatement_seconds = 3\n"),
+    )
+    .unwrap();
+    let stale = f.apply("limit.json", plan["plan_digest"].as_str());
+    assert!(code(&stale, "DB_PLAN_STALE"), "{stale}");
+}
+
+/// #419: DB_REBUILD_REQUIRED's advice also covers a migration that retires the
+/// table, which a `sqlite_rebuild` sidecar cannot help with: its guard requires
+/// every table to remain. Followed as written, removing the foreign key that
+/// references it from one named table (by rebuilding that table) and dropping
+/// the other named table first, the retirement migrates and keeps the rows of
+/// the table it rebuilt (review on #435, sqlite.rs).
+#[test]
+fn sqlite_retiring_a_table_with_on_delete_children_follows_the_advice() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_base.sql",
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL); \
+         CREATE TABLE posts(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE); \
+         CREATE TABLE comments(id INTEGER PRIMARY KEY, account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL);",
+    );
+    let base = f.plan("base.json");
+    assert_eq!(
+        f.apply("base.json", base["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute_batch("INSERT INTO accounts VALUES(1, 'a@example.com'); INSERT INTO posts VALUES(1, 1); INSERT INTO comments VALUES(1, 1);")
+        .unwrap();
+    f.sql("0002_retire.sql", "DROP TABLE accounts;");
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_REBUILD_REQUIRED");
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.ends_with("To rebuild `accounts` (create the new table and copy its rows), use a `sqlite_rebuild` sidecar; to retire it, first remove those foreign keys from those tables or drop those tables."),
+        "{message}"
+    );
+    let action = d["next_action"].as_str().unwrap();
+    for advice in [
+        "If the migration rebuilds the named table",
+        "`sqlite_rebuild",
+        "If it retires the table",
+        "first remove the foreign keys that reference it from the tables the message names, or drop those tables",
+        "create the table again without the key, copy its rows, drop the old table and rename the new one",
+    ] {
+        assert!(action.contains(advice), "{advice}: {action}");
+    }
+    // As the advice says: posts is rebuilt without its key, comments is
+    // dropped, then accounts.
+    f.sql(
+        "0002_retire.sql",
+        "CREATE TABLE posts_new(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL); \
+         INSERT INTO posts_new SELECT id, account_id FROM posts; \
+         DROP TABLE posts; \
+         ALTER TABLE posts_new RENAME TO posts; \
+         DROP TABLE comments; \
+         DROP TABLE accounts;",
+    );
+    let plan = f.plan("retire.json");
+    let applied = f.apply("retire.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let (posts, retired): (i64, i64) = f
+        .target()
+        .query_row(
+            "SELECT (SELECT count(*) FROM posts WHERE account_id = 1), (SELECT count(*) FROM sqlite_schema WHERE name IN ('accounts', 'comments'))",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((posts, retired), (1, 0));
+    assert_eq!(f.command("verify", &[])["outcome"], "pass");
 }

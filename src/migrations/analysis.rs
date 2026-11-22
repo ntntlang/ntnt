@@ -18,6 +18,21 @@ pub(crate) struct Analysis {
     /// which `migrate` runs outside a transaction.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub non_transactional: bool,
+    /// PostgreSQL only: statements that may create, change, drop, grant or
+    /// revoke objects in a schema outside the managed scope, which NTNT does
+    /// not inspect (`analyze_in_scope`). Never a refusal.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outside_scope: Vec<OutsideScope>,
+}
+/// A statement that may act in a schema outside the managed scope.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub(crate) struct OutsideScope {
+    /// 1-based statement number within the migration script.
+    pub statement: usize,
+    /// The schema, folded like PostgreSQL.
+    pub schema: String,
+    /// How the statement names it.
+    pub via: Via,
 }
 /// A migration whose whole script is one named `CREATE INDEX CONCURRENTLY` on
 /// a managed table. Replay builds the same index without CONCURRENTLY, inside
@@ -72,6 +87,23 @@ pub(crate) struct LockWarning {
     pub code: &'static str,
     pub message: &'static str,
 }
+/// Whether `sql` holds no statement at all: only whitespace, comments and
+/// semicolons, such as the header `ntnt db new` writes (#428). Input that does
+/// not tokenize is not empty; the other checks report it.
+pub(crate) fn is_empty(sql: &str, engine: &str) -> bool {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let tokens = if engine == "sqlite" {
+        Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql).tokenize()
+    } else {
+        Tokenizer::new(&PostgreSqlDialect {}, sql).tokenize()
+    };
+    tokens.is_ok_and(|tokens| {
+        tokens
+            .iter()
+            .all(|token| matches!(token, Token::Whitespace(_) | Token::SemiColon | Token::EOF))
+    })
+}
+
 /// Parse PostgreSQL syntax within fixed token and recursion bounds.
 /// Invalid, empty or unsupported input is not evidence that replay would be safe.
 fn parse(sql: &str) -> Option<Vec<Statement>> {
@@ -315,6 +347,7 @@ pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
         locks: vec![],
         lock_warnings: vec![],
         non_transactional: false,
+        outside_scope: vec![],
     };
     if engine == "sqlite" {
         sqlite_script(&mut a, sql);
@@ -457,21 +490,17 @@ fn sqlite_script(a: &mut Analysis, sql: &str) {
 /// tokenizer output. Individual statements keep the 4,096-token parser bound.
 const MAX_SCRIPT_TOKENS: usize = 262_144;
 
-/// PostgreSQL migrations run as complete scripts inside one transaction: in
-/// disposable scratch for review, then on the target after approval. Analysis
-/// splits on tokenizer-level semicolons (quoted and dollar-quoted text stays
-/// intact), rejects statements that would escape that transaction or session,
-/// and reports which statements it could not analyze. It does not sandbox SQL.
-fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
+/// Split a PostgreSQL script into its top-level statements at tokenizer-level
+/// semicolons: quoted and dollar-quoted text stays intact, and a SQL-standard
+/// routine body (`BEGIN ATOMIC ... END`) stays one statement. Statements with
+/// only whitespace and comments are dropped. `None` when the script cannot be
+/// tokenized within the token bound.
+fn statements(sql: &str) -> Option<Vec<Vec<sqlparser::tokenizer::TokenWithSpan>>> {
     use sqlparser::tokenizer::{Token, Tokenizer};
     let dialect = PostgreSqlDialect {};
     let tokens = match Tokenizer::new(&dialect, sql).tokenize_with_location() {
         Ok(t) if t.len() <= MAX_SCRIPT_TOKENS => t,
-        _ => {
-            a.replay_supported = false;
-            a.unknowns.push("SQL_PARSE_EMPTY_OR_LIMIT".into());
-            return;
-        }
+        _ => return None,
     };
     let mut statements = vec![];
     let mut current: Vec<sqlparser::tokenizer::TokenWithSpan> = vec![];
@@ -520,11 +549,22 @@ fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
     }
     statements.push(current);
     statements.retain(|s| s.iter().any(|t| !matches!(t.token, Token::Whitespace(_))));
-    if statements.is_empty() {
+    Some(statements)
+}
+
+/// PostgreSQL migrations run as complete scripts inside one transaction: in
+/// disposable scratch for review, then on the target after approval. Analysis
+/// splits on tokenizer-level semicolons (quoted and dollar-quoted text stays
+/// intact), rejects statements that would escape that transaction or session,
+/// and reports which statements it could not analyze. It does not sandbox SQL.
+fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
+    use sqlparser::tokenizer::Token;
+    let dialect = PostgreSqlDialect {};
+    let Some(statements) = statements(sql).filter(|s| !s.is_empty()) else {
         a.replay_supported = false;
         a.unknowns.push("SQL_PARSE_EMPTY_OR_LIMIT".into());
         return;
-    }
+    };
     let mut created = std::collections::BTreeSet::new();
     for (index, tokens) in statements.into_iter().enumerate() {
         let number = index + 1;
@@ -678,6 +718,10 @@ fn lock_rank(mode: &str) -> usize {
     .position(|m| *m == mode)
     .unwrap_or(0)
 }
+/// A name qualified with `pg_temp`, the session's temporary schema.
+fn temporary(n: &ObjectName) -> bool {
+    matches!(n.0.first().and_then(|p| p.as_ident()), Some(s) if n.0.len() == 2 && folded(&s.value, s.quote_style.is_some()) == "pg_temp")
+}
 /// Unqualified or managed-schema table name, lowercased like PostgreSQL.
 fn managed_table(n: &ObjectName, schema: &str) -> Option<String> {
     let ids: Vec<_> = n.0.iter().filter_map(|p| p.as_ident()).collect();
@@ -723,7 +767,14 @@ fn predict_locks(
     created: &mut std::collections::BTreeSet<String>,
 ) {
     let take = |a: &mut Analysis, name: &ObjectName, mode: &'static str| -> Option<String> {
-        let table = managed_table(name, schema)?;
+        let Some(table) = managed_table(name, schema) else {
+            // A table in another schema, such as one the history creates: its
+            // lock is not predicted, and the analysis says so.
+            if !temporary(name) {
+                a.unknowns.push("LOCKS_NOT_PREDICTED".into());
+            }
+            return None;
+        };
         if created.contains(&table) {
             return None;
         }
@@ -1029,6 +1080,610 @@ fn escapes_transaction(words: &[Option<String>]) -> Option<&'static str> {
         "CREATE" | "DROP" | "ALTER" if concurrently => Some("NON_TRANSACTIONAL"),
         _ => None,
     }
+}
+/// How PostgreSQL folds a name: unquoted letters lowercase (ASCII letters
+/// only, as in a UTF-8 database), quoted names verbatim.
+fn folded(value: &str, quoted: bool) -> String {
+    if quoted {
+        value.to_owned()
+    } else {
+        value.to_ascii_lowercase()
+    }
+}
+
+/// Schema names PostgreSQL or NTNT reserve. A history that creates one never
+/// brings it into the managed scope.
+fn reserved_schema(name: &str) -> bool {
+    name.starts_with("pg_") || name == "information_schema" || name == "_ntnt"
+}
+
+/// One script's top-level `CREATE SCHEMA <name>` names and `ALTER SCHEMA <a>
+/// RENAME TO <b>` pairs, read from its tokens, so a statement sqlparser does
+/// not parse (`CREATE SCHEMA audit CREATE TABLE ...`) still counts. A schema
+/// named only by `AUTHORIZATION <role>`, a qualified or an over-long name
+/// counts as none. DO and routine bodies are opaque.
+fn schema_changes(sql: &str) -> (Vec<String>, Vec<(String, String)>) {
+    use sqlparser::tokenizer::Token;
+    let (mut created, mut renamed) = (vec![], vec![]);
+    for tokens in statements(sql).unwrap_or_default() {
+        let t: Vec<&Token> = tokens
+            .iter()
+            .map(|t| &t.token)
+            .filter(|t| !matches!(t, Token::Whitespace(_)))
+            .collect();
+        let keyword = |i: usize, k: &str| matches!(t.get(i), Some(Token::Word(w)) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(k));
+        let name = |i: usize| match t.get(i) {
+            Some(Token::Word(w))
+                if !matches!(t.get(i + 1), Some(Token::Period))
+                    && (w.quote_style.is_some()
+                        || !w.value.eq_ignore_ascii_case("AUTHORIZATION")) =>
+            {
+                Some(folded(&w.value, w.quote_style.is_some()))
+                    .filter(|n| !n.is_empty() && n.len() <= 63 && !n.contains('\0'))
+            }
+            _ => None,
+        };
+        if keyword(0, "CREATE") && keyword(1, "SCHEMA") {
+            let at = if keyword(2, "IF") && keyword(3, "NOT") && keyword(4, "EXISTS") {
+                5
+            } else {
+                2
+            };
+            created.extend(name(at));
+        } else if keyword(0, "ALTER")
+            && keyword(1, "SCHEMA")
+            && keyword(3, "RENAME")
+            && keyword(4, "TO")
+        {
+            if let (Some(from), Some(to)) = (name(2), name(5)) {
+                renamed.push((from, to));
+            }
+        }
+    }
+    (created, renamed)
+}
+
+/// The schemas a PostgreSQL migration history adds to the managed scope:
+/// each name a top-level `CREATE SCHEMA` in any captured migration gives, and
+/// each name an `ALTER SCHEMA ... RENAME TO` gives one of those. Sorted;
+/// never the managed schema itself or a reserved name. Derived from the
+/// captured source alone, so plan, verify and migrate inspect the same
+/// schemas, before any replay, and the input digest binds them.
+pub(crate) fn history_schemas<'a>(
+    scripts: impl IntoIterator<Item = &'a str>,
+    schema: &str,
+) -> Vec<String> {
+    let mut scope = std::collections::BTreeSet::new();
+    let mut renames = vec![];
+    for sql in scripts {
+        let (created, renamed) = schema_changes(sql);
+        scope.extend(created);
+        renames.extend(renamed);
+    }
+    // Follow chains of renames (a to b, then b to c) to a fixed point.
+    loop {
+        let before = scope.len();
+        for (from, to) in &renames {
+            if scope.contains(from) {
+                scope.insert(to.clone());
+            }
+        }
+        if scope.len() == before {
+            break;
+        }
+    }
+    scope
+        .into_iter()
+        .filter(|s| s != schema && !reserved_schema(s))
+        .collect()
+}
+
+/// What one parsed statement creates, changes or drops, by the schema its
+/// name gives explicitly: (folded schema, name as written). Unqualified names
+/// are not listed: they resolve in the managed schema, the search_path every
+/// migration starts with. `None` for a statement kind this does not read.
+fn targets(statement: &Statement) -> Option<Vec<(String, String)>> {
+    fn parts(n: &ObjectName) -> Option<Vec<&Ident>> {
+        n.0.iter().map(|p| p.as_ident()).collect()
+    }
+    // An object's schema: `schema.object`, or `database.schema.object`.
+    fn object(n: &ObjectName) -> Option<(String, String)> {
+        let ids = parts(n)?;
+        let schema = match ids.as_slice() {
+            [s, _] | [_, s, _] => s,
+            _ => return None,
+        };
+        Some((
+            folded(&schema.value, schema.quote_style.is_some()),
+            n.to_string(),
+        ))
+    }
+    // A schema itself.
+    fn schema(n: &ObjectName) -> Option<(String, String)> {
+        let ids = parts(n)?;
+        let [.., s] = ids.as_slice() else { return None };
+        (ids.len() <= 2).then(|| (folded(&s.value, s.quote_style.is_some()), n.to_string()))
+    }
+    fn grants(objects: Option<&GrantObjects>) -> Vec<(String, String)> {
+        match objects {
+            Some(
+                GrantObjects::AllSequencesInSchema { schemas }
+                | GrantObjects::AllTablesInSchema { schemas }
+                | GrantObjects::AllViewsInSchema { schemas }
+                | GrantObjects::AllMaterializedViewsInSchema { schemas }
+                | GrantObjects::AllExternalTablesInSchema { schemas }
+                | GrantObjects::AllFunctionsInSchema { schemas }
+                | GrantObjects::FutureTablesInSchema { schemas }
+                | GrantObjects::FutureViewsInSchema { schemas }
+                | GrantObjects::FutureExternalTablesInSchema { schemas }
+                | GrantObjects::FutureMaterializedViewsInSchema { schemas }
+                | GrantObjects::FutureSequencesInSchema { schemas }
+                | GrantObjects::Schemas(schemas),
+            ) => schemas.iter().filter_map(schema).collect(),
+            Some(
+                GrantObjects::Sequences(names)
+                | GrantObjects::Tables(names)
+                | GrantObjects::Views(names),
+            ) => names.iter().filter_map(object).collect(),
+            Some(GrantObjects::Procedure { name, .. } | GrantObjects::Function { name, .. }) => {
+                object(name).into_iter().collect()
+            }
+            _ => vec![],
+        }
+    }
+    let one = |n: &ObjectName| object(n).into_iter().collect::<Vec<_>>();
+    Some(match statement {
+        Statement::CreateTable(t) => one(&t.name),
+        Statement::CreateView(v) => one(&v.name),
+        // An index, trigger or policy lives with its table.
+        Statement::CreateIndex(i) => one(&i.table_name),
+        Statement::CreateTrigger(t) => one(&t.table_name),
+        Statement::CreatePolicy(p) => one(&p.table_name),
+        Statement::CreateSequence { name, .. }
+        | Statement::CreateProcedure { name, .. }
+        | Statement::CreateType { name, .. }
+        | Statement::AlterIndex { name, .. }
+        | Statement::AlterView { name, .. } => one(name),
+        Statement::CreateFunction(f) => one(&f.name),
+        Statement::CreateDomain(d) => one(&d.name),
+        Statement::CreateCollation(c) => one(&c.name),
+        Statement::CreateExtension(e) => e
+            .schema
+            .iter()
+            .map(|s| (folded(&s.value, s.quote_style.is_some()), s.to_string()))
+            .collect(),
+        Statement::CreateSchema {
+            schema_name: SchemaName::Simple(n) | SchemaName::NamedAuthorization(n, _),
+            ..
+        } => schema(n).into_iter().collect(),
+        Statement::AlterTable(t) => one(&t.name),
+        Statement::AlterFunction(f) => one(&f.function.name),
+        Statement::AlterType(t) => one(&t.name),
+        Statement::AlterPolicy(p) => one(&p.table_name),
+        Statement::AlterSchema(s) => schema(&s.name).into_iter().collect(),
+        Statement::Drop {
+            object_type: ObjectType::Schema,
+            names,
+            ..
+        } => names.iter().filter_map(schema).collect(),
+        Statement::Drop { names, .. } => names.iter().filter_map(object).collect(),
+        Statement::DropFunction(d) => d.func_desc.iter().filter_map(|f| object(&f.name)).collect(),
+        Statement::DropProcedure { proc_desc, .. } => {
+            proc_desc.iter().filter_map(|f| object(&f.name)).collect()
+        }
+        Statement::DropTrigger(t) => t.table_name.iter().filter_map(object).collect(),
+        Statement::DropPolicy(p) => one(&p.table_name),
+        Statement::DropDomain(d) => one(&d.name),
+        Statement::Truncate(t) => t
+            .table_names
+            .iter()
+            .filter_map(|t| object(&t.name))
+            .collect(),
+        Statement::Grant(g) => grants(g.objects.as_ref()),
+        Statement::Revoke(r) => grants(r.objects.as_ref()),
+        // SELECT ... INTO creates a table.
+        Statement::Query(q) => match &*q.body {
+            SetExpr::Select(select) if select.into.is_some() => select
+                .into
+                .iter()
+                .flat_map(|into| one(&into.name))
+                .collect(),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// Schemas a migration may never act on: `_ntnt`, which holds NTNT's
+/// ledger, and PostgreSQL's system schemas (`pg_catalog`,
+/// `information_schema`, `pg_toast` and other `pg_*` names). `pg_temp`, the
+/// session's own temporary schema, is not one.
+fn protected_schema(name: &str) -> bool {
+    reserved_schema(name) && name != "pg_temp"
+}
+
+/// How a statement names a schema it may act in (see `schema_names`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Via {
+    /// A qualified name, an `IN SCHEMA` list or `SET SCHEMA` in a statement
+    /// NTNT parses.
+    Name,
+    /// `SET search_path`, `SET SCHEMA '...'` or `set_config('search_path',
+    /// ...)`: later unqualified names resolve there.
+    SearchPath,
+    /// A dotted name, or a name after `SCHEMA`, in a statement NTNT does not
+    /// parse or does not read names from. It may be a column of an alias.
+    Token,
+}
+
+/// Leading words of statements that read or write rows, run code or change
+/// settings rather than create, change, drop, grant or revoke objects: their
+/// dotted names are not read as schemas they act in.
+const ROW_STATEMENTS: &[&str] = &[
+    "SELECT",
+    "WITH",
+    "VALUES",
+    "TABLE",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
+    "CALL",
+    "DO",
+    "SET",
+    "RESET",
+    "SHOW",
+    "EXPLAIN",
+    "LOCK",
+    "ANALYZE",
+    "NOTIFY",
+    "LISTEN",
+    "UNLISTEN",
+    "PREPARE",
+    "EXECUTE",
+    "DEALLOCATE",
+    "DECLARE",
+    "FETCH",
+    "MOVE",
+    "CLOSE",
+];
+
+/// Whether `t` is the unquoted keyword `k`.
+fn keyword(t: Option<&&sqlparser::tokenizer::Token>, k: &str) -> bool {
+    matches!(t, Some(sqlparser::tokenizer::Token::Word(w)) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(k))
+}
+
+/// The names in a list-valued setting such as `search_path`, as
+/// `set_config` reads them: comma-separated, a double-quoted name verbatim
+/// (`""` for `"`), any other lowercased.
+fn setting_list(value: &str) -> Vec<String> {
+    let mut names = vec![];
+    let mut chars = value.chars().peekable();
+    loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
+        let mut name = String::new();
+        if chars.next_if_eq(&'"').is_some() {
+            loop {
+                match chars.next() {
+                    Some('"') if chars.next_if_eq(&'"').is_some() => name.push('"'),
+                    Some('"') | None => break,
+                    Some(c) => name.push(c),
+                }
+            }
+            while chars.next_if(|c| *c != ',').is_some() {}
+        } else {
+            while let Some(c) = chars.next_if(|c| *c != ',') {
+                name.push(c);
+            }
+            name = name.trim_end().to_ascii_lowercase();
+        }
+        if !name.is_empty() {
+            names.push(name);
+        }
+        if chars.next().is_none() {
+            return names;
+        }
+    }
+}
+
+/// The schemas one statement's significant tokens put on the search path:
+/// `SET [SESSION | LOCAL] search_path {TO | =} a, b` (a string literal is one
+/// name, verbatim), `SET [SESSION | LOCAL] SCHEMA 'a'`, and each
+/// `set_config('search_path', 'a, b', ...)` call with literal arguments.
+/// `DEFAULT` names none.
+fn search_path_schemas(t: &[&sqlparser::tokenizer::Token]) -> Vec<String> {
+    use sqlparser::tokenizer::Token;
+    let mut schemas = vec![];
+    if keyword(t.first(), "SET") {
+        let mut i = 1;
+        while keyword(t.get(i), "SESSION") || keyword(t.get(i), "LOCAL") {
+            i += 1;
+        }
+        let list = if keyword(t.get(i), "search_path")
+            && (keyword(t.get(i + 1), "TO") || matches!(t.get(i + 1), Some(Token::Eq)))
+        {
+            Some(i + 2)
+        } else if keyword(t.get(i), "SCHEMA") {
+            Some(i + 1)
+        } else {
+            None
+        };
+        if let Some(mut i) = list.filter(|i| !keyword(t.get(*i), "DEFAULT")) {
+            loop {
+                match t.get(i) {
+                    Some(Token::Word(w)) => schemas.push(folded(&w.value, w.quote_style.is_some())),
+                    // PostgreSQL takes a number as a name too (`TO 42`).
+                    Some(Token::Number(n, _)) => schemas.push(n.clone()),
+                    Some(token) => match string_literal(token) {
+                        Some(s) => schemas.push(s),
+                        None => break,
+                    },
+                    None => break,
+                }
+                if !matches!(t.get(i + 1), Some(Token::Comma)) {
+                    break;
+                }
+                i += 2;
+            }
+        }
+    }
+    for (i, token) in t.iter().enumerate() {
+        if keyword(Some(token), "set_config")
+            && matches!(t.get(i + 1), Some(Token::LParen))
+            && t.get(i + 2)
+                .and_then(|token| string_literal(token))
+                .is_some_and(|name| name.eq_ignore_ascii_case("search_path"))
+            && matches!(t.get(i + 3), Some(Token::Comma))
+        {
+            // A value that is not a literal (an expression) names nothing
+            // NTNT can read.
+            if let Some(list) = t.get(i + 4).and_then(|token| string_literal(token)) {
+                schemas.extend(setting_list(&list));
+            }
+        }
+    }
+    schemas
+}
+
+/// The value of a string-literal token, whatever its spelling: `'...'`,
+/// `E'...'`, `N'...'`, `U&'...'`, `$$...$$` or `$tag$...$tag$`.
+fn string_literal(token: &sqlparser::tokenizer::Token) -> Option<String> {
+    use sqlparser::tokenizer::Token;
+    match token {
+        Token::SingleQuotedString(s)
+        | Token::EscapedStringLiteral(s)
+        | Token::NationalStringLiteral(s)
+        | Token::UnicodeStringLiteral(s) => Some(s.clone()),
+        Token::DollarQuotedString(d) => Some(d.value.clone()),
+        _ => None,
+    }
+}
+
+/// Whether the dotted name at `i` names a column: it follows
+/// `COMMENT ON COLUMN` or `OWNED BY`, where two parts are table.column.
+fn names_a_column(t: &[&sqlparser::tokenizer::Token], i: usize) -> bool {
+    (i >= 3
+        && keyword(t.get(i - 3), "COMMENT")
+        && keyword(t.get(i - 2), "ON")
+        && keyword(t.get(i - 1), "COLUMN"))
+        || (i >= 2 && keyword(t.get(i - 2), "OWNED") && keyword(t.get(i - 1), "BY"))
+}
+
+/// The name after `SCHEMA` at `i`, skipping `IF [NOT] EXISTS`, and any
+/// further names a comma-separated `IN SCHEMA a, b` list gives, as (folded,
+/// as written). An unqualified name only; `AUTHORIZATION` names none.
+fn names_after_schema(t: &[&sqlparser::tokenizer::Token], mut i: usize) -> Vec<(String, String)> {
+    use sqlparser::tokenizer::Token;
+    if keyword(t.get(i), "IF") {
+        i += if keyword(t.get(i + 1), "NOT") { 3 } else { 2 };
+    }
+    let mut names = vec![];
+    while let Some(Token::Word(w)) = t.get(i) {
+        if matches!(t.get(i + 1), Some(Token::Period))
+            || (w.quote_style.is_none() && w.value.eq_ignore_ascii_case("AUTHORIZATION"))
+        {
+            break;
+        }
+        names.push((folded(&w.value, w.quote_style.is_some()), t[i].to_string()));
+        if !matches!(t.get(i + 1), Some(Token::Comma)) {
+            break;
+        }
+        i += 2;
+    }
+    names
+}
+
+/// Schemas a statement names by token shape, as (folded, as written): the
+/// first part of each dotted name (`public.cleanup`, `"Audit".log.id`) and
+/// each name after the keyword `SCHEMA` (`IN SCHEMA public`, `SCHEMA public`).
+/// A column name after `COMMENT ON COLUMN` or `OWNED BY` names a schema only
+/// with three parts (`public.log.id`); two are table.column.
+fn token_schemas(t: &[&sqlparser::tokenizer::Token]) -> Vec<(String, String)> {
+    use sqlparser::tokenizer::Token;
+    let mut found = vec![];
+    for i in 0..t.len() {
+        let Token::Word(w) = t[i] else { continue };
+        if matches!(t.get(i + 1), Some(Token::Period))
+            && matches!(t.get(i + 2), Some(Token::Word(_)))
+            && !(i > 0 && matches!(t[i - 1], Token::Period))
+            && (!names_a_column(t, i)
+                || (matches!(t.get(i + 3), Some(Token::Period))
+                    && matches!(t.get(i + 4), Some(Token::Word(_)))))
+        {
+            found.push((
+                folded(&w.value, w.quote_style.is_some()),
+                format!("{}.{}", t[i], t[i + 2]),
+            ));
+        }
+        if keyword(Some(&t[i]), "SCHEMA") {
+            found.extend(names_after_schema(t, i + 1));
+        }
+    }
+    found
+}
+
+/// A statement's significant tokens before the SQL-standard routine body
+/// (`BEGIN ATOMIC ... END`) of a `CREATE [OR REPLACE] FUNCTION` or
+/// `PROCEDURE`, or all of them. PostgreSQL parses such a body when it defines
+/// the routine and runs it only when the routine is called, as it does a
+/// quoted body. The body is the routine's last clause, so it runs to the end
+/// of the statement, `CASE ... END` inside it included.
+fn before_routine_body<'a, 'b>(
+    t: &'b [&'a sqlparser::tokenizer::Token],
+) -> &'b [&'a sqlparser::tokenizer::Token] {
+    let kind = if keyword(t.get(1), "OR") && keyword(t.get(2), "REPLACE") {
+        3
+    } else {
+        1
+    };
+    if !keyword(t.first(), "CREATE")
+        || !(keyword(t.get(kind), "FUNCTION") || keyword(t.get(kind), "PROCEDURE"))
+    {
+        return t;
+    }
+    let body = (kind + 1..t.len())
+        .find(|&i| keyword(t.get(i), "BEGIN") && keyword(t.get(i + 1), "ATOMIC"))
+        .unwrap_or(t.len());
+    &t[..body]
+}
+
+/// The schemas each top-level statement may create, change, drop, grant or
+/// revoke objects in, as (statement number, folded schema, name as written,
+/// how it is named):
+/// - a statement NTNT parses: each target it names with a schema
+///   (`targets`), such as `public.legacy` in `DROP TABLE public.legacy` or
+///   `public` in `GRANT ... ON ALL TABLES IN SCHEMA public`, and the schema
+///   an `ALTER ... SET SCHEMA` moves an object to;
+/// - in any statement: each schema `SET search_path`, `SET SCHEMA '...'` or
+///   `set_config('search_path', ...)` puts on the search path, where later
+///   unqualified names resolve;
+/// - any other statement, one sqlparser does not parse included, unless it
+///   only reads or writes rows (`ROW_STATEMENTS`): the schemas its tokens
+///   name (`token_schemas`).
+///
+/// Text inside DO and routine bodies is opaque.
+fn schema_names(sql: &str) -> Vec<(usize, String, String, Via)> {
+    use sqlparser::tokenizer::Token;
+    let dialect = PostgreSqlDialect {};
+    let mut found = vec![];
+    for (index, tokens) in statements(sql).unwrap_or_default().into_iter().enumerate() {
+        let number = index + 1;
+        let t: Vec<&Token> = tokens
+            .iter()
+            .map(|t| &t.token)
+            .filter(|t| !matches!(t, Token::Whitespace(_)))
+            .collect();
+        // A routine body runs when the routine is called, not here.
+        let outer = before_routine_body(&t);
+        for schema in search_path_schemas(outer) {
+            found.push((number, schema.clone(), schema, Via::SearchPath));
+        }
+        let rows = matches!(t.first(), Some(Token::Word(w)) if w.quote_style.is_none() && ROW_STATEMENTS.iter().any(|k| w.value.eq_ignore_ascii_case(k)));
+        let moved: Vec<(String, String)> = (0..t.len())
+            .filter(|&i| i > 0 && keyword(t.get(i), "SET") && keyword(t.get(i + 1), "SCHEMA"))
+            .flat_map(|i| names_after_schema(&t, i + 2))
+            .collect();
+        let shapes = if rows { vec![] } else { token_schemas(outer) };
+        let parsed = (tokens.len() <= 4096)
+            .then(|| {
+                Parser::new(&dialect)
+                    .with_recursion_limit(64)
+                    .with_tokens_with_locations(tokens)
+                    .parse_statements()
+                    .ok()
+            })
+            .flatten();
+        let named = match parsed.as_deref() {
+            Some([statement]) => targets(statement),
+            _ => None,
+        };
+        match named {
+            Some(named) => {
+                for (schema, written) in named.into_iter().chain(moved) {
+                    found.push((number, schema, written, Via::Name));
+                }
+            }
+            None => {
+                for (schema, written) in shapes {
+                    found.push((number, schema, written, Via::Token));
+                }
+            }
+        }
+    }
+    found.dedup();
+    found
+}
+
+/// Top-level statements that act on `_ntnt`, the schema holding NTNT's
+/// ledger, or on a PostgreSQL system schema (`protected_schema`), as
+/// (statement number, name as written): a statement that names its target
+/// there (`DROP TABLE IF EXISTS _ntnt.schema_migrations_v2`, `GRANT ... ON
+/// SCHEMA pg_catalog`) or moves an object there, one that puts `_ntnt` on the
+/// search path, and a `_ntnt.<name>` or `SCHEMA _ntnt` in a statement NTNT
+/// does not parse or read names from (`schema_names`). Such a statement can be
+/// a no-op in scratch, which has no `_ntnt` and whose role cannot change
+/// system schemas, yet act on the target, so it is refused by name before
+/// it runs. `pg_catalog` on the search path or in SQL NTNT does not parse is
+/// a reference, not a change. DO and routine bodies are opaque here: replay
+/// refuses a `_ntnt` they create.
+pub(crate) fn protected_targets(sql: &str) -> Vec<(usize, String)> {
+    schema_names(sql)
+        .into_iter()
+        .filter(|(_, schema, _, via)| match via {
+            Via::Name => protected_schema(schema),
+            Via::SearchPath | Via::Token => schema == "_ntnt",
+        })
+        .map(|(number, _, written, _)| (number, written))
+        .collect()
+}
+
+/// The statements of a PostgreSQL migration that may create, change, drop,
+/// grant or revoke objects in a schema outside the managed scope: neither
+/// `schema` nor one the history creates (`created`), `pg_catalog` or
+/// `pg_temp`. Statements on `_ntnt` and system schemas are refused instead
+/// (`protected_targets`). One entry per statement, schema and way of naming
+/// it, in statement order.
+pub(crate) fn outside_scope(sql: &str, schema: &str, created: &[String]) -> Vec<OutsideScope> {
+    let mut found: Vec<OutsideScope> = schema_names(sql)
+        .into_iter()
+        .filter(|(_, named, _, _)| {
+            named != schema
+                && !created.contains(named)
+                && named != "pg_temp"
+                && !protected_schema(named)
+        })
+        .map(|(statement, schema, _, via)| OutsideScope {
+            statement,
+            schema,
+            via,
+        })
+        .collect();
+    found.dedup();
+    found
+}
+
+/// `analyze_for`, and for PostgreSQL the statements that may act outside the
+/// managed scope (`outside_scope`), with the hazard `OUTSIDE_MANAGED_SCOPE`.
+/// Like a destructive change, this is for the reviewer: the plan stays
+/// reviewable and nothing is refused. Migrations that act only in the
+/// managed scope analyze exactly as `analyze_for` does.
+pub(crate) fn analyze_in_scope(
+    engine: &str,
+    sql: &str,
+    schema: &str,
+    created: &[String],
+) -> Analysis {
+    let mut a = analyze_for(engine, sql, schema);
+    if engine == "postgresql" {
+        a.outside_scope = outside_scope(sql, schema, created);
+        if !a.outside_scope.is_empty() {
+            a.hazards.push("OUTSIDE_MANAGED_SCOPE".into());
+            a.hazards.sort();
+            a.hazards.dedup();
+        }
+    }
+    a
 }
 /// Checks use a separate closed query grammar, not a SELECT/volatility heuristic.
 /// Live relation/type/operator resolution still requires the adapter purity gate
@@ -1481,6 +2136,28 @@ mod tests {
         );
     }
     #[test]
+    fn locks_on_tables_in_other_schemas_are_not_predicted() {
+        for sql in [
+            "ALTER TABLE audit.log ADD COLUMN x int",
+            "CREATE INDEX i ON audit.log (id)",
+            "INSERT INTO audit.log VALUES (1)",
+            "CREATE TABLE app.t (id int REFERENCES audit.log (id))",
+        ] {
+            let a = analyze(sql, "app");
+            assert!(a.locks.iter().all(|l| l.relation != "log"), "{sql}: {a:?}");
+            assert!(
+                a.unknowns.iter().any(|u| u == "LOCKS_NOT_PREDICTED"),
+                "{sql}: {a:?}"
+            );
+        }
+        // The session's temporary tables are not another schema's.
+        let temp = analyze("INSERT INTO pg_temp.scratch VALUES (1)", "app");
+        assert!(
+            !temp.unknowns.iter().any(|u| u == "LOCKS_NOT_PREDICTED"),
+            "{temp:?}"
+        );
+    }
+    #[test]
     fn warns_about_locks_that_block_or_scan_existing_tables() {
         for (sql, expected) in [
             ("CREATE INDEX i ON app.t(id)", vec![pair("t", "BLOCKS_WRITES_WHILE_INDEXING")]),
@@ -1527,6 +2204,326 @@ mod tests {
         );
     }
     #[test]
+    fn the_history_creates_the_schemas_its_create_schema_statements_name() {
+        let scripts = [
+            "CREATE TABLE app.t (id int); CREATE SCHEMA audit; CREATE TABLE audit.log (id int);",
+            // Folded like PostgreSQL; elements sqlparser does not parse still count.
+            "create schema IF NOT EXISTS Reports CREATE TABLE r (id int); CREATE SCHEMA \"Mixed\"\"Case\" AUTHORIZATION CURRENT_USER;",
+            // A rename brings the new name of a created schema into scope.
+            "ALTER SCHEMA audit RENAME TO audit_archive; ALTER SCHEMA audit_archive RENAME TO history;",
+            // Never: the managed schema, reserved names, an AUTHORIZATION-only
+            // name, a qualified name, a rename of a schema the history did not
+            // create, or text inside a DO body or a string.
+            "CREATE SCHEMA app; CREATE SCHEMA _ntnt; CREATE SCHEMA IF NOT EXISTS information_schema; CREATE SCHEMA AUTHORIZATION someone; CREATE SCHEMA db.other; ALTER SCHEMA shared RENAME TO mine;",
+            "DO $$ BEGIN CREATE SCHEMA hidden; END $$; SELECT 'CREATE SCHEMA quoted';",
+        ];
+        assert_eq!(
+            history_schemas(scripts, "app"),
+            [
+                "Mixed\"Case",
+                "audit",
+                "audit_archive",
+                "history",
+                "reports"
+            ]
+        );
+        assert!(history_schemas(["CREATE TABLE t (id int);"], "app").is_empty());
+        // A history that renames before it creates still ends at one fixed point.
+        assert_eq!(
+            history_schemas(
+                [
+                    "ALTER SCHEMA b RENAME TO c",
+                    "ALTER SCHEMA a RENAME TO b",
+                    "CREATE SCHEMA a"
+                ],
+                "app"
+            ),
+            ["a", "b", "c"]
+        );
+    }
+    #[test]
+    fn statements_acting_on_the_ledger_or_a_system_schema_are_listed() {
+        // Other schemas however they are reached, pg_temp, references to
+        // pg_catalog, rows read from _ntnt and DO bodies are not listed.
+        for sql in [
+            "CREATE TABLE app.t (id int); CREATE TABLE public.leak (id int); DROP TABLE IF EXISTS public.legacy",
+            "GRANT SELECT ON ALL TABLES IN SCHEMA public TO PUBLIC; REVOKE CREATE ON SCHEMA public FROM PUBLIC",
+            "CREATE TEMP TABLE scratch (id int); CREATE TABLE pg_temp.x (id int)",
+            "SET LOCAL search_path TO pg_catalog, public; SELECT pg_catalog.set_config('search_path', 'public', true)",
+            "ALTER SEQUENCE IF EXISTS public.s RESTART WITH 5; DROP ROUTINE IF EXISTS public.cleanup()",
+            "CREATE TABLE app.t (id pg_catalog.int4 DEFAULT pg_catalog.length('x'))",
+            "SELECT pg_catalog.now(); INSERT INTO app.t SELECT id FROM _ntnt.schema_migrations_v2",
+            "DO $$ BEGIN DROP TABLE IF EXISTS _ntnt.schema_migrations_v2; END $$",
+            "CREATE SCHEMA audit; CREATE SCHEMA IF NOT EXISTS \"_NTNT\"; SET search_path TO DEFAULT",
+        ] {
+            assert!(protected_targets(sql).is_empty(), "{sql}: {:?}", protected_targets(sql));
+        }
+        for (sql, expected) in [
+            (
+                "CREATE TABLE app.t (id int); CREATE SCHEMA _ntnt",
+                vec![(2, "_ntnt")],
+            ),
+            ("CREATE SCHEMA IF NOT EXISTS _NTNT", vec![(1, "_NTNT")]),
+            (
+                "DROP TABLE IF EXISTS _ntnt.schema_migrations_v2",
+                vec![(1, "_ntnt.schema_migrations_v2")],
+            ),
+            (
+                "ALTER TABLE IF EXISTS \"_ntnt\".schema_migrations_v2 ADD COLUMN x int",
+                vec![(1, "\"_ntnt\".schema_migrations_v2")],
+            ),
+            ("ALTER TABLE app.t SET SCHEMA _ntnt", vec![(1, "_ntnt")]),
+            ("SET LOCAL search_path TO app, _ntnt", vec![(1, "_ntnt")]),
+            ("SET search_path = '_ntnt'", vec![(1, "_ntnt")]),
+            ("SET LOCAL SCHEMA '_ntnt'", vec![(1, "_ntnt")]),
+            (
+                "SELECT set_config('search_path', 'app, \"_ntnt\"', true)",
+                vec![(1, "_ntnt")],
+            ),
+            // Not parsed by sqlparser: read from tokens.
+            (
+                "ALTER SEQUENCE IF EXISTS _ntnt.positions RESTART WITH 5",
+                vec![(1, "_ntnt.positions")],
+            ),
+            (
+                "GRANT EXECUTE ON ALL ROUTINES IN SCHEMA app, _ntnt TO PUBLIC",
+                vec![(1, "_ntnt")],
+            ),
+            (
+                "GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC",
+                vec![(1, "pg_catalog")],
+            ),
+            (
+                "REVOKE SELECT ON ALL TABLES IN SCHEMA information_schema FROM PUBLIC",
+                vec![(1, "information_schema")],
+            ),
+            (
+                "CREATE FUNCTION pg_catalog.f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+                vec![(1, "pg_catalog.f")],
+            ),
+            (
+                "CREATE EXTENSION pgcrypto WITH SCHEMA pg_catalog",
+                vec![(1, "pg_catalog")],
+            ),
+            ("CREATE TABLE pg_toast.t (id int)", vec![(1, "pg_toast.t")]),
+            (
+                "SELECT * INTO _ntnt.copy FROM app.t",
+                vec![(1, "_ntnt.copy")],
+            ),
+            // Parsed, but its names are read from tokens.
+            (
+                "COMMENT ON TABLE _ntnt.schema_migrations_v2 IS 'x'",
+                vec![(1, "_ntnt.schema_migrations_v2")],
+            ),
+        ] {
+            let expected: Vec<(usize, String)> = expected
+                .into_iter()
+                .map(|(n, s)| (n, s.to_string()))
+                .collect();
+            assert_eq!(protected_targets(sql), expected, "{sql}");
+        }
+    }
+    /// A SQL-standard routine body (`BEGIN ATOMIC ... END`) runs only when
+    /// the routine is called, like a quoted body: the schemas it names or
+    /// puts on the search path are not listed. A top-level `set_config` call
+    /// still is, after such a body too (review on #435, analysis.rs).
+    #[test]
+    fn routine_bodies_are_opaque_to_the_scope_scan() {
+        let created = ["audit".to_string()];
+        let flags = |sql: &str| serde_json::to_value(outside_scope(sql, "app", &created)).unwrap();
+        let body = "CREATE FUNCTION app.saved_path() RETURNS text LANGUAGE SQL BEGIN ATOMIC SELECT pg_catalog.set_config('search_path', '_ntnt', true); END;";
+        for sql in [
+            body,
+            // CASE ... END inside the body does not end it.
+            "CREATE OR REPLACE FUNCTION app.f(x int) RETURNS text LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN x > 0 THEN set_config('search_path', 'public', true) END; SELECT count(*)::text FROM public.legacy; SELECT set_config('search_path', '_ntnt', true); END",
+            "CREATE PROCEDURE app.p() LANGUAGE sql BEGIN ATOMIC INSERT INTO app.t SELECT id FROM _ntnt.schema_migrations_v2; END",
+        ] {
+            assert_eq!(protected_targets(sql), [], "{sql}");
+            assert_eq!(flags(sql), serde_json::json!([]), "{sql}");
+        }
+        for (sql, statement) in [
+            (
+                "SELECT pg_catalog.set_config('search_path', '_ntnt', true);".to_owned(),
+                1,
+            ),
+            (
+                format!("{body} SELECT pg_catalog.set_config('search_path', '_ntnt', true);"),
+                2,
+            ),
+        ] {
+            assert_eq!(
+                protected_targets(&sql),
+                [(statement, "_ntnt".to_string())],
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            flags(&format!(
+                "{body} SELECT set_config('search_path', 'public', true)"
+            )),
+            serde_json::json!([{"statement": 2, "schema": "public", "via": "search_path"}])
+        );
+    }
+    #[test]
+    fn statements_outside_the_managed_scope_are_flagged() {
+        let created = ["audit".to_string()];
+        let flags = |sql: &str| serde_json::to_value(outside_scope(sql, "app", &created)).unwrap();
+        // The managed scope, pg_catalog, pg_temp, rows, DO bodies, references
+        // and unqualified names are not flagged; system schemas are refused.
+        for sql in [
+            "CREATE TABLE app.t (id int); CREATE TABLE t2 (id int); CREATE SCHEMA audit; CREATE TABLE audit.log (id int)",
+            "CREATE TEMP TABLE x (id int); CREATE TABLE pg_temp.y (id int); CREATE EXTENSION pgcrypto",
+            "INSERT INTO app.t SELECT id FROM public.legacy; UPDATE public.legacy SET id = 1; SELECT public.f()",
+            "DO $$ BEGIN CREATE TABLE public.leak (id int); END $$",
+            "SET LOCAL search_path TO app, audit, pg_catalog, pg_temp; SET search_path TO DEFAULT",
+            "GRANT SELECT ON app.t TO PUBLIC; COMMENT ON TABLE app.t IS 'x'; ALTER TABLE app.t RENAME TO t2",
+            "GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC; DROP TABLE IF EXISTS _ntnt.schema_migrations_v2",
+        ] {
+            assert_eq!(flags(sql), serde_json::json!([]), "{sql}");
+        }
+        for (sql, expected) in [
+            (
+                "CREATE TABLE app.t (id int); CREATE TABLE public.audit_log (id int)",
+                serde_json::json!([[2, "public", "name"]]),
+            ),
+            (
+                "DROP TABLE IF EXISTS public.legacy, app.t, \"Shared\".x",
+                serde_json::json!([[1, "public", "name"], [1, "Shared", "name"]]),
+            ),
+            (
+                "REVOKE CREATE ON SCHEMA Public FROM PUBLIC",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+            (
+                "GRANT SELECT ON ALL TABLES IN SCHEMA public, audit TO PUBLIC",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+            (
+                "CREATE EXTENSION pgcrypto WITH SCHEMA public",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+            (
+                "ALTER FUNCTION app.f() SET SCHEMA public",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+            (
+                "SET LOCAL search_path TO public; DROP TABLE IF EXISTS legacy",
+                serde_json::json!([[1, "public", "search_path"]]),
+            ),
+            (
+                "SELECT set_config('search_path', 'reporting, app', true)",
+                serde_json::json!([[1, "reporting", "search_path"]]),
+            ),
+            // SQL sqlparser does not parse, or that NTNT does not read names from.
+            (
+                "ALTER SEQUENCE IF EXISTS public.s RESTART WITH 5",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "DROP ROUTINE IF EXISTS public.cleanup()",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "GRANT EXECUTE ON ALL ROUTINES IN SCHEMA public TO PUBLIC",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "ALTER VIEW IF EXISTS public.v RENAME TO v2",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "COMMENT ON TABLE public.legacy IS 'shared'",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "CREATE EXTENSION hstore SCHEMA public",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "ALTER TABLE app.t SET SCHEMA public",
+                serde_json::json!([[1, "public", "token"]]),
+            ),
+            (
+                "SELECT * INTO public.copy FROM app.t; SELECT * INTO app.copy FROM app.t",
+                serde_json::json!([[1, "public", "name"]]),
+            ),
+        ] {
+            let expected: Vec<serde_json::Value> = expected
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| serde_json::json!({"statement": e[0], "schema": e[1], "via": e[2]}))
+                .collect();
+            assert_eq!(flags(sql), serde_json::json!(expected), "{sql}");
+        }
+        // A flagged migration gains a hazard; any other analyzes exactly as
+        // before, so plans of histories that stay in the managed scope keep
+        // their digests.
+        let flagged = analyze_in_scope(
+            "postgresql",
+            "REVOKE CREATE ON SCHEMA public FROM PUBLIC",
+            "app",
+            &created,
+        );
+        assert!(
+            flagged.hazards.iter().any(|h| h == "OUTSIDE_MANAGED_SCOPE"),
+            "{flagged:?}"
+        );
+        for sql in [
+            "CREATE TABLE app.t (id int)",
+            "CREATE TABLE audit.log (id int)",
+        ] {
+            assert_eq!(
+                serde_json::to_value(analyze_in_scope("postgresql", sql, "app", &created)).unwrap(),
+                serde_json::to_value(analyze_for("postgresql", sql, "app")).unwrap(),
+                "{sql}"
+            );
+        }
+        let sqlite = analyze_in_scope("sqlite", "CREATE TABLE t (id INTEGER)", "main", &[]);
+        assert!(sqlite.outside_scope.is_empty());
+    }
+    #[test]
+    fn search_path_settings_are_read_like_postgresql() {
+        let t = |sql: &str| {
+            let tokens = statements(sql).unwrap().remove(0);
+            let t: Vec<&sqlparser::tokenizer::Token> = tokens
+                .iter()
+                .map(|t| &t.token)
+                .filter(|t| !matches!(t, sqlparser::tokenizer::Token::Whitespace(_)))
+                .collect();
+            search_path_schemas(&t)
+        };
+        assert_eq!(
+            t("SET search_path TO Public, \"Mixed Case\", 'Quoted'"),
+            ["public", "Mixed Case", "Quoted"]
+        );
+        assert_eq!(t("set session search_path = app"), ["app"]);
+        assert_eq!(t("SET SCHEMA 'audit'"), ["audit"]);
+        assert!(t("SET search_path TO DEFAULT").is_empty());
+        assert!(t("SET statement_timeout = 5").is_empty());
+        assert_eq!(
+            t("SELECT pg_catalog.set_config('search_path', ' Public , \"A\"\"B\", app', true), set_config('search_path', 'x', false)"),
+            ["public", "A\"B", "app", "x"]
+        );
+        // A value that is not a literal names nothing NTNT can read.
+        assert!(t("SELECT set_config('search_path', current_setting('x'), true)").is_empty());
+        assert!(t("SELECT set_config('work_mem', 'public', true)").is_empty());
+        assert_eq!(setting_list(""), Vec::<String>::new());
+        assert_eq!(setting_list("a,,b"), ["a", "b"]);
+    }
+    #[test]
+    fn statement_splitting_keeps_its_bounds_and_boundaries() {
+        // An empty or comment-only script has no statements; neither does one
+        // over the token bound, which reports None.
+        assert_eq!(statements("  -- nothing\n").map(|s| s.len()), Some(0));
+        assert!(statements(&"x ".repeat(MAX_SCRIPT_TOKENS)).is_none());
+        let split = statements("CREATE FUNCTION app.f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END; SELECT ';'; ;").unwrap();
+        assert_eq!(split.len(), 2);
+        let empty = analyze("-- nothing", "app");
+        assert!(!empty.replay_supported);
+        assert_eq!(empty.unknowns, ["SQL_PARSE_EMPTY_OR_LIMIT"]);
+    }
+    #[test]
     fn a_lone_named_concurrent_index_runs_outside_the_transaction() {
         let sql =
             "-- build without blocking writes\nCREATE INDEX CONCURRENTLY t_id ON app.t (id);\n";
@@ -1553,5 +2550,98 @@ mod tests {
             assert!(!analyze(sql, "app").replay_supported, "{sql}");
         }
         assert!(!analyze("CREATE INDEX t_id ON app.t(id)", "app").non_transactional);
+    }
+
+    #[test]
+    fn a_migration_of_comments_and_semicolons_is_empty() {
+        for engine in ["sqlite", "postgresql"] {
+            for sql in [
+                "",
+                "  \n\t",
+                "-- only a comment\n",
+                "/* block */ ; ;",
+                "-- a\n/* b; c */\n;",
+            ] {
+                assert!(is_empty(sql, engine), "{engine}: {sql:?}");
+            }
+            for sql in [
+                "SELECT 1",
+                "-- comment\nCREATE TABLE t(id integer);",
+                "SELECT '--';",
+                "x",
+            ] {
+                assert!(!is_empty(sql, engine), "{engine}: {sql:?}");
+            }
+            // Input that does not tokenize is left to the other checks.
+            assert!(!is_empty("'unterminated", engine));
+        }
+    }
+
+    /// After `COMMENT ON COLUMN` and `OWNED BY` a two-part name is
+    /// table.column and names no schema; a three-part name still names one
+    /// (#420, review r4654889033).
+    #[test]
+    fn column_names_name_a_schema_only_with_three_parts() {
+        let schemas = |sql: &str| {
+            outside_scope(sql, "app", &[])
+                .into_iter()
+                .map(|o| (o.statement, o.schema))
+                .collect::<Vec<_>>()
+        };
+        for sql in [
+            "COMMENT ON COLUMN accounts.id IS 'x'",
+            "COMMENT ON COLUMN app.accounts.id IS 'x'",
+            "COMMENT ON COLUMN \"Accounts\".\"Id\" IS 'x'",
+            "ALTER SEQUENCE s OWNED BY accounts.id",
+            "ALTER SEQUENCE app.s OWNED BY app.accounts.id",
+            "ALTER SEQUENCE s OWNED BY NONE",
+        ] {
+            assert_eq!(schemas(sql), vec![], "{sql}");
+        }
+        for sql in [
+            "COMMENT ON COLUMN public.audit_log.msg IS 'x'",
+            "ALTER SEQUENCE app.s OWNED BY public.audit_log.id",
+        ] {
+            assert_eq!(schemas(sql), vec![(1, "public".to_string())], "{sql}");
+        }
+    }
+
+    /// Every string-literal spelling of a search_path value is read
+    /// (`E'...'`, `$$...$$`, `$tag$...$tag$`, `N'...'`, `U&'...'`), as is a
+    /// number, and the ledger schema is refused however it is spelled (#420,
+    /// review r4654889040).
+    #[test]
+    fn every_spelling_of_a_search_path_value_is_read() {
+        let schemas = |sql: &str| {
+            outside_scope(sql, "app", &[])
+                .into_iter()
+                .map(|o| (o.statement, o.schema))
+                .collect::<Vec<_>>()
+        };
+        for sql in [
+            "SET LOCAL search_path TO E'public'",
+            "SET search_path TO $$public$$",
+            "SET search_path = $tag$public$tag$, app",
+            "SET search_path TO N'public'",
+            "SET search_path TO U&'public'",
+            "SELECT set_config(E'search_path', $$public$$, true)",
+        ] {
+            assert_eq!(schemas(sql), vec![(1, "public".to_string())], "{sql}");
+        }
+        assert_eq!(
+            schemas("SET search_path TO 42"),
+            vec![(1, "42".to_string())]
+        );
+        for sql in [
+            "SET LOCAL search_path TO E'_ntnt', app",
+            "SET search_path TO $$_ntnt$$",
+            "SELECT set_config('search_path', E'_ntnt', true)",
+        ] {
+            assert_eq!(
+                protected_targets(sql),
+                vec![(1, "_ntnt".to_string())],
+                "{sql}"
+            );
+        }
     }
 }

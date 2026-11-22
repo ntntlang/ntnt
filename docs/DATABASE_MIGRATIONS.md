@@ -106,7 +106,7 @@ disposable = true
 [secrets.APP_MIGRATION_APPROVAL]
 ```
 
-Write the first migration below the comment header of the file `ntnt db new initial` created:
+Write the first migration below the comment header of the file `ntnt db new initial` created. Until it holds a statement, `plan` refuses the file with `DB_MIGRATION_EMPTY`:
 
 ```sql
 -- migrations/0001_initial.sql
@@ -167,6 +167,10 @@ connections first.
 The managed schema must already exist on the target. Create it as the owner role,
 for example `PGPASSWORD=dev-only-owner psql -h 127.0.0.1 -U app_owner -d app_development -c 'CREATE SCHEMA app'`.
 Skip this if you use `schema = "public"`. Leave the scratch database empty.
+Migrations may create further schemas with `CREATE SCHEMA`; NTNT inspects those
+too (see [Managed scope](#managed-scope)). Creating a schema needs the `CREATE`
+privilege on the database. Each owner role above has it as its database's owner,
+and it owns the schemas its migrations create. Do not create those in advance.
 
 `ntnt db init --engine postgresql` writes this manifest (its comments are omitted here):
 
@@ -267,7 +271,7 @@ required = true
 - Connections reuse the existing **`std/secrets` providers and declaration validation**. Development's environment provider reads the exact logical name. Production uses the configured Unix-socket provider; the environment provider remains disabled in production. See [Secrets Agent Protocol](secrets-agent-protocol.md). Declarations are read from the captured manifest, not reopened during replay.
 - A connection secret must specify exactly one host, the declared `user`/`dbname`, an explicit `sslmode`, and no startup `options`. [TLS](#tls) describes the transport rules; there is no silent downgrade to plaintext.
 - Physical database, role and managed-schema names use ASCII letters/digits/underscores, start with a letter, and are at most 63 bytes. SQL object identifiers may be quoted. System schemas and `_ntnt` cannot be the managed schema; `public` is supported and is where most applications keep their tables.
-- The **target managed schema must already exist**. Read-only commands never create it or `_ntnt`. Authorized `migrate` bootstraps its scoped ledger only inside the first migration transaction, after locked validation of an empty recognized base. A nonempty unrecognized scope is never assumed to have empty history.
+- The **target managed schema must already exist**. Read-only commands never create it or `_ntnt`. Schemas the migrations create join the [managed scope](#managed-scope); the target role needs the `CREATE` privilege on the database for them (a database owner has it). Authorized `migrate` bootstraps its scoped ledger only inside the first migration transaction, after locked validation of an empty recognized base. A nonempty unrecognized scope is never assumed to have empty history.
 - The declared target role is the logical owner for expected owner/grant canonicalization. Scratch uses its separate owner role. Other owners/grantees remain distinct; ownership and grants are never stripped wholesale. Multi-owner histories or additional grants that cannot be reproduced by the supported history will not receive a clean comparison. Target authority/membership facts are also bound into plans.
 
 ### TLS
@@ -343,7 +347,7 @@ For each PostgreSQL migration, the runner:
 4. Verifies the resulting catalog against that exact prefix fingerprint, records the relation locks the transaction holds in `progress[].locks`, and inserts the success ledger entry in the same transaction.
 5. Commits that migration before starting the next. Failure never rolls back an earlier committed migration.
 
-If a lock is not granted within one second, or the session is chosen as a deadlock victim, the whole migration transaction rolls back and is retried after a backoff (250 ms doubling, with jitter), up to 4 attempts; `progress[].lock_retries` counts them. A short lock timeout keeps application queries from queueing behind a migration that is waiting for a lock. Statements that need strong locks (most `ALTER TABLE`, `DROP`, `CREATE INDEX` without `CONCURRENTLY`) still block other access to their table while the migration transaction is open; this is **not online migration tooling** for long rewrites. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the managed schema and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
+If a lock is not granted within one second, or the session is chosen as a deadlock victim, the whole migration transaction rolls back and is retried after a backoff (250 ms doubling, with jitter), up to 4 attempts; `progress[].lock_retries` counts them. A short lock timeout keeps application queries from queueing behind a migration that is waiting for a lock. Statements that need strong locks (most `ALTER TABLE`, `DROP`, `CREATE INDEX` without `CONCURRENTLY`) still block other access to their table while the migration transaction is open; this is **not online migration tooling** for long rewrites. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the [managed scope](#managed-scope) and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
 
 Every source/plan is captured before I/O; no validated filename is reopened during execution. A new invocation recaptures it. Same-plan reruns after partial/all commits recognize matching immutable history and the expected catalog at each ordered prefix, without reapplying SQL or rerunning already-applied transition checks. Edited SQL/checks, missing/reordered history, catalog drift, other stores/targets, changed policy/authority or extra unsupported extensions fail closed.
 
@@ -431,7 +435,7 @@ filled_timezone = "SELECT NOT EXISTS (SELECT 1 FROM app.accounts WHERE timezone 
 
 Checks run in name order within each phase. Each must return **exactly one row, one Boolean column, and true** (SQLite represents this as integer `1`, not text or a floating-point value). False, NULL, no rows, multiple rows/columns, wrong type, SQL error and timeout fail the transaction. Reports include check name, phase, source and outcome, never returned values. Only actually attempted target/rehearsal checks count as executed assertions; zero checks remains `not_run`. A check pass before later rollback is not a committed schema guarantee.
 
-The closed PostgreSQL AST subset supports Boolean expressions, identifiers/literals, comparisons and arithmetic, `IS NULL`/`IS NOT NULL`, `EXISTS`/`NOT EXISTS`, scalar subqueries, one managed heap table per SELECT, ordinary column GROUP BY/HAVING and builtin `count(*)`. Each query must have only these recognized clauses. Every table reference in a check must be explicitly qualified with the managed schema (for example, `app.accounts`), including nested queries. Unqualified names are rejected rather than resolved through `search_path`, so a managed table named `pg_class` cannot accidentally become a system-catalog read. Checks use `search_path=pg_catalog` for builtin function/operator lookup; this does not change unqualified migration-script names. The adapter verifies live catalog coverage and builtin base types/indexes, and conservatively rejects database-wide custom implicit/assignment casts before DDL or checks. Builtin operators/functions resolve through the trusted PostgreSQL installation, not a `provolatile` assertion on a user routine.
+The closed PostgreSQL AST subset supports Boolean expressions, identifiers/literals, comparisons and arithmetic, `IS NULL`/`IS NOT NULL`, `EXISTS`/`NOT EXISTS`, scalar subqueries, one managed heap table per SELECT, ordinary column GROUP BY/HAVING and builtin `count(*)`. Each query must have only these recognized clauses. Every table reference in a check must be explicitly qualified with the managed schema (for example, `app.accounts`), including nested queries. Unqualified names are rejected rather than resolved through `search_path`, so a managed table named `pg_class` cannot accidentally become a system-catalog read. Checks use `search_path=pg_catalog` for builtin function/operator lookup; this does not change unqualified migration-script names. The adapter verifies live catalog coverage and builtin base types/indexes, and conservatively rejects database-wide custom implicit/assignment casts before DDL or checks. A check may read a managed view, and a view reads the views it names, so every view in the inspected schemas (the managed schema, each schema the history creates, and each view the history creates in another schema) may use only builtin non-volatile functions. Otherwise, for example when a managed view reads `audit.v`, which calls a routine that writes, a migration's checks fail with `DB_CHECK_UNSUPPORTED` before they run. Builtin operators/functions resolve through the trusted PostgreSQL installation, not a `provolatile` assertion on a user routine.
 
 Not supported: arbitrary functions/routines, casts, aliases/joins, SELECT INTO, CTEs, locking clauses, table functions/sampling, windows, wildcard projections, custom types/operators/access methods, session/transaction changes or arbitrary SQL. A SELECT keyword or READ ONLY transaction is **not a purity proof**. Unsupported syntax is rejected before target I/O, never approved by regex. There are at most 64 named checks per migration, each at most 64 KiB; names use simple ASCII identifiers.
 
@@ -449,7 +453,7 @@ Checksum v1 is lowercase SHA-256 over length-framed byte parts. Each part is pre
 
 Whitespace, comments, filenames, metadata comments, and even absent versus empty metadata matter. No newline or SQL normalization occurs. Applied ledger entries must be the exact ordered inventory prefix: missing/edited files, inserted historical migrations, reordered IDs and dirty attempts fail before any replay can be mistaken for valid history.
 
-Capture is bounded to 1 MiB per input (including a saved review artifact), 16 MiB of migration files, and 1,024 migrations. For PostgreSQL, a script may have up to 262,144 tokens; each statement is parsed separately, up to 4,096 tokens and recursion depth 64. A larger statement is reported as `SQL_NOT_PARSED` but still replays. SQLite scripts are parsed whole, up to 4,096 tokens (including whitespace tokens) and recursion depth 64; oversized SQLite SQL is unknown, not automatically safe. Source files and manifest policy are captured once, then replay consumes those captured bytes even if their paths are subsequently replaced. A new command recaptures current inputs and invalidates an old binding if they changed.
+Capture is bounded to 1 MiB per input (including a saved review artifact), 16 MiB of migration files, and 1,024 migrations. On PostgreSQL, each replayed step still inspects the whole scratch catalog (#421), so a history that adds a table per migration stays within `plan`'s 120-second deadline up to about 900 migrations, and its first `migrate` from an empty database within the work deadline up to about 600. A history that changes a stable set of tables goes further. For PostgreSQL, a script may have up to 262,144 tokens; each statement is parsed separately, up to 4,096 tokens and recursion depth 64. A larger statement is reported as `SQL_NOT_PARSED` but still replays. SQLite scripts are parsed whole, up to 4,096 tokens (including whitespace tokens) and recursion depth 64; oversized SQLite SQL is unknown, not automatically safe. Source files and manifest policy are captured once, then replay consumes those captured bytes even if their paths are subsequently replaced. A new command recaptures current inputs and invalidates an old binding if they changed.
 
 ## Disposable replay and its boundary
 
@@ -481,7 +485,7 @@ Before anything runs, the script is tokenized (quoted and dollar-quoted text sta
 - server scope: `COPY`, `LOAD`, `CHECKPOINT`, `ALTER SYSTEM`, and creating/altering/dropping databases, tablespaces and roles;
 - explicit `CASCADE` drops, whose transitive effects are not bounded. `ON DELETE CASCADE` and `ON UPDATE CASCADE` foreign-key actions are allowed.
 
-Text inside `DO` and function bodies is not inspected; it runs inside the same transaction with the migration role's privileges. Keep role creation out of migrations and provision roles separately. Database-wide custom implicit/assignment casts still block execution, because ordinary DDL coercion could run them without appearing in the reviewed script.
+Text inside `DO` and function bodies (quoted, or a SQL-standard `BEGIN ATOMIC ... END` body) is not inspected; it runs inside the same transaction with the migration role's privileges. Keep role creation out of migrations and provision roles separately. Database-wide custom implicit/assignment casts still block execution, because ordinary DDL coercion could run them without appearing in the reviewed script.
 
 Each pending migration's `analysis` lists its statements' `operations`, known lock/effect `hazards`, and `unknowns`. `SQL_NOT_PARSED` means a statement (for example a `DO` block) was not parsed. `EFFECTS_NOT_ANALYZED` means it parsed but falls outside the subset NTNT analyzes in detail: ordinary tables with built-in types and literal defaults, simple constraints, column-only btree indexes, and non-cascading table/index drops. Unknowns are review prompts, not blockers: the replayed catalog and drift comparison still apply. **Scratch replay is not a sandbox.** Use a disposable database with a separate unprivileged owner, as required above.
 
@@ -495,6 +499,17 @@ For PostgreSQL, `analysis.locks` predicts the table locks each statement takes (
 - `MAY_REWRITE_TABLE`: a new column with a volatile default, identity or stored generated value.
 
 Warnings are review prompts and do not block a plan. The safer forms are `ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT` in a later migration, and a `CHECK (column IS NOT NULL) NOT VALID` validated before `SET NOT NULL`.
+
+For PostgreSQL, `analysis.outside_scope` lists the statements that may create, change, drop, grant or revoke objects in a schema outside the [managed scope](#managed-scope), and the migration gets the hazard `OUTSIDE_MANAGED_SCOPE`. Each entry gives the `statement` number, the `schema`, and `via`: `name` for a schema-qualified name, an `IN SCHEMA` list or an `ALTER ... SET SCHEMA` in a statement NTNT parses; `search_path` for a `SET search_path`, `SET SCHEMA` or `set_config('search_path', ...)` that names the schema, so that later unqualified names in the migration may resolve there; `token` for a schema-qualified name, or a name after `SCHEMA`, in SQL NTNT does not parse or does not read names from (such a name may also be a column of a table alias). The human plan prints each one under its pending migration:
+
+```text
+Pending "0002_outside.sql" (...): hazards ["AUTHORIZATION_CHANGE",...,"OUTSIDE_MANAGED_SCOPE"]; unknowns [...]
+  Outside the managed scope: statement 1 names schema "public"
+  Outside the managed scope: statement 2 puts schema "public" on the search path
+  Outside the managed scope: statement 5 names schema "public" in SQL NTNT does not analyze
+```
+
+These are review prompts like the other hazards: the plan stays `requires_review`, `migrate` runs the statements as written, and an applied migration is not flagged again. Statements that only read or write rows, unqualified names and text inside `DO` or function bodies (quoted or `BEGIN ATOMIC ... END`) are not flagged; statements on `_ntnt` and system schemas are refused instead. A plan saved by an earlier build whose pending migrations are flagged no longer matches its migrations' analysis; plan it again.
 
 ### Concurrent index builds
 
@@ -539,13 +554,132 @@ Supported catalog fingerprints include:
 
 Quoted identifier components are unambiguously quoted in composite object keys. OIDs and ACL array order do not become semantic differences. The declared owner role maps to a typed managed-role marker in target/scratch, while every other role and the PUBLIC grantee remain distinct. Sequence counters are never read or fingerprinted.
 
-Plain views, sequences, SQL and PL/pgSQL functions/procedures (full definition, owner and grants), user triggers, RLS policies, declarative partitions in the managed schema, expression/partial indexes on built-in access methods, and extensions installed in the managed schema (by version) are compared like tables: an out-of-band change is reported as drift on the named object. Materialized views, functions in other languages, non-partition inheritance or partitions outside the managed scope, foreign/custom types, custom collations/operator classes/access methods, extensions in other schemas, event triggers, security labels, other namespace objects and references to routines outside `pg_catalog` and the managed schema expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. Comparison is by definition, not behavior: NTNT does not analyze what a function body or policy expression does. This is not dependency closure, security-policy verification or replication/publication configuration auditing.
+Plain views, sequences, SQL and PL/pgSQL functions/procedures (full definition, owner and grants), user triggers, RLS policies, declarative partitions in their parent's schema, expression/partial indexes on built-in access methods, and extensions installed in the managed scope (by version) are compared like tables: an out-of-band change is reported as drift on the named object. Materialized views, functions in other languages, non-partition inheritance or partitions in a different schema from their parent, foreign/custom types, custom collations/operator classes/access methods, extensions in other schemas, event triggers, security labels, other namespace objects and references to routines outside `pg_catalog` and the managed scope expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. Comparison is by definition, not behavior: NTNT does not analyze what a function body or policy expression does. This is not dependency closure, security-policy verification or replication/publication configuration auditing.
 
 Engine-deparsed SQL, defaults, expressions, comments and storage option payloads are represented by **definition hashes**, not printed literals: schema definitions can themselves contain credentials. Object names, structural fields, owner/grant facts and object-level differences remain visible. This avoids echoing connection credentials, SQL error payloads or live row samples. It is not an SQL dump; review source SQL separately through appropriately authorized tooling.
 
 Drift compares `observed` with `expected(applied_prefix)`, not repository HEAD. Differences name the affected object and show expected/observed properties or definition fingerprints. An incomplete comparison is `unknown`, never “no drift.” Unsupported pending SQL can block a candidate plan while a separately verified applied prefix still passes. `verify` does not replay pending SQL.
 
 `DB_COVERAGE_INCOMPLETE` names what could not be inspected: its `objects` field lists the uncovered catalog keys, for example `index:"contact_requests_pending"` or `table:"t"`. When the objects are on the target, `catalog.uncovered` lists them too. When replaying a migration produced them, they exist only in the replayed intermediate catalog, and `source` names that migration. The human output prints both fields under the diagnostic.
+
+### Managed scope
+
+PostgreSQL inspects the **managed scope**: the configured `schema` plus every
+schema the captured migration history creates, and, one by one, the objects the
+history creates in other schemas ([below](#objects-the-history-creates-in-other-schemas)). A schema is created by the history
+when a top-level `CREATE SCHEMA <name>` statement in any captured migration names
+it (pending migrations included), or when an `ALTER SCHEMA <old> RENAME TO <new>`
+renames such a schema. The set comes from the captured SQL, before any database is
+read, so `status`, `plan`, `verify`, `migrate` and `reconcile` inspect the same
+schemas, and the plan's input digest binds them. Reports list them in
+`target.history_schemas`. A `CREATE SCHEMA` inside a `DO` block or function body,
+`CREATE SCHEMA AUTHORIZATION <role>` without a schema name, and the reserved names
+`pg_*`, `information_schema` and `_ntnt` never join the scope.
+
+```sql
+-- migrations/0001_initial.sql
+CREATE TABLE app.accounts (id int PRIMARY KEY);
+CREATE SCHEMA audit;
+CREATE TABLE audit.log (id int PRIMARY KEY, account int REFERENCES app.accounts (id));
+```
+
+Objects in `audit` get the same inspection and coverage rules as the managed
+schema's: an out-of-band `DROP TABLE audit.log` or `GRANT SELECT ON audit.log TO
+PUBLIC` is drift on `audit.relation:log`, and an unsupported object there, such as
+a materialized view, makes the result `unknown`. Catalog keys in those schemas
+start with the schema name (quoted where PostgreSQL would quote it):
+`audit.relation:log`, `audit.column:log.account`, `audit.index:log_pkey`. A schema
+itself is `schema:audit`. Keys in the managed schema stay unqualified
+(`relation:accounts`), so a history without `CREATE SCHEMA` keeps exactly the
+catalog, plan digests and saved plans it had before the scope was added. A plan
+saved by an earlier release for a history with `CREATE SCHEMA` did not inspect those
+schemas; `migrate` reports it as `DB_PLAN_STALE`, so plan it again.
+
+Foreign keys, views, triggers, column defaults and policies may refer to any schema
+of the scope. A later migration may rename or drop (`DROP SCHEMA audit`, without
+`CASCADE`) a schema the history created; replay produces the expected state and a
+schema that is recreated out of band is drift. A schema the history will create
+belongs to the scope from the start: if the target already has a schema of that
+name, its contents are compared with the replayed history (an unexpected schema is
+drift; with no ledger, objects there need [adoption](#explicit-adoption-of-existing-databases)).
+Schemas the history creates are owned by the migration role on the target and by
+the scratch role in replay; both map to the managed-role marker. `requires`,
+`ensures` and `adoption_checks` still read only managed-schema tables and views;
+the views in these schemas are held to the same check-purity rules as the managed
+schema's ([Immutable SQL inventory](#immutable-sql-inventory)). Lock
+predictions, `progress[].locks` and `CREATE INDEX CONCURRENTLY` cover managed-schema
+tables only.
+
+Statements outside the managed scope run as written; NTNT does not refuse them. A
+migration may create, change, drop, grant, revoke or comment on schemas and objects
+elsewhere, for example `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, `DROP TABLE IF
+EXISTS public.legacy` or `GRANT USAGE ON SCHEMA public` while the managed schema is
+`app`, whether it names them, reaches them through `SET search_path`, a `DO` block or
+a function, or uses SQL NTNT does not parse. NTNT does not inspect those schemas
+apart from the objects the history creates there.
+A plan flags each pending statement that it can tell may act there
+([`analysis.outside_scope`](#what-postgresql-replay-runs)), and stays reviewable.
+Replay runs the statements in scratch, which holds nothing but an empty `public`: a
+statement that needs a schema or object the history does not create there (`CREATE
+TABLE shared.t` while only the target has `shared`) fails in replay, and an `IF
+EXISTS` form is a no-op in scratch while it acts on the target.
+
+#### Objects the history creates in other schemas
+
+An object a migration creates in a schema the history did not create, such as
+`CREATE TABLE public.audit_log (...)` while the managed schema is `app`, is
+inspected, and nothing else there is: other objects in that schema, such as another
+application's tables, and the schema's own owner and privileges are never inspected
+or reported. Replay finds these objects however a migration creates them: with a
+qualified name, through `SET search_path`, in a `DO` block or function, or in SQL
+NTNT cannot parse. Scratch holds nothing outside the managed scope but an empty
+`public`, so whatever appears there during replay is the history's.
+
+Their catalog keys lead with the schema: `public.relation:audit_log`,
+`public.column:audit_log.msg`. A relation's columns, constraints, indexes, triggers,
+policies and rules follow it, so an index added to `public.audit_log` out of band is
+drift, like an out-of-band `DROP TABLE public.audit_log`, `ALTER TABLE ... ADD COLUMN`
+or `GRANT` on it. The managed schema's coverage rules apply, and managed objects may
+refer to these (a view over `public.audit_log`, foreign keys between them) as they may
+to a created schema. A schema the history creates without a top-level `CREATE SCHEMA`
+(in a `DO` block, say) is one of these objects, `schema:<name>`, with whatever the
+history creates in it. Members of an extension follow the extension, which stays
+uncovered when it is installed outside the managed scope.
+
+`status`, `verify` and `plan` first read the target in one read-only snapshot. When
+replay then finds such objects, they read the whole catalog again in a second
+snapshot that includes them; it must show the same target and history, or nothing is
+compared (`DB_TARGET_CHANGED`). Reports list the objects in `target.outside_objects`,
+and a plan records every object its replay found in `plan.execution.outside_objects`,
+so `migrate` and `reconcile` inspect the same objects on the target before and after
+each migration. A history that creates nothing outside the managed scope has neither
+field and keeps its catalogs and plan digests. A plan saved before these objects were
+inspected no longer matches; plan it again.
+
+Two kinds of change stay refused with `DB_OUTSIDE_SCOPE`, because they would break
+NTNT's own guarantees: changes to `_ntnt`, the schema that holds NTNT's ledger, and to
+PostgreSQL's system schemas (`pg_catalog`, `information_schema`, `pg_toast` and other
+`pg_*` names; `pg_temp`, the session's temporary schema, is allowed). Its `source`
+names the migration and `objects` names what it would change:
+
+- **Before the script runs**, in replay and on the target: a top-level statement that
+  creates, alters, drops, truncates, grants or revokes on an object or schema named
+  there, or moves an object there with `ALTER ... SET SCHEMA` (`DROP TABLE IF EXISTS
+  _ntnt.schema_migrations_v2`, `GRANT USAGE ON SCHEMA pg_catalog`), a `SET
+  search_path`, `SET SCHEMA` or `set_config('search_path', ...)` that puts `_ntnt` on
+  the search path, and a `_ntnt.<name>` or `SCHEMA _ntnt` in a statement NTNT does not
+  parse or does not read names from (`COMMENT ON TABLE _ntnt.schema_migrations_v2`),
+  other than one that reads or writes rows, runs code or changes settings (`INSERT`,
+  `DO`, `SET` and the like). The message gives the statement numbers; `objects` lists
+  the names as written. Such a statement can be a no-op in scratch, which has no `_ntnt` and whose
+  unprivileged role cannot change system schemas, yet act on the target.
+- **After each replayed migration**: scratch must not have gained a schema `_ntnt`
+  (`objects`: `schema:_ntnt`), as a `DO` block can create one.
+
+A `DO` block or function body that changes `_ntnt` only on the target (for example
+behind an `IF` that finds the ledger) is not detected; keep such SQL out of migrations.
+Database-wide objects without a schema, such as publications and large objects, remain
+outside inspection.
 
 ### Scoped execution ledger and legacy inspection
 
@@ -734,11 +868,11 @@ Files must have one hard link and no symlink path components. Filename component
 
 ### Transactions, replay and contracts
 
-Support is for the bundled **SQLite 3.54 series**, not an arbitrary separately installed `sqlite3` executable. `status`/`plan`/`verify` open the target readonly and use a deferred snapshot, releasing it before scratch replay. Catalog inspection reads metadata and compiles, but never steps, application programs with a native authorizer to validate their supported effect paths. It does not scan application rows. Scratch uses a distinct physical file, separate secret and matching settings; `BEGIN IMMEDIATE` owns its rollback-only replay. An empty scratch takes the target's journal mode, because `std/db/sqlite` `connect()` puts application databases in WAL mode and a scratch made with `touch` is not. Any other setting that differs (encoding, page size, auto-vacuum) fails with `DB_SCRATCH_MISMATCH`, which names each setting with both values, for example `page_size: target 4096, scratch 1024`. A nonempty scratch file is rejected, never cleared.
+Support is for the bundled **SQLite 3.54 series**, not an arbitrary separately installed `sqlite3` executable. `status`/`plan`/`verify` open the target readonly and use a deferred snapshot, releasing it before scratch replay. Catalog inspection reads metadata and compiles, but never steps, application programs with a native authorizer to validate their supported effect paths. It does not scan application rows. Replay inspects the scratch catalog after every migration. Each inspection reads every `sqlite_schema` row again, but reads metadata again only for objects whose definitions changed, and compiles a table's or view's programs again only when something they compile may have changed: their own definition, the objects their stored SQL names, the tables their triggers write, or the foreign-key children their actions reach. A change below a table in its foreign-key tree does not compile the table again when the children there check the same thing in their own programs and still compile, and the nesting stays within SQLite's limit, so a history that adds one table per migration to chains, DAGs or hubs of foreign keys compiles each table's programs once. Every inspection reports exactly what a full inspection would. SQLite does not compile a program whose triggers and foreign-key actions nest more than 1,000 levels deep (`SQLITE_LIMIT_TRIGGER_DEPTH`), so a table whose `DELETE` cascades through more than 1,000 `ON DELETE CASCADE` keys, or whose triggers nest that deep, is outside coverage (`DB_COVERAGE_INCOMPLETE` names it). A full inspection, which `status` and `verify` make of the target, compiles every table's programs, and SQLite's work for a chain of cascades grows with the square of its length: a chain of 1,000 tables takes about four seconds of the five-second operation deadline on a release build. Scratch uses a distinct physical file, separate secret and matching settings; `BEGIN IMMEDIATE` owns its rollback-only replay. An empty scratch takes the target's journal mode, because `std/db/sqlite` `connect()` puts application databases in WAL mode and a scratch made with `touch` is not. Any other setting that differs (encoding, page size, auto-vacuum) fails with `DB_SCRATCH_MISMATCH`, which names each setting with both values, for example `page_size: target 4096, scratch 1024`. A nonempty scratch file is rejected, never cleared.
 
 Execution opens an existing file only after approval and file-identity checks. It acquires **`BEGIN IMMEDIATE` before inspecting history/catalog for each migration**, revalidating on every acquisition; the writer reservation is not retained between commits. Competing migrators recognize each other's matching committed prefixes instead of applying SQL twice. SQLite's writer lock covers ordinary application writers; it is not an online-DDL guarantee. Dedicated connections enable foreign keys, recursive triggers and CHECK enforcement, `trusted_schema=OFF`, defensive mode, strict quoting, and `synchronous=FULL`. Durable rollback-journal modes and WAL are accepted; journal-off/memory modes are not. The runner does not change the selected persistent journal mode.
 
-The two-second busy timeout, five-second worker/progress deadline, and shared orchestration/reconciliation deadlines bound operations. Timeout/cancellation interrupts and discards the connection, never returns it to a pool. Native I/O still depends on the OS/filesystem. A busy or interrupted COMMIT is reconciled using a fresh connection and writer reservation, without retrying SQL; if the fresh observation cannot establish the prefix, the result stays unknown. Process termination cannot return acknowledgement: rerun the same approved plan to inspect committed truth first. A hot rollback journal may prevent readonly inspection (`DB_SQLITE_RECOVERY_REQUIRED`); wait for an active writer to finish, or rerun `migrate` with that same approved plan so native recovery and locked reconciliation occur through the authorized path. Do not delete the journal or silently make inspection writable.
+The two-second busy timeout, five-second worker/progress deadline, and shared orchestration/reconciliation deadlines bound operations. A migration script on the target runs under `statement_seconds` instead (90 seconds by default, see [time limits](#time-limits)); scratch replay keeps the five-second bound. SQLite interrupts an operation at its deadline, and a statement interrupted there fails with `DB_STATEMENT_LIMIT`, naming the statement and the limit. An operation that has not returned five seconds after its deadline is cancelled: its connection is discarded and never returned to a pool. Native I/O still depends on the OS/filesystem. A busy or interrupted COMMIT is reconciled using a fresh connection and writer reservation, without retrying SQL; if the fresh observation cannot establish the prefix, the result stays unknown. Process termination cannot return acknowledgement: rerun the same approved plan to inspect committed truth first. A hot rollback journal may prevent readonly inspection (`DB_SQLITE_RECOVERY_REQUIRED`); wait for an active writer to finish, or rerun `migrate` with that same approved plan so native recovery and locked reconciliation occur through the authorized path. Do not delete the journal or silently make inspection writable.
 
 SQL, named transition checks, the resulting catalog and the success ledger row are one transaction. SQLite contracts use the same closed SELECT expression grammar described above, with every relation qualified as `main.<table>`; the native authorizer additionally denies side-effecting calls and nonmanaged relations. Only **one integer `1`**, in one row/column, passes. Numeric values other than `1`, floating-point `1.0`, text, NULL, incorrect shape, errors and timeouts fail. Historical checks remain `not_run` on verify/rerun.
 
@@ -777,6 +911,19 @@ The name must be a simple ordinary table identifier. In the already-owned transa
 
 Explicitly recreate the selected table's named indexes/triggers and any views dropped to allow the rebuild. The selected table's columns/constraints and autoindexes may change. Definition comparisons are conservative: equivalent SQL written differently may still be rejected. Deliberate dependent-object retirement belongs in a separate reviewed migration, not an accidental omission inside this mode. The mode scans row counts **during authorized execution**, not during production planning.
 
+Without this sidecar, a migration that drops a table which other tables reference with `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT` is refused with `DB_REBUILD_REQUIRED` before the drop runs, naming each child table and its action. SQLite deletes every row of a dropped table first. On a target with data, the drop would run those actions, and scratch replay, which starts empty, could not show it. A drop that runs no such action stays allowed: one whose children were dropped first, one whose child foreign keys have no `ON DELETE` action, and a table's reference to itself.
+
+The sidecar is for a migration that rebuilds the table: it creates the replacement and copies the rows. A migration that retires the table cannot use it, because the guard requires the same set of tables. To retire a table, first remove the foreign keys that reference it from the tables the refusal names, or drop those tables, earlier in the migration or in an earlier one. SQLite removes a foreign key only by rebuilding its table: create the table again without the key, copy its rows, drop the old table and rename the new one. For example, to retire `accounts` while keeping `posts` and dropping `comments`:
+
+```sql
+CREATE TABLE posts_new(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL);
+INSERT INTO posts_new SELECT id, account_id FROM posts;
+DROP TABLE posts;
+ALTER TABLE posts_new RENAME TO posts;
+DROP TABLE comments;
+DROP TABLE accounts;
+```
+
 Counts and FK checks do not prove row identities, correct value mappings, every uniqueness assumption, old-client compatibility or recovery after a committed destructive change. Use named transition checks and the same executor in representative native upgrade tests to assert exact keys/values, preserved children and working dependencies. `tests/db_sqlite.rs` demonstrates an email-lowercasing rebuild with existing rows, indexes, views, audit trigger and cascading foreign keys, plus negative dependency/row-loss/orphan cases. Empty replay alone cannot provide that evidence. Unknown business effects remain review-required even when these guards pass.
 
 ## Results and plan identity
@@ -790,7 +937,7 @@ Plans bind:
 - managed scope, observed base history/catalog, applied prefix and replayed expected base;
 - adapter/canonicalization version, exact pending migration identities and candidate fingerprint;
 - explicit `execution.format = "postgresql-transactional-v1"` or `"sqlite-transactional-v1"` and ordered engine-specific catalog fingerprints for every migration prefix, including the empty prefix. Old/incomplete artifacts cannot authorize execution;
-- for PostgreSQL, the [time limits](#time-limits) `migrate` will use (`execution.limits`).
+- the [time limits](#time-limits) `migrate` will use (`execution.limits`): PostgreSQL's effective limits, and SQLite's `statement_seconds` when the manifest declares a limits table.
 
 `plan_digest` hashes that descriptor. Observation time and display filters are not authority inputs. `--against` checks the saved descriptor's digest, pending descriptors and fresh source/target/base binding. It neither executes nor approves the plan. For `plan --out`, the file contains the compact plan descriptor and result metadata, not duplicate catalog/source display fields; stdout still contains the full report. `status`/`verify --out` save their report. All saved artifacts share the reader's 1 MiB bound: oversized output fails before creating a file rather than producing an unreadable plan. Files are new-only (`--out` cannot replace a source, existing plan or symlink); on Unix, new reports are mode 0600.
 
@@ -804,7 +951,7 @@ Inspection transactions are observations, not deployment locks. ACCESS SHARE pro
 
 ### Time limits
 
-A PostgreSQL database can set two execution limits, in whole seconds:
+A database can set execution limits, in whole seconds. PostgreSQL takes both; SQLite takes `statement_seconds`:
 
 ```toml
 [databases.app.limits]
@@ -814,10 +961,10 @@ migrator_wait_seconds = 60   # wait for a competing migrator's advisory lock
 
 | Field | Default | Range | Limits |
 |---|---|---|---|
-| `statement_seconds` | 90 | 2–86400 | One migration script on the target (PostgreSQL applies it to each statement; NTNT stops waiting for the whole script 5 seconds later), its deferred constraint checks, and each `CREATE INDEX CONCURRENTLY` build or `DROP INDEX CONCURRENTLY` cleanup, waits and table scan included. |
-| `migrator_wait_seconds` | 5 | 1–300 | How long `migrate` and `reconcile` wait for another migrator's advisory lock before failing with `DB_LOCK_CONFLICT`. |
+| `statement_seconds` | 90 | 2–86400 | One migration script on the target (PostgreSQL applies it to each statement; NTNT stops waiting for the whole script 5 seconds later; SQLite bounds the whole script, its foreign-key check included), its deferred constraint checks, and each `CREATE INDEX CONCURRENTLY` build or `DROP INDEX CONCURRENTLY` cleanup, waits and table scan included. |
+| `migrator_wait_seconds` | 5 | 1–300 | PostgreSQL only: how long `migrate` and `reconcile` wait for another migrator's advisory lock before failing with `DB_LOCK_CONFLICT`. |
 
-Omitted fields keep their defaults; without the table nothing changes. Unknown fields, non-integers and values outside the range fail with `DB_CONFIG`, naming the field. The 2-second minimum for `statement_seconds` keeps it above the 1-second migration `lock_timeout`. PostgreSQL counts the statement limit from the start of the statement, so at 1 second a statement waiting for a brief lock would reach the statement limit first and fail without a [retry](#exact-plan-authority-and-execution). The upper bounds are deliberate: a statement that needs more than a day belongs in a supervised manual build, and a migrator that has held the lock for five minutes is usually stuck or running a long build, so a deployment should fail and retry rather than queue behind it. SQLite rejects the table; its operations keep the fixed bounds described under [SQLite](#transactions-replay-and-contracts).
+Omitted fields keep their defaults; without the table nothing changes. Unknown fields, non-integers and values outside the range fail with `DB_CONFIG`, naming the field. The 2-second minimum for `statement_seconds` keeps it above the 1-second migration `lock_timeout`. PostgreSQL counts the statement limit from the start of the statement, so at 1 second a statement waiting for a brief lock would reach the statement limit first and fail without a [retry](#exact-plan-authority-and-execution). The upper bounds are deliberate: a statement that needs more than a day belongs in a supervised manual build, and a migrator that has held the lock for five minutes is usually stuck or running a long build, so a deployment should fail and retry rather than queue behind it. On SQLite the table takes only `statement_seconds`; `migrator_wait_seconds` fails with `DB_CONFIG`. Scratch replay and SQLite's other operations keep the fixed bounds described under [SQLite](#transactions-replay-and-contracts). On SQLite, a statement past its limit fails with `DB_STATEMENT_LIMIT`, naming the statement and the limit. On PostgreSQL the server cancels the statement, and the migration fails with `DB_POSTGRES` and SQLSTATE 57014.
 
 `migrate` and `reconcile` size their deadlines so that one full migrator wait and one full statement fit:
 
@@ -828,7 +975,7 @@ A limit set below its default counts at its default here, so lowering a limit ne
 
 `status`, `plan` and `verify` keep the default limit and the 120-second deadline: they replay on an empty scratch database, where index builds and table rewrites are fast. A script that is slow even on empty tables (for example, one that generates rows) must still replay within 90 seconds.
 
-Each PostgreSQL plan records the limits it was made with in `plan.execution.limits`, and `migrate` and `reconcile` report the limits and derived deadlines they used in `limits`. Limits are reviewed policy: changing them changes the policy digest, and `migrate` rejects an earlier plan with `DB_PLAN_STALE`, so plan and approve again. A plan saved before NTNT recorded limits has no `execution.limits`; it implies the defaults and stays valid while the manifest declares no limits table.
+Each PostgreSQL plan records the limits it was made with in `plan.execution.limits`; a SQLite plan records `statement_seconds` there only when the manifest declares the table, and `migrate` and `reconcile` report the limits and derived deadlines they used in `limits`. Limits are reviewed policy: changing them changes the policy digest, and `migrate` rejects an earlier plan with `DB_PLAN_STALE`, so plan and approve again. A plan saved before NTNT recorded limits has no `execution.limits`; it implies the defaults and stays valid while the manifest declares no limits table.
 
 Limits apply to every migration of the logical database; there is no per-migration override. To give one large index build more time, raise the limit for the release that contains it and lower it again in a later plan.
 
@@ -847,4 +994,4 @@ cargo test --locked --lib migrations::postgres::tests::target_transaction_is_rea
 
 The shared conformance suite executes the same history/drift, approval/stale/wrong-target, contract failure and committed-prefix recovery scenarios on both native adapters. It also exercises populated baseline adoption, exact multi-file coverage, required check failures, unknown ledgers and later upgrades. PostgreSQL cases import only recognized immutable legacy history and reject unsafe ledger definitions. Adoption commit-fault tests distinguish baseline/import records from SQL execution; SQLite cases cover competing adopters, cancellation/timeout and busy-COMMIT recovery. SQLite-only tests also cover physical file aliases/replacement, read-only nonmutation, WAL, bounded busy waits, competing CLI processes, forced process death before commit and after an acknowledged-to-SQLite prefix, busy-COMMIT fresh reconciliation, timeout/discard, ledger tampering, redaction and populated rebuild preservation. `tests/db_sqlite_indexes.rs` covers partial (including partial unique) and expression indexes through plan, migrate and verify, out-of-band predicate and expression drift, a rebuild that must recreate a partial index unchanged, the function allowlist for predicates and expressions, and coverage diagnostics that name the uncovered objects. Native SQLite fixtures provision disposable local files only; no service is needed.
 
-PostgreSQL fixtures create/drop databases and roles. They test real read-only transactions, no target bootstrap, applied-prefix versus pending drift, invalid indexes, constraint validity/grants, immutable SQL/metadata history, malformed/RLS/view ledgers, unknown coverage, physical scratch collisions, low-privilege/empty/matching scratch, redaction, bounded waits, cleanup, source replacement during a blocked inspection, and target/source/authority-bound plans. Execution tests additionally cover fresh construction, populated upgrade preservation, exact authority, stale plans, partial commits and reruns, false/NULL/shape/type/error/timeout checks, native/advisory contention, configured statement and migrator-wait limits (scaled to seconds), snapshots after lock acquisition, process cancellation, unsafe/scoped ledgers, unsupported effects and source replacement. A test-only wire proxy drops connections before COMMIT, after durable COMMIT but before acknowledgement, during rollback, and during reconciliation. It is not linked into release code and exposes no authorization bypass. These executed fixture checks are not evidence about arbitrary application business behavior or real deployment compatibility.
+PostgreSQL fixtures create/drop databases and roles. They test schemas the history creates (drift, coverage and grants there, cross-schema foreign keys, renames, `DROP SCHEMA`, adoption and reconciliation), statements outside the managed scope that run as written and are flagged in plans, objects the history creates in other schemas (inspected however they are created, while unrelated objects there are ignored), the `DB_OUTSIDE_SCOPE` refusals that protect `_ntnt` and system schemas, single-schema fingerprints recorded before the scope was added, real read-only transactions, no target bootstrap, applied-prefix versus pending drift, invalid indexes, constraint validity/grants, immutable SQL/metadata history, malformed/RLS/view ledgers, unknown coverage, physical scratch collisions, low-privilege/empty/matching scratch, redaction, bounded waits, cleanup, source replacement during a blocked inspection, and target/source/authority-bound plans. Execution tests additionally cover fresh construction, populated upgrade preservation, exact authority, stale plans, partial commits and reruns, false/NULL/shape/type/error/timeout checks, native/advisory contention, configured statement and migrator-wait limits (scaled to seconds), snapshots after lock acquisition, process cancellation, unsafe/scoped ledgers, unsupported effects and source replacement. A test-only wire proxy drops connections before COMMIT, after durable COMMIT but before acknowledgement, during rollback, and during reconciliation. It is not linked into release code and exposes no authorization bypass. These executed fixture checks are not evidence about arbitrary application business behavior or real deployment compatibility.
