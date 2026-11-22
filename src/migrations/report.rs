@@ -248,7 +248,7 @@ fn renumber_advice(inputs: &CapturedInputs, migration: &Migration, last: u64) ->
             None => format!(", such as {dir}/{new}"),
         })
         .unwrap_or_default();
-    format!("This target has not applied {name}, but it is numbered below {last}, the last ID in the target's ledger, and migrations run in ID order. Rename {what} to an unused ID above {last}{keep}{example}, as for DB_DUPLICATE_ID, if no other target has applied it yet; never renumber a migration that has been applied anywhere.")
+    format!("This target has not applied {name}, but it is numbered below {last}, the last ID in the target's ledger, and migrations run in ID order. Rename {what} to an unused ID above {last}{keep}{example}, as for DB_DUPLICATE_ID, only if no target has applied or adopted it yet; never renumber a migration once any target has applied or adopted it.")
 }
 /// `DB_HISTORY_DIVERGENT` at ledger position `position`, where the ledger
 /// records `entry` and the captured history has `migration` (#423).
@@ -1636,6 +1636,14 @@ mod tests {
         // 31 is the first free ID above 30, the last applied ID (40 is pending).
         assert!(d.next_action.contains("above 30"), "{}", d.next_action);
         assert!(d.next_action.contains("0031_b.sql"), "{}", d.next_action);
+        // Adoption records migrations without running them, so a migration
+        // another target adopted is never renumbered either (CodeRabbit
+        // 4656381391).
+        assert!(
+            d.next_action.ends_with(", as for DB_DUPLICATE_ID, only if no target has applied or adopted it yet; never renumber a migration once any target has applied or adopted it."),
+            "{}",
+            d.next_action
+        );
         shows_no_sql(&d);
         // Following the advice gives a valid history with two pending.
         let (_fixed, fixed) =

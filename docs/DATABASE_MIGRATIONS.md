@@ -506,7 +506,9 @@ missing from the migrations directory. `DB_HISTORY_DIVERGENT` names the first
 ledger position whose ID or name differs, with both names. A migration this target
 has not applied that is numbered below the last ID in its ledger, such as one merged
 from another branch, is named with advice to rename it to an unused ID above that
-ID, as for `DB_DUPLICATE_ID`, if no other target has applied it; when it has a
+ID, as for `DB_DUPLICATE_ID`, only if no target has applied or adopted it:
+adoption records migrations without running them, and a migration is never
+renumbered once any target has applied or adopted it. When it has a
 sidecar, the advice names both files and one new stem for them. An adopted
 checkpoint records one checksum for the whole prefix it covers, so its
 `DB_HISTORY_EDITED` names that range of migrations rather than one file. That

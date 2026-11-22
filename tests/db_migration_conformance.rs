@@ -384,6 +384,11 @@ fn history_refusals_name_the_migration(f: Fixture) {
         next_action.contains("Rename migrations/0015_merged.sql and its sidecar migrations/0015_merged.toml to an unused ID above 30, keeping one stem for both, such as migrations/0031_merged.sql and migrations/0031_merged.toml"),
         "{d}"
     );
+    // Adoption records migrations without running them (CodeRabbit 4656381391).
+    assert!(
+        next_action.contains("only if no target has applied or adopted it yet; never renumber a migration once any target has applied or adopted it."),
+        "{d}"
+    );
     no_sql(d);
     // The human report says what is known about the history, never null counts.
     let human = f.human("status", &[]);
