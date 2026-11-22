@@ -691,6 +691,87 @@ fn stale_plans_name_a_migration_added_after_an_adoption(f: Fixture) {
     let r = f.apply("again.json", again["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
 }
+/// CodeRabbit 4656058147 (#423): on a target that adopted 0010_a.sql through
+/// 0030_c.sql, a migration added below all of them is named, never a covered
+/// one; when two were added, the advice is to compare with the adopted
+/// release. Following each piece of advice gives a passing status.
+fn a_migration_added_below_an_adoption_is_named(f: Fixture) {
+    let s = f.schema();
+    let table = |name: &str| format!("CREATE TABLE {s}.{name}(id INTEGER PRIMARY KEY);\n");
+    let dir = f.root().join("migrations");
+    for (file, name) in [
+        ("0010_a.sql", "a"),
+        ("0020_b.sql", "b"),
+        ("0030_c.sql", "c"),
+    ] {
+        f.sql(file, &table(name));
+        f.execute(&table(name));
+    }
+    adoption_checks(
+        &f,
+        &format!("SELECT NOT EXISTS (SELECT 1 FROM {s}.a WHERE id IS NULL)"),
+    );
+    let adoption = f.command("plan", &["--adopt-through", "30", "--out", "adoption.json"]);
+    assert_eq!(adoption["outcome"], "pass", "{adoption}");
+    let adopted = f.apply("adoption.json", adoption["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{adopted}");
+    let passes = |pending: u64| {
+        let r = f.command("status", &[]);
+        assert_eq!(r["outcome"], "pass", "{r}");
+        assert_eq!(r["history"]["adopted_count"], 3, "{r}");
+        assert_eq!(r["history"]["pending_count"], pending, "{r}");
+    };
+    passes(0);
+    let covered = ["0010_a.sql", "0020_b.sql", "0030_c.sql"];
+
+    // One added: the checkpoint's checksum names it.
+    f.sql("0005_x.sql", &table("x"));
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(d["source"], "0005_x.sql", "{d}");
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.contains(
+            "Rename migrations/0005_x.sql to an unused ID above 30, such as migrations/0031_x.sql"
+        ),
+        "{d}"
+    );
+    for name in covered {
+        assert!(!next_action.contains(name), "{name}: {d}");
+    }
+    // Following it: renamed as advised.
+    std::fs::rename(dir.join("0005_x.sql"), dir.join("0031_x.sql")).unwrap();
+    passes(1);
+
+    // Two added: the checksum cannot say which; compare with the adopted release.
+    f.sql("0007_y.sql", &table("y"));
+    f.sql("0015_z.sql", &table("z"));
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(d["source"], "0030_c.sql", "{d}");
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.starts_with("Compare migrations/ with the release that was adopted."),
+        "{d}"
+    );
+    assert!(next_action.contains("to an unused ID above 30"), "{d}");
+    for name in &covered[..2] {
+        assert!(!next_action.contains(name), "{name}: {d}");
+    }
+    // Following it: the two added ones get unused IDs above 30.
+    std::fs::rename(dir.join("0007_y.sql"), dir.join("0032_y.sql")).unwrap();
+    std::fs::rename(dir.join("0015_z.sql"), dir.join("0033_z.sql")).unwrap();
+    passes(3);
+}
+#[test]
+fn sqlite_a_migration_added_below_an_adoption_is_named() {
+    a_migration_added_below_an_adoption_is_named(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_a_migration_added_below_an_adoption_is_named() {
+    a_migration_added_below_an_adoption_is_named(Fixture::pg())
+}
 fn contract_failures(create: fn() -> Fixture) {
     for (phase, check) in [
         ("requires", "SELECT false"),

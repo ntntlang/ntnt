@@ -507,7 +507,12 @@ has not applied that is numbered below the last ID in its ledger, such as one me
 from another branch, is named with advice to rename it to an unused ID above that
 ID, as for `DB_DUPLICATE_ID`, if no other target has applied it. An adopted
 checkpoint records one checksum for the whole prefix it covers, so its
-`DB_HISTORY_EDITED` names that range of migrations rather than one file. Checksums
+`DB_HISTORY_EDITED` names that range of migrations rather than one file. That
+checksum also tells a migration added below the checkpoint's last one from the ones
+it covers: one added migration is named with the same advice, never a covered one.
+When more were added, the advice is to compare the migrations directory with the
+adopted release, keep the covered migrations under the names and bytes they were
+adopted with, and rename each added one to an unused ID above the last. Checksums
 are shown, file contents never; a value read from the ledger is shown only when it
 has the shape NTNT writes there (a migration file name, a decimal ID, a SHA-256
 digest).

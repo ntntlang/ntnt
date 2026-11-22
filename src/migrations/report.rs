@@ -1,7 +1,7 @@
 //! Shared report construction: authored history, observed target, expected prefix.
 use super::adapter::{self, Access, Adapter, Identity};
 use super::analysis::analyze_in_scope;
-use super::inventory::{json_digest, CapturedInputs, CatalogDigests, Migration};
+use super::inventory::{baseline_checksum, json_digest, CapturedInputs, CatalogDigests, Migration};
 use super::model::{Catalog, History, HistoryEntry};
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
@@ -297,14 +297,45 @@ fn divergent_checkpoint(
     };
     match (moved, last_recorded_id(history)) {
         (Some(index), Some(last)) if index >= count => {
+            let more = index + 1 - count;
+            // The file at the checkpoint's position can be a covered one, so
+            // the checkpoint's checksum decides: one added migration is the
+            // one without which the files through `name` give that checksum
+            // (CodeRabbit 4656058147).
+            let added = (more == 1)
+                .then(|| {
+                    let summaries: Vec<Value> = inputs.migrations[..=index]
+                        .iter()
+                        .map(Migration::summary)
+                        .collect();
+                    (0..index).find(|&skip| {
+                        let rest: Vec<Value> = summaries
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != skip)
+                            .map(|(_, s)| s.clone())
+                            .collect();
+                        baseline_checksum(&rest) == entry.checksum
+                    })
+                })
+                .flatten()
+                .map(|skip| &inputs.migrations[skip]);
+            if let Some(added) = added {
+                message.push_str(&format!(
+                    " {name} is now at position {}: {} (ID {}) was added after the adoption, numbered below {id}.",
+                    index + 1,
+                    added.name,
+                    added.id,
+                ));
+                let advice = renumber_advice(inputs, &added.name, last);
+                return history_refusal("DB_HISTORY_DIVERGENT", &added.name, message, advice);
+            }
             message.push_str(&format!(
-                " {name} is now at position {}: {} migration(s) numbered below {id} were added after the adoption.",
+                " {name} is now at position {}: {dir}/ holds {more} more migration(s) numbered below {id} than the checkpoint covers.",
                 index + 1,
-                index + 1 - count,
             ));
-            let advice = renumber_advice(inputs, &now.name, last);
-            let advice = format!("{advice} Rename every migration numbered below {id} that was added after the adoption the same way.");
-            history_refusal("DB_HISTORY_DIVERGENT", &now.name, message, advice)
+            let advice = format!("Compare {dir}/ with the release that was adopted. Keep the {count} migrations the checkpoint covers, through {name}, under the names and with the exact bytes they were adopted with. Rename each migration numbered below {id} that was added after the adoption to an unused ID above {last}, and its .toml sidecar, where it has one, to the same new stem, if no other target has applied it yet; never rename or renumber a migration that has been adopted or applied anywhere.");
+            history_refusal("DB_HISTORY_DIVERGENT", name, message, advice)
         }
         (None, _) => {
             let advice = format!("Restore {dir}/{name} and every migration before it that the checkpoint covers, with their exact adopted bytes, for example from version control; adopted migrations are never removed, renamed or renumbered.");
@@ -1683,6 +1714,85 @@ mod tests {
             "{}",
             d.message
         );
+    }
+
+    /// CodeRabbit 4656058147 (#423): a migration added below every one an
+    /// adopted checkpoint covers moves the checkpoint's end, so the file at
+    /// its position is a covered one. The checkpoint's checksum tells the
+    /// added migration from the covered ones, and the added one is named;
+    /// when it cannot, the advice is to compare with the adopted release. A
+    /// covered migration is never named to renumber, and following either
+    /// piece of advice gives a valid history.
+    #[test]
+    fn a_migration_added_below_an_adopted_checkpoint_is_told_from_the_covered_ones() {
+        let (_before, adopted) = named_inputs(&[A, B, C]);
+        let history = ledger(&adopted, 3, 3);
+        let x = ("0005_x.sql", "CREATE TABLE x(id INTEGER);\n");
+        let (_after, now) = named_inputs(&[x, A, B, C]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+        assert_eq!(d.source.as_deref(), Some("0005_x.sql"), "{d:?}");
+        assert!(
+            d.message
+                .contains("0005_x.sql (ID 5) was added after the adoption, numbered below 30."),
+            "{}",
+            d.message
+        );
+        assert!(
+            d.next_action.contains(
+                "Rename migrations/0005_x.sql to an unused ID above 30, such as migrations/0031_x.sql"
+            ),
+            "{}",
+            d.next_action
+        );
+        for covered in [A.0, B.0, C.0] {
+            assert!(
+                !d.next_action.contains(covered),
+                "{covered}: {}",
+                d.next_action
+            );
+        }
+        shows_no_sql(&d);
+        // Following the advice: the checkpoint matches again, 0031_x.sql pending.
+        let (_fixed, fixed) = named_inputs(&[A, B, C, ("0031_x.sql", x.1)]);
+        assert_eq!(prefix_with_attempt(&history, &fixed).unwrap(), (3, None));
+
+        // Two added: the checksum cannot say which files are the covered ones.
+        let y = ("0015_y.sql", "CREATE TABLE y(id INTEGER);\n");
+        let (_after, now) = named_inputs(&[x, A, y, B, C]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+        assert_eq!(d.source.as_deref(), Some("0030_c.sql"), "{d:?}");
+        assert!(
+            d.message.contains(
+                "0030_c.sql is now at position 5: migrations/ holds 2 more migration(s) numbered below 30 than the checkpoint covers."
+            ),
+            "{}",
+            d.message
+        );
+        assert!(
+            d.next_action
+                .starts_with("Compare migrations/ with the release that was adopted."),
+            "{}",
+            d.next_action
+        );
+        assert!(
+            d.next_action
+                .contains("Keep the 3 migrations the checkpoint covers, through 0030_c.sql, under the names and with the exact bytes they were adopted with"),
+            "{}",
+            d.next_action
+        );
+        for covered in [A.0, B.0] {
+            assert!(
+                !d.next_action.contains(covered),
+                "{covered}: {}",
+                d.next_action
+            );
+        }
+        shows_no_sql(&d);
+        // Following it: the two added ones are renamed above 30.
+        let (_fixed, fixed) = named_inputs(&[A, B, C, ("0031_x.sql", x.1), ("0032_y.sql", y.1)]);
+        assert_eq!(prefix_with_attempt(&history, &fixed).unwrap(), (3, None));
     }
 
     /// #423: ledger values are shown only in the shape ntnt writes there, so

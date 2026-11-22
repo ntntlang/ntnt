@@ -712,6 +712,12 @@ pub(super) fn capture(
     }
     Ok((file, bytes))
 }
+/// The checksum an adopted checkpoint records for the migrations it covers,
+/// given as their `Migration::summary`s in order.
+pub(super) fn baseline_checksum(prefix: &[serde_json::Value]) -> String {
+    json_digest(&serde_json::json!({"format":"ntnt-baseline-v1","prefix":prefix}))
+}
+
 impl CapturedInputs {
     /// Effective execution limits: the declared table or the defaults.
     pub fn limits(&self) -> Limits {
@@ -749,9 +755,7 @@ impl CapturedInputs {
             position: count as i64,
             id: last.id.to_string(),
             name: last.name.clone(),
-            checksum: json_digest(
-                &serde_json::json!({"format":"ntnt-baseline-v1","prefix":prefix}),
-            ),
+            checksum: baseline_checksum(&prefix),
             state: "adopted".into(),
         })
     }
