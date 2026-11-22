@@ -469,6 +469,50 @@ fn history_refusals_name_the_migration(f: Fixture) {
     .unwrap();
     assert_eq!(passes()["history"]["pending_count"], 2);
 }
+/// CodeRabbit (report.rs:284): an applied migration renamed with its
+/// sidecar, its ID kept, is named as applied, with advice to restore both
+/// files. Renaming only the SQL back orphans the sidecar; followed as
+/// written, `status` passes.
+fn a_renamed_applied_migration_is_restored_with_its_sidecar(f: Fixture) {
+    let s = f.schema().to_owned();
+    for (name, table) in [
+        ("0010_a.sql", "a"),
+        ("0020_b.sql", "b"),
+        ("0030_c.sql", "c"),
+    ] {
+        f.sql(
+            name,
+            &format!("CREATE TABLE {s}.{table}(id INTEGER PRIMARY KEY);\n"),
+        );
+    }
+    f.sql("0020_b.toml", "intent_ids = [\"b\"]\n");
+    let plan = f.plan("initial.json");
+    let applied = f.apply("initial.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let dir = f.root().join("migrations");
+    let rename = |from: &str, to: &str| std::fs::rename(dir.join(from), dir.join(to)).unwrap();
+    rename("0020_b.sql", "0020_bee.sql");
+    rename("0020_b.toml", "0020_bee.toml");
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(d["source"], "0020_b.sql", "{d}");
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(next_action.contains("If migrations/0020_bee.sql and its sidecar migrations/0020_bee.toml are that migration renamed, restore both to their original names, migrations/0020_b.sql and migrations/0020_b.toml, with their exact applied bytes;"), "{d}");
+    assert!(!d.to_string().contains("CREATE TABLE"), "{d}");
+    // The SQL alone renamed back leaves its sidecar orphaned.
+    rename("0020_bee.sql", "0020_b.sql");
+    let orphan = f.command("status", &[]);
+    assert_eq!(
+        diagnostic(&orphan, "DB_CONFIG")["source"],
+        "migrations/0020_bee.toml",
+        "{orphan}"
+    );
+    // Following the advice: both files under their applied names.
+    rename("0020_bee.toml", "0020_b.toml");
+    let r = f.command("status", &[]);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["history"]["pending_count"], 0, "{r}");
+}
 /// #423 (sq-12, cli-09): a stale plan names the binding that changed, for
 /// migrate and for --against; a plan for another target is refused before
 /// any I/O; a hand-edited or forged plan is invalid, not a changed target;
@@ -1160,6 +1204,15 @@ fn sqlite_history_refusals_name_the_migration() {
 #[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
 fn postgres_history_refusals_name_the_migration() {
     history_refusals_name_the_migration(Fixture::pg())
+}
+#[test]
+fn sqlite_a_renamed_applied_migration_is_restored_with_its_sidecar() {
+    a_renamed_applied_migration_is_restored_with_its_sidecar(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_a_renamed_applied_migration_is_restored_with_its_sidecar() {
+    a_renamed_applied_migration_is_restored_with_its_sidecar(Fixture::pg())
 }
 #[test]
 fn sqlite_stale_plans_name_what_changed() {

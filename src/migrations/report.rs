@@ -224,6 +224,11 @@ fn renumbered(inputs: &CapturedInputs, name: &str, last: u64) -> Option<String> 
     }
     Some(format!("{id:0width$}_{rest}", width = digits.len()))
 }
+/// The .toml sidecar the loader pairs with migration `name` in `dir`, by stem.
+fn sidecar_path(dir: &str, name: &str) -> String {
+    let stem = name.strip_suffix(".sql").unwrap_or(name);
+    format!("{dir}/{stem}.toml")
+}
 /// Advice for an unapplied `migration` numbered below `last`, the ID the
 /// ledger records last, as `DB_DUPLICATE_ID` advises (#423). The loader
 /// pairs a sidecar with its migration by stem, so a sidecar is renamed with
@@ -231,10 +236,7 @@ fn renumbered(inputs: &CapturedInputs, name: &str, last: u64) -> Option<String> 
 fn renumber_advice(inputs: &CapturedInputs, migration: &Migration, last: u64) -> String {
     let dir = &inputs.config.migrations_dir;
     let name = &migration.name;
-    let sidecar = |name: &str| {
-        let stem = name.strip_suffix(".sql").unwrap_or(name);
-        format!("{dir}/{stem}.toml")
-    };
+    let sidecar = |name: &str| sidecar_path(dir, name);
     let (what, keep) = match migration.metadata {
         Some(_) => (
             format!("{dir}/{name} and its sidecar {}", sidecar(name)),
@@ -281,7 +283,21 @@ fn divergent(
     }
     match ledger_name(entry) {
         Some(name) if !inputs.migrations.iter().any(|m| m.name == name) => {
-            let advice = format!("{name} was applied under that name and is no longer in {dir}/. If {} is that migration renamed, rename it back to {name}; otherwise restore {dir}/{name} with its exact applied bytes, for example from version control. Applied migrations are never renamed or renumbered.", migration.name);
+            // A sidecar renamed with its migration is restored with it, or
+            // it is left orphaned (CodeRabbit, report.rs:284).
+            let renamed = match migration.metadata {
+                Some(_) => format!(
+                    "If {dir}/{} and its sidecar {} are that migration renamed, restore both to their original names, {dir}/{name} and {}, with their exact applied bytes",
+                    migration.name,
+                    sidecar_path(dir, &migration.name),
+                    sidecar_path(dir, name),
+                ),
+                None => format!(
+                    "If {} is that migration renamed, rename it back to {name}",
+                    migration.name
+                ),
+            };
+            let advice = format!("{name} was applied under that name and is no longer in {dir}/. {renamed}; otherwise restore {dir}/{name} with its exact applied bytes, for example from version control. Applied migrations are never renamed or renumbered.");
             history_refusal("DB_HISTORY_DIVERGENT", name, message, advice)
         }
         _ => {
@@ -1719,6 +1735,26 @@ mod tests {
         shows_no_sql(&d);
         // Following the advice: under its applied name the history matches.
         let (_fixed, fixed) = named_inputs(&[A, B, C]);
+        assert_eq!(prefix_with_attempt(&history, &fixed).unwrap(), (3, None));
+    }
+
+    /// CodeRabbit (report.rs:284): an applied migration renamed with its
+    /// sidecar, its ID kept, is restored with that sidecar; renaming only the
+    /// SQL back would orphan it. Followed, the history matches.
+    #[test]
+    fn a_renamed_applied_migration_is_restored_with_its_sidecar() {
+        let (sql, toml) = ("CREATE TABLE b(id INTEGER);\n", "intent_ids = [\"b\"]\n");
+        let (_before, applied) = named_inputs(&[A, ("0020_b.sql", sql), ("0020_b.toml", toml), C]);
+        let history = ledger(&applied, 0, 3);
+        let (_after, now) = named_inputs(&[A, ("0020_bee.sql", sql), ("0020_bee.toml", toml), C]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+        assert_eq!(d.source.as_deref(), Some("0020_b.sql"), "{d:?}");
+        assert!(d.next_action.contains("If migrations/0020_bee.sql and its sidecar migrations/0020_bee.toml are that migration renamed, restore both to their original names, migrations/0020_b.sql and migrations/0020_b.toml, with their exact applied bytes;"), "{}", d.next_action);
+        assert!(!d.next_action.contains("above"), "{}", d.next_action);
+        shows_no_sql(&d);
+        // Following the advice: both files under their applied names.
+        let (_fixed, fixed) = named_inputs(&[A, ("0020_b.sql", sql), ("0020_b.toml", toml), C]);
         assert_eq!(prefix_with_attempt(&history, &fixed).unwrap(), (3, None));
     }
 
