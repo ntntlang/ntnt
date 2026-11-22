@@ -176,7 +176,9 @@ unchanged, and secret values, row values and file contents are never shown.
   blamed on a statement. The parser gate names the statement and why it
   stopped: a syntax error near a token, the 4,096-token limit, an authored
   PRAGMA or an unsupported statement. `DB_BUSY` says that another connection
-  holds the lock and that nothing was committed (#424, #425).
+  holds the lock and that the migration it stopped committed nothing. Earlier
+  migrations in the same run may have committed; rerunning the same plan
+  skips them (#424, #425).
 
 ## Runtime errors in imported modules
 
