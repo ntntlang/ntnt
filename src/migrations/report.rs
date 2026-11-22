@@ -367,7 +367,7 @@ fn divergent_checkpoint(
                 " {name} is now at position {}: {dir}/ holds {more} more migration(s) numbered below {id} than the checkpoint covers.",
                 index + 1,
             ));
-            let advice = format!("Compare {dir}/ with the release that was adopted. Keep the {count} migrations the checkpoint covers, through {name}, under the names and with the exact bytes they were adopted with. Rename each migration numbered below {id} that was added after the adoption to an unused ID above {last}, and its .toml sidecar, where it has one, to the same new stem, if no other target has applied it yet; never rename or renumber a migration that has been adopted or applied anywhere.");
+            let advice = format!("Compare {dir}/ with the release that was adopted. Keep the {count} migrations the checkpoint covers, through {name}, under the names and with the exact bytes they were adopted with. Rename each migration numbered below {id} that was added after the adoption to an unused ID above {last}, and its .toml sidecar, where it has one, to the same new stem, if no target has applied or adopted it yet; never rename or renumber a migration that has been adopted or applied anywhere.");
             history_refusal("DB_HISTORY_DIVERGENT", name, message, advice)
         }
         (None, _) => {
