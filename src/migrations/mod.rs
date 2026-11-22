@@ -412,7 +412,17 @@ fn unwritable_output(
             format!("it cannot be created ({error})"),
             "Pass --out a new file in a directory this user can write.".to_owned(),
         ),
-        OutputCause::Write(error) => (
+        OutputCause::Write {
+            error,
+            removed: true,
+        } => (
+            format!("writing it failed ({error}); the incomplete file was removed"),
+            format!("Fix the cause (such as a full disk), then rerun with --out {shown}."),
+        ),
+        OutputCause::Write {
+            error,
+            removed: false,
+        } => (
             format!("writing it failed ({error}); the new file may be incomplete"),
             format!("Remove the incomplete {shown}, fix the cause (such as a full disk), then rerun with --out."),
         ),
@@ -432,7 +442,12 @@ enum OutputCause {
     /// This path, on the way to `--out`, is not a directory.
     NotDirectory(std::path::PathBuf),
     Create(std::io::Error),
-    Write(std::io::Error),
+    /// Writing the file this run created failed; `removed` when that file
+    /// is gone again.
+    Write {
+        error: std::io::Error,
+        removed: bool,
+    },
 }
 /// Why the directory of `--out` `path` cannot hold it, when that is known
 /// before the file is created: it does not exist, or a file is on its path,
@@ -482,14 +497,13 @@ fn check_output(path: &std::path::Path, command: &str, suggestion: Option<&str>)
 
 /// Save a bounded report or compact plan to a new file without replacing existing data.
 /// Artifact size is checked against the reader limit before creation. An I/O failure
-/// returns an error and may leave a partial newly created file, never a success verdict.
+/// returns an error, never a success verdict, and removes the file this run created.
 fn save_report(
     path: &std::path::Path,
     command: &str,
     report: &serde_json::Value,
     suggestion: Option<&str>,
 ) -> Result<()> {
-    use std::io::Write;
     // Save the plan descriptor, not duplicated display catalogs and source
     // summaries. stdout still contains the complete observation report.
     let artifact = if command == "plan" && !report["plan"].is_null() {
@@ -523,16 +537,33 @@ fn save_report(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path).map_err(|error| {
+    let file = options.open(path).map_err(|error| {
         failed(match error.kind() {
             std::io::ErrorKind::AlreadyExists => OutputCause::Exists,
             _ => directory_problem(path).unwrap_or(OutputCause::Create(error)),
         })
     })?;
-    file.write_all(&bytes)
-        .map_err(|error| failed(OutputCause::Write(error)))?;
-    file.sync_all()
-        .map_err(|error| failed(OutputCause::Write(error)))
+    fill_new_file(path, file, &bytes, std::fs::File::sync_all)
+        .map_err(|(error, removed)| failed(OutputCause::Write { error, removed }))
+}
+/// Write `bytes` to `file`, which this run created at `path`, and make them
+/// durable with `sync`. If either fails, the file is closed and removed, so a
+/// rerun can use the path (#425); the error comes back with whether the
+/// removal worked.
+fn fill_new_file<F: std::io::Write>(
+    path: &std::path::Path,
+    mut file: F,
+    bytes: &[u8],
+    sync: impl FnOnce(&F) -> std::io::Result<()>,
+) -> std::result::Result<(), (std::io::Error, bool)> {
+    let written = file.write_all(bytes).and_then(|()| sync(&file));
+    match written {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            drop(file);
+            Err((error, std::fs::remove_file(path).is_ok()))
+        }
+    }
 }
 
 /// One-line human summary of a PostgreSQL session's transport.
@@ -1065,6 +1096,72 @@ mod tests {
         let error = super::save_report(&path, "plan", &report, None).unwrap_err();
         assert_eq!(error.code, "DB_OUTPUT_LIMIT");
         assert!(!path.exists());
+    }
+
+    /// CodeRabbit on #445 (mod.rs): an output file this run created but could
+    /// not write or sync is removed, and the write's own error is kept. The
+    /// refusal says so, and its advice, a rerun with the same --out, saves.
+    #[test]
+    fn an_output_that_cannot_be_written_is_removed() {
+        use std::io::Write;
+        /// Takes `left` more bytes, then fails as a full disk does.
+        struct Full {
+            file: std::fs::File,
+            left: usize,
+        }
+        impl Write for Full {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.left == 0 {
+                    return Err(std::io::ErrorKind::StorageFull.into());
+                }
+                let taken = buf.len().min(self.left);
+                self.left -= taken;
+                self.file.write(&buf[..taken])
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.file.flush()
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        let create = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap()
+        };
+        let bytes = br#"{"outcome":"pass"}"#;
+        // A write that fails partway, after part of the report reached the file.
+        let full = Full {
+            file: create(),
+            left: 4,
+        };
+        let (error, removed) = super::fill_new_file(&path, full, bytes, |_| Ok(())).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert!(removed && !path.exists(), "{removed}");
+        // A sync that fails after every byte was written.
+        let failed_sync = |_: &std::fs::File| Err(std::io::Error::other("sync failed"));
+        let (error, removed) =
+            super::fill_new_file(&path, create(), bytes, failed_sync).unwrap_err();
+        assert_eq!(error.to_string(), "sync failed");
+        assert!(removed && !path.exists(), "{removed}");
+        let cause = super::OutputCause::Write { error, removed };
+        let d = super::unwritable_output(&path, "status", cause, None);
+        let shown = super::inventory::shown_os(path.as_os_str());
+        assert_eq!(
+            d.message,
+            format!("Cannot save the report to {shown}: writing it failed (sync failed); the incomplete file was removed.")
+        );
+        assert_eq!(
+            d.next_action,
+            format!("Fix the cause (such as a full disk), then rerun with --out {shown}.")
+        );
+        let report = serde_json::json!({"format_version": 1, "outcome": "pass"});
+        super::save_report(&path, "status", &report, None).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, report);
     }
 
     /// Hang guard for waits in these tests; only a bug or a hang reaches it.
