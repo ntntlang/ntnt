@@ -401,8 +401,11 @@ fn unwritable_output(
             format!("its directory {} does not exist", directory()),
             format!("Create the directory {} first, or pass --out a new file in an existing directory.", directory()),
         ),
-        OutputCause::NotDirectory => (
-            format!("{} is not a directory", directory()),
+        OutputCause::NotDirectory(file) => (
+            format!(
+                "{} is not a directory",
+                inventory::shown_os(file.as_os_str())
+            ),
             "Pass --out a new file in an existing directory.".to_owned(),
         ),
         OutputCause::Create(error) => (
@@ -426,42 +429,54 @@ fn unwritable_output(
 enum OutputCause {
     Exists,
     NoDirectory,
-    NotDirectory,
+    /// This path, on the way to `--out`, is not a directory.
+    NotDirectory(std::path::PathBuf),
     Create(std::io::Error),
     Write(std::io::Error),
 }
-/// Refuse an `--out` that cannot be created, before any work runs (#425):
-/// one that exists, or whose directory does not. Anything else is found when
-/// the file is created.
-fn check_output(path: &std::path::Path, command: &str, suggestion: Option<&str>) -> Result<()> {
-    if std::fs::symlink_metadata(path).is_ok() {
-        return Err(unwritable_output(
-            path,
-            command,
-            OutputCause::Exists,
-            suggestion,
-        ));
-    }
+/// Why the directory of `--out` `path` cannot hold it, when that is known
+/// before the file is created: it does not exist, or a file is on its path,
+/// as in `report.json/sub/result.json` with report.json a regular file.
+fn directory_problem(path: &std::path::Path) -> Option<OutputCause> {
     let directory = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(std::path::Path::new("."));
-    match std::fs::metadata(directory) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(unwritable_output(
-            path,
-            command,
-            OutputCause::NotDirectory,
-            suggestion,
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(unwritable_output(
-            path,
-            command,
-            OutputCause::NoDirectory,
-            suggestion,
-        )),
+    let error = match std::fs::metadata(directory) {
+        Ok(meta) if meta.is_dir() => return None,
+        Ok(_) => return Some(OutputCause::NotDirectory(directory.to_path_buf())),
+        Err(error) => error,
+    };
+    // Unix reports a file on the path as NotADirectory and Windows as
+    // NotFound; the nearest ancestor that exists tells which it is.
+    let nearest = directory
+        .ancestors()
+        .skip(1)
+        .find_map(|ancestor| Some((ancestor, std::fs::metadata(ancestor).ok()?)));
+    match (nearest, error.kind()) {
+        (Some((file, meta)), _) if !meta.is_dir() => {
+            Some(OutputCause::NotDirectory(file.to_path_buf()))
+        }
+        (_, std::io::ErrorKind::NotADirectory) => {
+            Some(OutputCause::NotDirectory(directory.to_path_buf()))
+        }
+        (_, std::io::ErrorKind::NotFound) => Some(OutputCause::NoDirectory),
         // Found again, with its cause, when the file is created.
-        Err(_) => Ok(()),
+        _ => None,
+    }
+}
+/// Refuse an `--out` that cannot be created, before any work runs (#425):
+/// one that exists, whose directory does not, or whose path runs through a
+/// file. Anything else is found when the file is created.
+fn check_output(path: &std::path::Path, command: &str, suggestion: Option<&str>) -> Result<()> {
+    let cause = if std::fs::symlink_metadata(path).is_ok() {
+        Some(OutputCause::Exists)
+    } else {
+        directory_problem(path)
+    };
+    match cause {
+        Some(cause) => Err(unwritable_output(path, command, cause, suggestion)),
+        None => Ok(()),
     }
 }
 
@@ -511,8 +526,7 @@ fn save_report(
     let mut file = options.open(path).map_err(|error| {
         failed(match error.kind() {
             std::io::ErrorKind::AlreadyExists => OutputCause::Exists,
-            std::io::ErrorKind::NotFound => OutputCause::NoDirectory,
-            _ => OutputCause::Create(error),
+            _ => directory_problem(path).unwrap_or(OutputCause::Create(error)),
         })
     })?;
     file.write_all(&bytes)

@@ -1516,6 +1516,56 @@ fn a_plan_whose_save_failed_prints_no_digest() {
     assert!(!f.root.path().join("big.json").exists());
 }
 
+/// CodeRabbit on #445 (mod.rs): an --out whose path runs through a regular
+/// file (`review.json/sub/result.json`, review.json being the saved plan) is
+/// refused before migrate runs anything, naming that file, and the target is
+/// unchanged. Following the advice, a new file in an existing directory, the
+/// same plan migrates and its report is saved.
+#[test]
+fn an_out_through_a_regular_file_is_refused_before_migrate_runs() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let plan = f.plan("review.json");
+    let digest = plan["plan_digest"].as_str().unwrap();
+    let migrate = |out: &str| {
+        let output = f
+            .process("migrate")
+            .args(["--plan", "review.json", "--out", out])
+            .env("DB_APPROVAL", digest)
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    let r = migrate("review.json/sub/result.json");
+    assert_eq!(r["outcome"], "fail", "{r}");
+    assert_eq!(r["diagnostics"].as_array().unwrap().len(), 1, "{r}");
+    let d = &r["diagnostics"][0];
+    assert_eq!(d["code"], "DB_OUTPUT", "{r}");
+    assert_eq!(
+        d["message"],
+        "Cannot save the report to review.json/sub/result.json: review.json is not a directory.",
+        "{d}"
+    );
+    assert_eq!(
+        d["next_action"], "Pass --out a new file in an existing directory.",
+        "{d}"
+    );
+    // Nothing ran: the target has no table and no ledger.
+    let objects: i64 = f
+        .target()
+        .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(objects, 0, "{r}");
+    let applied = migrate("result.json");
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(applied["progress"][0]["state"], "committed", "{applied}");
+    assert!(f.root.path().join("result.json").is_file());
+}
+
 /// #413: a scratch that is not empty keeps its journal mode and is reported as
 /// not empty; nothing in it is changed.
 #[test]
