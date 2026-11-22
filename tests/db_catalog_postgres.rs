@@ -585,6 +585,14 @@ fn partial_catalog_coverage_and_nonempty_unadopted_scope_are_not_passes() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!("view:slow")));
+    // The diagnostic itself names the uncovered target objects.
+    let coverage = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_COVERAGE_INCOMPLETE")
+        .unwrap();
+    assert_eq!(coverage["objects"], r["catalog"]["uncovered"], "{r}");
     // A plain view is compared by definition: unexpected, never "unknown".
     f.target()
         .batch_execute("DROP MATERIALIZED VIEW app.slow; CREATE VIEW app.slow AS SELECT 1 AS sleeper FROM pg_sleep(30)")

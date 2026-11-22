@@ -34,13 +34,18 @@ pub(super) struct Identity {
 }
 
 fn sql_error(error: rusqlite::Error) -> Diagnostic {
-    if error
-        .sqlite_error()
-        .is_some_and(|e| e.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK)
-    {
+    // An error that points at a token of the input SQL carries its SQLite code
+    // separately from an ordinary failure; classify both by that code.
+    let sqlite = match &error {
+        rusqlite::Error::SqliteFailure(error, _) | rusqlite::Error::SqlInputError { error, .. } => {
+            Some(*error)
+        }
+        _ => None,
+    };
+    if sqlite.is_some_and(|e| e.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK) {
         return Diagnostic::new("DB_SQLITE_RECOVERY_REQUIRED", "SQLite requires rollback-journal recovery that read-only inspection cannot perform. A writer may still be active; details suppressed.");
     }
-    let code = match error.sqlite_error_code() {
+    let code = match sqlite.map(|e| e.code) {
         Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => "DB_BUSY",
         Some(rusqlite::ErrorCode::OperationInterrupted) => "DB_TIMEOUT",
         Some(rusqlite::ErrorCode::AuthorizationForStatementDenied) => "DB_SQL_UNSUPPORTED",
@@ -50,7 +55,7 @@ fn sql_error(error: rusqlite::Error) -> Diagnostic {
         code,
         &format!(
             "SQLite operation failed (code {}). Details suppressed.",
-            error.sqlite_error().map(|e| e.extended_code).unwrap_or(-1)
+            sqlite.map(|e| e.extended_code).unwrap_or(-1)
         ),
     )
 }
@@ -111,7 +116,21 @@ fn authorize(
             | "upper"
             | "trim"
             | "abs"
-            | "typeof" => write,
+            | "typeof"
+            // Date and time functions: a column DEFAULT stores the expression as
+            // text, so `CURRENT_TIMESTAMP` or `datetime('now')` leaves the catalog
+            // deterministic; SQLite itself refuses them where determinism is
+            // required (CHECK, generated columns, index expressions and predicates).
+            | "date"
+            | "time"
+            | "datetime"
+            | "julianday"
+            | "unixepoch"
+            | "strftime"
+            | "timediff"
+            | "current_date"
+            | "current_time"
+            | "current_timestamp" => write,
             _ => false,
         },
         CreateTable { table_name } => {
@@ -195,23 +214,72 @@ fn authorize(
         Authorization::Deny
     }
 }
+/// What an authored statement was refused, for its diagnostic. Names only
+/// identifiers from the migration itself: never a literal, a PRAGMA value or an
+/// ATTACH filename.
+fn denial(action: &AuthAction<'_>) -> String {
+    use AuthAction::*;
+    match action {
+        Function { function_name } => format!("SQLite function `{function_name}`"),
+        Read { table_name, .. }
+        | Insert { table_name }
+        | Update { table_name, .. }
+        | Delete { table_name }
+        | CreateTable { table_name }
+        | DropTable { table_name }
+        | AlterTable { table_name, .. } => format!("table `{table_name}`"),
+        CreateView { view_name } | DropView { view_name } => format!("view `{view_name}`"),
+        CreateIndex { index_name, .. } | DropIndex { index_name, .. } | Reindex { index_name } => {
+            format!("index `{index_name}`")
+        }
+        CreateTrigger { trigger_name, .. } | DropTrigger { trigger_name, .. } => {
+            format!("trigger `{trigger_name}`")
+        }
+        Pragma { pragma_name, .. } => format!("PRAGMA {pragma_name}"),
+        Transaction { .. } | Savepoint { .. } => "transaction control".into(),
+        Attach { .. } | Detach { .. } => "ATTACH/DETACH".into(),
+        CreateVtable { .. } | DropVtable { .. } => "a virtual table".into(),
+        CreateTempIndex { .. }
+        | CreateTempTable { .. }
+        | CreateTempTrigger { .. }
+        | CreateTempView { .. }
+        | DropTempIndex { .. }
+        | DropTempTable { .. }
+        | DropTempTrigger { .. }
+        | DropTempView { .. } => "a temporary object".into(),
+        Analyze { .. } => "ANALYZE".into(),
+        _ => "an operation".into(),
+    }
+}
 type AuthScope = Option<(Policy, std::collections::HashSet<String>)>;
 
 /// One native authorizer is installed per connection (rusqlite requires
 /// `&mut Connection` to change it, which cannot coexist with a live `Batch`).
 /// It reads a shared scope: `None` admits adapter-owned SQL only while no
 /// authored program is being compiled; `Some` applies the authored policy.
-/// A poisoned scope fails closed for every statement.
+/// A poisoned scope fails closed for every statement. The first refusal under
+/// an authored scope is kept for that statement's diagnostic.
 #[derive(Clone, Default)]
-struct Authorizer(Arc<Mutex<AuthScope>>);
+struct Authorizer {
+    scope: Arc<Mutex<AuthScope>>,
+    denied: Arc<Mutex<Option<String>>>,
+}
 impl Authorizer {
     fn install(conn: &mut Connection) -> Result<Self> {
         let authorizer = Self::default();
-        let scope = authorizer.0.clone();
+        let (scope, denied) = (authorizer.scope.clone(), authorizer.denied.clone());
         conn.authorizer(Some(move |context: AuthContext<'_>| match scope.lock() {
             Ok(mut scope) => match scope.as_mut() {
                 None => Authorization::Allow,
-                Some((policy, tables)) => authorize(context, *policy, tables),
+                Some((policy, tables)) => {
+                    let decision = authorize(context, *policy, tables);
+                    if matches!(decision, Authorization::Deny) {
+                        if let Ok(mut denied) = denied.lock() {
+                            denied.get_or_insert_with(|| denial(&context.action));
+                        }
+                    }
+                    decision
+                }
             },
             Err(_) => Authorization::Deny,
         }))
@@ -219,7 +287,7 @@ impl Authorizer {
         Ok(authorizer)
     }
     fn set(&self, scope: AuthScope) -> Result<()> {
-        *self.0.lock().map_err(|_| {
+        *self.scope.lock().map_err(|_| {
             Diagnostic::new("DB_RUNTIME", "SQLite authorizer state is unavailable.")
         })? = scope;
         Ok(())
@@ -229,8 +297,15 @@ impl Authorizer {
     fn activate(&self, conn: &Connection, policy: Policy) -> Result<AuthGuard<'_>> {
         self.set(None)?;
         let tables = known_tables(conn)?;
+        if let Ok(mut denied) = self.denied.lock() {
+            *denied = None;
+        }
         self.set(Some((policy, tables)))?;
         Ok(AuthGuard(self))
+    }
+    /// What the authored statement compiled since the last activation was refused.
+    fn take_denial(&self) -> Option<String> {
+        self.denied.lock().ok().and_then(|mut denied| denied.take())
     }
 }
 struct AuthGuard<'a>(&'a Authorizer);
@@ -274,8 +349,10 @@ fn known_tables(conn: &Connection) -> Result<std::collections::HashSet<String>> 
 fn execute_script(state: &State, sql: &str) -> Result<()> {
     let conn = &state.conn;
     let mut batch = rusqlite::Batch::new(conn, sql);
+    let mut statement = 0usize;
     loop {
         let active = state.auth.activate(conn, Policy::Migration)?;
+        statement += 1;
         let result = (|| {
             let Some(mut statement) = batch.next().map_err(sql_error)? else {
                 return Ok(false);
@@ -291,8 +368,25 @@ fn execute_script(state: &State, sql: &str) -> Result<()> {
             Ok(true)
         })();
         drop(active);
-        if !result? {
-            return Ok(());
+        match result {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            // SQLite reports a refused function as a generic error, so the
+            // authorizer's record of what it refused decides the diagnostic.
+            Err(mut error) => {
+                return Err(match state.auth.take_denial() {
+                    Some(refused) => Diagnostic::new(
+                        "DB_SQL_UNSUPPORTED",
+                        &format!(
+                        "Statement {statement} uses {refused}, which SQLite migrations cannot use."
+                    ),
+                    ),
+                    None => {
+                        error.message = format!("Statement {statement}: {}", error.message);
+                        error
+                    }
+                })
+            }
         }
     }
 }
@@ -476,16 +570,24 @@ impl State {
                         .all(|fk| fk[2].as_str().is_some_and(|n| !reserved(n) && !internal(n)));
                 }
                 "index" => {
+                    // A key column is a table column (cid >= 0), the rowid
+                    // (-1) or an expression (-2). Expressions and a partial
+                    // index's WHERE predicate are in the definition hash.
+                    // SQLite resolves them when it loads the schema, without
+                    // the authorizer, so the function allowlist applies when
+                    // a migration's CREATE INDEX compiles; a target index
+                    // that differs from the replayed one is drift. The
+                    // table's DML programs below still compile them.
                     let columns=rows(&self.conn,"SELECT seqno,cid,name,\"desc\",coll,key FROM pragma_index_xinfo(?1,'main') ORDER BY seqno",&[&name])?;
                     supported &= columns.iter().all(|r| {
-                        r[1].as_i64().is_some_and(|v| v >= -1)
+                        r[1].as_i64().is_some_and(|v| v >= -2)
                             && r[4]
                                 .as_str()
                                 .is_none_or(|v| matches!(v, "BINARY" | "NOCASE" | "RTRIM"))
                     });
                     item["columns"] = json!(columns);
                     item["properties"]=json!(rows(&self.conn,"SELECT \"unique\",origin,partial FROM pragma_index_list(?1,'main') WHERE name=?2",&[&table,&name])?);
-                    supported &= item["properties"][0][2] == 0;
+                    supported &= item["properties"].as_array().is_some_and(|p| p.len() == 1);
                 }
                 "view" => programs.push((
                     key.clone(),
@@ -603,6 +705,38 @@ impl State {
     }
 }
 
+/// Each engine setting that differs between the target and the scratch, with
+/// both values, such as `page_size: target 4096, scratch 1024`.
+fn differences(target: &Identity, scratch: &Identity) -> String {
+    let shown = |value: &Value| {
+        value
+            .as_str()
+            .map_or_else(|| value.to_string(), str::to_owned)
+    };
+    let mut differences = Vec::new();
+    if target.version != scratch.version {
+        differences.push(format!(
+            "SQLite version: target {}, scratch {}",
+            target.version, scratch.version
+        ));
+    }
+    let keys: std::collections::BTreeSet<&String> = [&target.settings, &scratch.settings]
+        .into_iter()
+        .filter_map(Value::as_object)
+        .flat_map(|settings| settings.keys())
+        .collect();
+    for key in keys {
+        let (a, b) = (
+            &target.settings[key.as_str()],
+            &scratch.settings[key.as_str()],
+        );
+        if a != b {
+            differences.push(format!("{key}: target {}, scratch {}", shown(a), shown(b)));
+        }
+    }
+    differences.join("; ")
+}
+
 /// A narrow, explicit mode for rebuilding one existing table. It may change that
 /// table's column/constraint definition, but not silently retire other tables or
 /// named dependent objects. Row counts are a guard, not proof of business meaning.
@@ -638,7 +772,8 @@ impl RebuildGuard {
             return Err(Diagnostic::new(
                 "DB_COVERAGE_INCOMPLETE",
                 "SQLite rebuild requires complete supported catalog coverage.",
-            ));
+            )
+            .with_objects(&catalog.uncovered));
         }
         let counts = Self::counts(state)?;
         let selected = counts
@@ -788,9 +923,16 @@ impl Sqlite {
         })
         .await
     }
+    /// Roll back the open transaction. Without one (a scratch refused before
+    /// `BEGIN IMMEDIATE`) there is nothing to undo, which is not a failure.
     pub async fn rollback(&self) -> Result<()> {
-        self.run(|s| s.conn.execute_batch("ROLLBACK").map_err(sql_error))
-            .await
+        self.run(|s| {
+            if s.conn.is_autocommit() {
+                return Ok(());
+            }
+            s.conn.execute_batch("ROLLBACK").map_err(sql_error)
+        })
+        .await
     }
     pub async fn commit(&self) -> Result<()> {
         self.run(|s| s.conn.execute_batch("COMMIT").map_err(sql_error))
@@ -805,14 +947,49 @@ impl Sqlite {
     }
     pub async fn prepare_scratch(&self, target: &Identity) -> Result<Identity> {
         let target = target.clone();
-        self.run(move|s|{
-            let identity=s.identity()?;
-            if identity.file_id==target.file_id {return Err(Diagnostic::new("DB_SCRATCH_COLLISION","Scratch and target are the same physical file."));}
-            if identity.version!=target.version||identity.settings!=target.settings {return Err(Diagnostic::new("DB_SCRATCH_MISMATCH","SQLite scratch engine/settings do not match the deployment file."));}
+        self.run(move |s| {
+            let not_empty = || {
+                Diagnostic::new(
+                    "DB_SCRATCH_NOT_EMPTY",
+                    "SQLite scratch must be an explicitly disposable empty file; it is never reset.",
+                )
+            };
+            let empty = |s: &State| Ok::<_, Diagnostic>(integer(&s.conn, "SELECT count(*) FROM main.sqlite_schema")? == 0);
+            let mut identity = s.identity()?;
+            if identity.file_id == target.file_id {
+                return Err(Diagnostic::new("DB_SCRATCH_COLLISION", "Scratch and target are the same physical file."));
+            }
+            if !empty(s)? {
+                return Err(not_empty());
+            }
+            // `std/db/sqlite` connect() puts every application database in WAL
+            // mode, and a scratch made with `touch` is not. The scratch is
+            // disposable and empty, so it takes the target's journal mode.
+            let mode = target.settings["journal_mode"].as_str();
+            if identity.settings["journal_mode"].as_str() != mode {
+                if let Some(mode @ ("delete" | "wal" | "truncate" | "persist")) = mode {
+                    s.conn
+                        .query_row(&format!("PRAGMA main.journal_mode={mode}"), [], |r| r.get::<_, String>(0))
+                        .map_err(sql_error)?;
+                    identity = s.identity()?;
+                }
+            }
+            if identity.version != target.version || identity.settings != target.settings {
+                return Err(Diagnostic::new(
+                    "DB_SCRATCH_MISMATCH",
+                    &format!(
+                        "SQLite scratch settings differ from the deployment file: {}.",
+                        differences(&target, &identity)
+                    ),
+                ));
+            }
             s.conn.execute_batch("BEGIN IMMEDIATE").map_err(sql_error)?;
-            if integer(&s.conn,"SELECT count(*) FROM main.sqlite_schema")?!=0 {return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","SQLite scratch must be an explicitly disposable empty file; it is never reset."));}
+            if !empty(s)? {
+                return Err(not_empty());
+            }
             Ok(identity)
-        }).await
+        })
+        .await
     }
     pub async fn execute_captured(&self, migration: &Migration) -> Result<()> {
         let source = migration.name.clone();

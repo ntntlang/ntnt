@@ -6,6 +6,23 @@ use super::model::{Catalog, History};
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
+/// A scratch replay's result and its rollback's, combined: a failed replay
+/// stays the reported cause, and a cleanup that also failed comes back
+/// separately to be reported after it, never instead of it.
+fn replay_outcome(work: Result<()>, cleanup: Result<()>) -> (Result<()>, Option<Diagnostic>) {
+    match (work, cleanup) {
+        (work, Ok(())) => (work, None),
+        (Ok(()), Err(cleanup)) => (Err(cleanup), None),
+        (Err(cause), Err(cleanup)) => (Err(cause), Some(cleanup)),
+    }
+}
+/// Add a scratch replay's failures to `report`: the replay's own error first,
+/// then a cleanup that also failed.
+fn record_replay(report: &mut Value, replay: Result<()>, cleanup_failure: Option<Diagnostic>) {
+    for d in replay.err().into_iter().chain(cleanup_failure) {
+        diagnostic(report, d);
+    }
+}
 fn diagnostic(report: &mut Value, d: Diagnostic) {
     report["diagnostics"].as_array_mut().unwrap().push(json!(d));
 }
@@ -279,12 +296,13 @@ async fn inspect_observed(
         return Ok(report);
     }
     if !catalog.uncovered.is_empty() {
-        diagnostic(&mut report,Diagnostic::new("DB_COVERAGE_INCOMPLETE","Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted."));
+        diagnostic(&mut report,Diagnostic::new("DB_COVERAGE_INCOMPLETE","Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted.").with_objects(&catalog.uncovered));
     }
     let mut expected = None;
     let mut candidate = None;
     let mut fingerprints = Vec::new();
     if let Some(scratch_config) = &inputs.config.scratch {
+        let mut cleanup_failure = None;
         let replay = async {
             let secret = crate::stdlib::secrets::require_from_manifest(
                 &scratch_config.endpoint.connection_secret,
@@ -341,10 +359,15 @@ async fn inspect_observed(
                         .catalog(&inputs.config.schema, &scratch_config.endpoint.role)
                         .await?;
                     if !step.uncovered.is_empty() {
-                        return Err(Diagnostic::new(
+                        // The target's catalog.uncovered cannot name these:
+                        // they exist only in the replayed intermediate catalog.
+                        let mut d = Diagnostic::new(
                             "DB_COVERAGE_INCOMPLETE",
                             "Intermediate catalog exceeds execution coverage.",
-                        ));
+                        )
+                        .with_objects(&step.uncovered);
+                        d.source = Some(migration.name.clone());
+                        return Err(d);
                     }
                     fingerprints.push(json_digest(&step));
                     if index + 1 == reference {
@@ -367,20 +390,16 @@ async fn inspect_observed(
             .await;
             let cleanup = scratch.rollback().await;
             report["scratch"]["cleanup"] = json!(if cleanup.is_ok() { "pass" } else { "unknown" });
-            match (work, cleanup) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Err(e), Ok(())) => Err(e),
-                (_, Err(e)) => {
-                    expected = None;
-                    candidate = None;
-                    Err(e)
-                }
+            if cleanup.is_err() {
+                expected = None;
+                candidate = None;
             }
+            let (outcome, failed_cleanup) = replay_outcome(work, cleanup);
+            cleanup_failure = failed_cleanup;
+            outcome
         }
         .await;
-        if let Err(d) = replay {
-            diagnostic(&mut report, d);
-        }
+        record_replay(&mut report, replay, cleanup_failure);
     } else {
         diagnostic(&mut report,Diagnostic::new("DB_REFERENCE_UNAVAILABLE","No explicitly disposable matching scratch database/file is configured; expected state is unverified."));
     }
@@ -446,4 +465,50 @@ async fn inspect_observed(
         }
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failure(code: &str) -> Diagnostic {
+        Diagnostic::new(code, "test")
+    }
+
+    #[test]
+    fn a_failed_cleanup_never_replaces_the_replay_failure() {
+        let (outcome, cleanup) =
+            replay_outcome(Err(failure("DB_TIMEOUT")), Err(failure("DB_CANCELLED")));
+        assert_eq!(outcome.unwrap_err().code, "DB_TIMEOUT");
+        assert_eq!(cleanup.unwrap().code, "DB_CANCELLED");
+        let (outcome, cleanup) = replay_outcome(Ok(()), Err(failure("DB_SQLITE")));
+        assert_eq!(outcome.unwrap_err().code, "DB_SQLITE");
+        assert!(cleanup.is_none());
+        let (outcome, cleanup) = replay_outcome(Err(failure("DB_SCRATCH_MISMATCH")), Ok(()));
+        assert_eq!(outcome.unwrap_err().code, "DB_SCRATCH_MISMATCH");
+        assert!(cleanup.is_none());
+        let (outcome, cleanup) = replay_outcome(Ok(()), Ok(()));
+        assert!(outcome.is_ok() && cleanup.is_none());
+    }
+
+    #[test]
+    fn a_failed_cleanup_is_reported_after_the_replay_failure() {
+        let codes = |report: &Value| -> Vec<String> {
+            report["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["code"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let mut report = json!({ "diagnostics": [] });
+        let (outcome, cleanup) =
+            replay_outcome(Err(failure("DB_TIMEOUT")), Err(failure("DB_CANCELLED")));
+        record_replay(&mut report, outcome, cleanup);
+        assert_eq!(codes(&report), ["DB_TIMEOUT", "DB_CANCELLED"]);
+        let mut report = json!({ "diagnostics": [] });
+        let (outcome, cleanup) = replay_outcome(Ok(()), Ok(()));
+        record_replay(&mut report, outcome, cleanup);
+        assert!(codes(&report).is_empty());
+    }
 }

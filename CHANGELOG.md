@@ -1,8 +1,26 @@
 # Changelog
 
-## Unreleased
+## Unreleased (0.6.4)
 
-No changes recorded since 0.6.3.
+See [unreleased notes](docs/release-notes/unreleased.md).
+
+### Fixed
+
+- `ntnt db` (SQLite): migrations can use the date and time functions, so timestamp
+  defaults plan and migrate; a statement SQLite refuses names its number and the
+  function or table it used (#414).
+- `ntnt db` (SQLite): an empty scratch takes the target's journal mode, and a
+  scratch settings mismatch names each setting with both values (#413).
+- `ntnt db` (SQLite): partial and expression indexes plan, migrate and verify; a
+  changed predicate or expression is drift (#411).
+- `ntnt db`: `DB_COVERAGE_INCOMPLETE` names the uncovered objects (`objects`) and
+  the migration whose replay produced them (`source`) (#411).
+- `ntnt db new` holds the `ntnt.toml` lock while it numbers a migration, so
+  concurrent runs cannot take the same ID; a run that finds the lock held fails
+  with the new `DB_NEW_CONFLICT` and creates nothing (#388).
+- `ntnt run`: a runtime error raised in an imported module names that module's
+  file and line, shows its source, and lists the call sites that led there
+  (#412).
 
 ## 0.6.3
 
