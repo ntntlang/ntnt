@@ -5,6 +5,8 @@ use std::process::Command;
 
 pub struct Fixture {
     pub admin: Client,
+    /// The managed schema.
+    pub schema: String,
     pub root: tempfile::TempDir,
     pub target: String,
     pub scratch: String,
@@ -72,6 +74,7 @@ disposable = true
         }
         Self {
             admin,
+            schema: schema.to_owned(),
             root,
             target,
             scratch,

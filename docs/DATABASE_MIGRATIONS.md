@@ -856,15 +856,20 @@ the adoption again:
    "retire old migration writers" step that
    [Recognized legacy PostgreSQL history](#recognized-legacy-postgresql-history)
    asks for.
-2. PostgreSQL: move the table out of the managed schema. Its indexes, constraints
-   and owned sequences move with it, and its rows are kept:
+2. PostgreSQL: move the table out of the managed schema, to a schema that `ntnt db`
+   does not inspect. Its indexes, constraints and owned sequences move with it, and
+   its rows are kept:
 
    ```sql
    CREATE SCHEMA IF NOT EXISTS app_legacy;
    ALTER TABLE public.schema_migrations SET SCHEMA app_legacy;
    ```
 
-   Or archive its rows elsewhere, then `DROP TABLE public.schema_migrations;`.
+   `next_action` names `app_legacy`, or, when the managed schema or a schema the
+   history creates has that name, the first of `app_legacy_2`, `app_legacy_3` and so
+   on that none has: a table moved into the scope would still be found when the
+   adoption is planned again. Or archive its rows elsewhere, then
+   `DROP TABLE public.schema_migrations;`.
 3. SQLite: a database file has no other schema that `ntnt db` leaves alone, so copy
    the table to another file, compare the copy with it, and only then drop it. Open
    the target with `sqlite3 -bail`, followed by its path, in the directory where the

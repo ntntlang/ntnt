@@ -262,7 +262,9 @@ fn table(
 /// refused as drift because the target holds tables those migrations do not
 /// create, such as the application's previous migration ledger (#431). It
 /// names those tables, from the drift `differences` and never from rows, says
-/// how to retire a ledger on `engine` before planning again, and otherwise
+/// how to retire a ledger on `engine` before planning again (on PostgreSQL,
+/// to a schema that is neither the managed `schema` nor one of the
+/// `history_schemas`, so that planning no longer inspects it), and otherwise
 /// gives the `ordinary` advice. `None` when no such table differs. The refusal
 /// stays: an unexpected object is never adopted, moved or dropped. On SQLite
 /// the steps lose no data when followed as written: the shell stops at the
@@ -273,6 +275,7 @@ pub(super) fn retire_ledger_advice(
     ordinary: &str,
     engine: &str,
     schema: &str,
+    history_schemas: &[String],
     through_id: &str,
     differences: &Value,
 ) -> Option<String> {
@@ -319,7 +322,16 @@ pub(super) fn retire_ledger_advice(
         } else {
             ""
         };
-        format!("stop the old migration runner so it cannot recreate the table, then move the table to a schema of its own with `CREATE SCHEMA IF NOT EXISTS app_legacy; ALTER TABLE {qualified} SET SCHEMA app_legacy;`{placeholder} (or archive its rows and drop it), and plan the adoption again")
+        // app_legacy, unless the managed schema or one the history creates
+        // has that name: then the first of app_legacy_2, app_legacy_3 and so
+        // on that none has.
+        let mut legacy = "app_legacy".to_owned();
+        let mut suffix = 1;
+        while legacy == schema || history_schemas.contains(&legacy) {
+            suffix += 1;
+            legacy = format!("app_legacy_{suffix}");
+        }
+        format!("stop the old migration runner so it cannot recreate the table, then move the table to a schema of its own with `CREATE SCHEMA IF NOT EXISTS {legacy}; ALTER TABLE {qualified} SET SCHEMA {legacy};`{placeholder} (or archive its rows and drop it), and plan the adoption again")
     };
     let mut otherwise = ordinary.chars();
     let otherwise = otherwise
@@ -350,7 +362,7 @@ mod tests {
             unexpected("relation:schema_migrations_pkey", Some("i")),
         ]);
         assert_eq!(
-            retire_ledger_advice(ORDINARY, "postgresql", "public", "33", &differences).unwrap(),
+            retire_ledger_advice(ORDINARY, "postgresql", "public", &[], "33", &differences).unwrap(),
             "The target holds a table that the migrations through ID 33 do not create: public.schema_migrations. If it is the application's previous migration ledger, retire it as docs/DATABASE_MIGRATIONS.md#retiring-an-applications-previous-migration-ledger describes: stop the old migration runner so it cannot recreate the table, then move the table to a schema of its own with `CREATE SCHEMA IF NOT EXISTS app_legacy; ALTER TABLE public.schema_migrations SET SCHEMA app_legacy;` (or archive its rows and drop it), and plan the adoption again. Otherwise, review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state."
         );
     }
@@ -363,7 +375,7 @@ mod tests {
             unexpected("table:\"schema_migrations\"", None),
         ]);
         assert_eq!(
-            retire_ledger_advice(ORDINARY, "sqlite", "main", "1", &differences).unwrap(),
+            retire_ledger_advice(ORDINARY, "sqlite", "main", &[], "1", &differences).unwrap(),
             "The target holds a table that the migrations through ID 1 do not create: main.schema_migrations. If it is the application's previous migration ledger, retire it as docs/DATABASE_MIGRATIONS.md#retiring-an-applications-previous-migration-ledger describes: stop the old migration runner so it cannot recreate the table; open the target with `sqlite3 -bail` in the directory where legacy-ledger.sqlite should be written, so that the shell stops at the first error; check that `SELECT s.name FROM main.sqlite_schema AS s, pragma_foreign_key_list(s.name) AS f WHERE s.type = 'table' AND s.name <> 'schema_migrations' COLLATE NOCASE AND f.\"table\" = 'schema_migrations' COLLATE NOCASE;` lists no table, and if it lists any, remove their foreign keys into the ledger with a reviewed migration first, because dropping the ledger would delete or change their rows (never turn foreign-key enforcement off instead); copy the table with `ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations; SELECT (SELECT count(*) FROM legacy.schema_migrations) = (SELECT count(*) FROM main.schema_migrations) AND NOT EXISTS (SELECT * FROM main.schema_migrations EXCEPT SELECT * FROM legacy.schema_migrations);`, which must print 1; only then drop it with `DROP TABLE main.schema_migrations;`; then plan the adoption again. Otherwise, review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state."
         );
     }
@@ -380,7 +392,7 @@ mod tests {
             unexpected("relation:schema_migrations", Some("r")),
         ]);
         let advice =
-            retire_ledger_advice(ORDINARY, "postgresql", "user", "2", &differences).unwrap();
+            retire_ledger_advice(ORDINARY, "postgresql", "user", &[], "2", &differences).unwrap();
         assert!(
             advice.starts_with("The target holds tables that the migrations through ID 2 do not create: \"Odd.Sche\"\"ma\".x, audit.log, \"user\".\"SequelizeMeta\", \"user\".\"order\", \"user\".schema_migrations. If one of them is the application's previous migration ledger,"),
             "{advice}"
@@ -394,7 +406,8 @@ mod tests {
             unexpected("table:\"schema_migrations\"", None),
             unexpected("table:\"we\"\"ird\"", None),
         ]);
-        let advice = retire_ledger_advice(ORDINARY, "sqlite", "main", "2", &differences).unwrap();
+        let advice =
+            retire_ledger_advice(ORDINARY, "sqlite", "main", &[], "2", &differences).unwrap();
         assert!(
             advice.contains("do not create: main.\"order\", main.schema_migrations, main.\"we\"\"ird\". If one of them is"),
             "{advice}"
@@ -413,13 +426,42 @@ mod tests {
     #[test]
     fn a_sqlite_ledger_named_with_a_quote_is_written_as_sql_needs_it() {
         let differences = json!([unexpected("table:\"it's\"", None)]);
-        let advice = retire_ledger_advice(ORDINARY, "sqlite", "main", "1", &differences).unwrap();
+        let advice =
+            retire_ledger_advice(ORDINARY, "sqlite", "main", &[], "1", &differences).unwrap();
         for part in [
             "do not create: main.\"it's\".",
             "AND s.name <> 'it''s' COLLATE NOCASE AND f.\"table\" = 'it''s' COLLATE NOCASE;`",
             "`DROP TABLE main.\"it's\";`",
         ] {
             assert!(advice.contains(part), "{part:?} is not in {advice:?}");
+        }
+    }
+
+    /// The ledger moves to a schema outside the scope that planning inspects:
+    /// neither the managed schema nor one the history creates, or planning
+    /// again would still find it there.
+    #[test]
+    fn a_postgresql_ledger_moves_to_a_schema_outside_the_scope() {
+        let differences = json!([unexpected("relation:schema_migrations", Some("r"))]);
+        let created = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        for (schema, history, destination) in [
+            ("app", created(&[]), "app_legacy"),
+            ("app", created(&["audit"]), "app_legacy"),
+            ("app_legacy", created(&[]), "app_legacy_2"),
+            ("app", created(&["app_legacy"]), "app_legacy_2"),
+            (
+                "app_legacy",
+                created(&["app_legacy_2", "app_legacy_3"]),
+                "app_legacy_4",
+            ),
+        ] {
+            let advice =
+                retire_ledger_advice(ORDINARY, "postgresql", schema, &history, "1", &differences)
+                    .unwrap();
+            assert!(
+                advice.contains(&format!("`CREATE SCHEMA IF NOT EXISTS {destination}; ALTER TABLE {schema}.schema_migrations SET SCHEMA {destination};`")),
+                "{schema} {history:?}: {advice}"
+            );
         }
     }
 
@@ -456,7 +498,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                retire_ledger_advice(ORDINARY, engine, "app", "1", &differences),
+                retire_ledger_advice(ORDINARY, engine, "app", &[], "1", &differences),
                 None,
                 "{differences}"
             );

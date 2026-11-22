@@ -19,7 +19,7 @@ impl Fixture {
     }
     fn schema(&self) -> &str {
         match self {
-            Self::Postgres(_) => "app",
+            Self::Postgres(f) => &f.schema,
             Self::Sqlite(_) => "main",
         }
     }
@@ -1206,15 +1206,21 @@ fn adopt_an_app_after_retiring_its_own_ledger(f: Fixture) {
             let &[retire] = commands.as_slice() else {
                 panic!("one command in {advice:?}")
             };
+            // A schema outside the scope, which may itself be app_legacy.
+            let legacy = if s == "app_legacy" {
+                "app_legacy_2"
+            } else {
+                "app_legacy"
+            };
             assert_eq!(
                 retire,
                 format!(
-                    "CREATE SCHEMA IF NOT EXISTS app_legacy; ALTER TABLE {s}.schema_migrations SET SCHEMA app_legacy;"
+                    "CREATE SCHEMA IF NOT EXISTS {legacy}; ALTER TABLE {s}.schema_migrations SET SCHEMA {legacy};"
                 )
             );
             f.execute(retire);
             assert_eq!(
-                f.count("SELECT count(*) FROM app_legacy.schema_migrations"),
+                f.count(&format!("SELECT count(*) FROM {legacy}.schema_migrations")),
                 2
             );
         }
@@ -1314,6 +1320,15 @@ fn sqlite_adopts_an_app_after_retiring_its_own_ledger() {
 #[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
 fn postgres_adopts_an_app_after_retiring_its_own_ledger() {
     adopt_an_app_after_retiring_its_own_ledger(Fixture::pg())
+}
+/// With the managed schema itself named app_legacy, the advice moves the
+/// ledger to app_legacy_2, outside the scope, and the adoption plans.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_adopts_an_app_after_retiring_its_own_ledger_from_app_legacy() {
+    adopt_an_app_after_retiring_its_own_ledger(Fixture::Postgres(Box::new(
+        pg_fixture::Fixture::with_schema("app_legacy"),
+    )))
 }
 
 /// CodeRabbit 4656058159: the `sqlite3` shell runs the next statement after

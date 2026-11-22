@@ -837,6 +837,7 @@ async fn inspect_observed(
                 &drift.next_action,
                 &inputs.config.engine,
                 &inputs.config.schema,
+                &inputs.history_schemas,
                 &action.through_id,
                 &report["drift"]["differences"],
             )
