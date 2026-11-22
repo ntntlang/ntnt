@@ -1400,6 +1400,123 @@ fn approval_refusals_say_how_to_approve_the_plan() {
     assert_eq!(applied["outcome"], "pass", "{applied}");
 }
 
+/// CodeRabbit on #445 (execution.rs): an approval secret the provider cannot
+/// read is refused for that cause, not as a value that differs from the
+/// plan's digest, and nothing runs. Following each advice in turn (start the
+/// agent, let the deployment's scope read the secret, set it to the plan's
+/// digest), the same plan migrates. A value that differs keeps the digest
+/// advice and is never shown.
+#[cfg(unix)]
+#[test]
+fn approval_secrets_the_provider_cannot_read_are_refused_for_that_cause() {
+    use std::io::{BufRead, Write};
+    use std::sync::{Arc, Mutex};
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let plan = f.plan("review.json");
+    let digest = plan["plan_digest"].as_str().unwrap().to_owned();
+    // A short socket path without symlinks: macOS limits socket paths to
+    // about 104 bytes, and its /tmp is a link.
+    let sockets = tempfile::Builder::new()
+        .prefix("ntnt-sa")
+        .tempdir_in(std::path::Path::new("/tmp").canonicalize().unwrap())
+        .unwrap();
+    let endpoint = sockets.path().join("agent.sock");
+    let migrate = || {
+        let output = f
+            .process("migrate")
+            .args(["--plan", "review.json"])
+            .env("NTNT_SECRETS_PROVIDER", "unix-socket")
+            .env("NTNT_SECRETS_SOCKET_ENDPOINTS", &endpoint)
+            .env("NTNT_SECRETS_AUTHORIZATION_SCOPE", "deployment-a")
+            .env("NTNT_SECRETS_TIMEOUT_MS", "10000")
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    // A refusal saying `message`, whose advice starts with `advice`; nothing ran.
+    let refused = |r: &Value, message: &str, advice: &str| {
+        let d = diagnostic(r, "DB_APPROVAL_REQUIRED");
+        assert_eq!(d["message"], message, "{d}");
+        assert!(
+            d["next_action"].as_str().unwrap().starts_with(advice),
+            "{d}"
+        );
+        let objects: i64 = f
+            .target()
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(objects, 0, "{r}");
+    };
+    // No agent listens on the endpoint yet.
+    refused(
+        &migrate(),
+        "Approval secret DB_APPROVAL cannot be read: the secrets provider is unavailable. No target or ledger writes were attempted.",
+        "Check that the secrets agent is running and listening on NTNT_SECRETS_SOCKET_ENDPOINTS",
+    );
+    // The agent answers one lookup per connection from `values`, and denies
+    // access to the names in `denied`.
+    let text = |path: &std::path::Path| path.to_str().unwrap().to_owned();
+    let values = Arc::new(Mutex::new(std::collections::BTreeMap::from([
+        ("DB_TARGET".to_owned(), text(&f.target_path)),
+        ("DB_SCRATCH".to_owned(), text(&f.scratch_path)),
+        ("DB_APPROVAL".to_owned(), "ntnt445_other_digest".to_owned()),
+    ])));
+    let denied = Arc::new(Mutex::new(vec!["DB_APPROVAL".to_owned()]));
+    let listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+    let (agent_values, agent_denied) = (Arc::clone(&values), Arc::clone(&denied));
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut line = String::new();
+            if std::io::BufReader::new(&stream)
+                .read_line(&mut line)
+                .is_err()
+            {
+                continue;
+            }
+            let request: Value = serde_json::from_str(line.trim_end()).unwrap();
+            let name = request["name"].as_str().unwrap_or_default();
+            let mut response = serde_json::json!({"protocol": 1,
+                "request_id": request["request_id"], "scope": request["scope"]});
+            let value = agent_values.lock().unwrap().get(name).cloned();
+            if agent_denied.lock().unwrap().iter().any(|n| n == name) {
+                response["status"] = "access_denied".into();
+            } else if let Some(value) = value {
+                response["status"] = "found".into();
+                response["value"] = value.into();
+            } else {
+                response["status"] = "missing".into();
+            }
+            let _ = writeln!(stream, "{response}");
+        }
+    });
+    refused(
+        &migrate(),
+        "Approval secret DB_APPROVAL cannot be read: the secrets provider denied access to it. No target or ledger writes were attempted.",
+        "Allow this deployment's authorization scope (NTNT_SECRETS_AUTHORIZATION_SCOPE) to read DB_APPROVAL",
+    );
+    // Readable now, but holding another value: the digest advice stays.
+    denied.lock().unwrap().clear();
+    let r = migrate();
+    refused(
+        &r,
+        "Approval secret DB_APPROVAL (database app's approval_secret) does not hold this plan's plan_digest; migrate runs a plan only when it does. No target or ledger writes were attempted; provider details suppressed.",
+        &format!("Set DB_APPROVAL to this plan's plan_digest, {digest}, through the secrets provider"),
+    );
+    assert!(!r.to_string().contains("ntnt445_other_digest"), "{r}");
+    values
+        .lock()
+        .unwrap()
+        .insert("DB_APPROVAL".to_owned(), digest.clone());
+    let applied = migrate();
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
 /// #425 (cli-13): a database that declares no approval_secret, or one whose
 /// secret is not declared under [secrets], is told so, naming the database
 /// or the secret; following that advice gets the plan approved and run.

@@ -206,17 +206,21 @@ fn authorize(inputs: &CapturedInputs, saved: &Value) -> Result<()> {
             format!("Approval secret {name} is not declared under [secrets] in the manifest, so database {database}'s approval_secret cannot be resolved. No target or ledger writes were attempted."),
             format!("Add a {} table to the manifest (the name only, never its value). The manifest is part of the plan, so then plan, review and approve again: set {name} to the new plan's plan_digest through the secrets provider and run migrate with that plan.", super::secrets_table(name)),
         )),
-        // The provider cannot read any secret: say how to fix that.
-        Err(error @ (EnvProviderDisabled | UnsupportedProvider | ProviderConfiguration | InvalidDeclarations)) => {
+        // Unset, or a value that is not this plan's digest: say how to
+        // approve this plan.
+        Ok(_) | Err(UnsetInEnvironment | UnsetInProvider) => Err(refuse(
+            format!("Approval secret {name} (database {database}'s approval_secret) does not hold this plan's plan_digest; migrate runs a plan only when it does. No target or ledger writes were attempted; provider details suppressed."),
+            format!("Set {name} to this plan's plan_digest, {digest}, through the secrets provider (for local development with the env provider: export {name}={digest}), then rerun migrate with the same plan."),
+        )),
+        // The secret could not be read, so setting it again would not help:
+        // say why, as for a connection secret (the provider's configuration,
+        // availability or access, or a value that is not Unicode).
+        Err(error) => {
             let mut d = super::report::unresolved_secret("approval", name, &inputs.config.engine, error);
             d.code = "DB_APPROVAL_REQUIRED".into();
             d.message.push_str(" No target or ledger writes were attempted.");
             Err(d)
         }
-        _ => Err(refuse(
-            format!("Approval secret {name} (database {database}'s approval_secret) does not hold this plan's plan_digest; migrate runs a plan only when it does. No target or ledger writes were attempted; provider details suppressed."),
-            format!("Set {name} to this plan's plan_digest, {digest}, through the secrets provider (for local development with the env provider: export {name}={digest}), then rerun migrate with the same plan."),
-        )),
     }
 }
 
