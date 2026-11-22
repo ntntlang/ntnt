@@ -693,6 +693,15 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
         let mut progress = serde_json::json!({"format_version":1,"command":command,
             "observed_at":chrono::Utc::now().to_rfc3339(),"outcome":"unknown","diagnostics":[],
             "progress":[],"assertions":{"outcome":"not_run","executed":0}});
+        // The flags that run this plan again, as POSIX shell words, for
+        // advice that gives the command (CodeRabbit 4656381389).
+        let rerun = format!(
+            "{} --target {} --plan {}{}",
+            scaffold::selection_flags(&options.manifest, options.database.as_deref()),
+            scaffold::shell_word(&options.target),
+            scaffold::shell_word(&path.to_string_lossy()),
+            if options.json { " --json" } else { "" },
+        );
         let work = inputs.and_then(|inputs| {
             if let Some(refused) = refused_flag(command, &options) {
                 return Err(refused);
@@ -710,10 +719,13 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             if command == "reconcile" {
                 database_runtime(
                     deadline,
-                    execution::reconcile_attempt(&inputs, &saved, &mut progress),
+                    execution::reconcile_attempt(&inputs, &saved, &rerun, &mut progress),
                 )
             } else {
-                database_runtime(deadline, execution::migrate(&inputs, &saved, &mut progress))
+                database_runtime(
+                    deadline,
+                    execution::migrate(&inputs, &saved, &rerun, &mut progress),
+                )
             }
         });
         if let Err(d) = work {

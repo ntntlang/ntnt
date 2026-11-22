@@ -176,11 +176,23 @@ fn limits_match(inputs: &CapturedInputs, plan: &Value) -> bool {
     }
 }
 
+/// Whether a POSIX shell takes `name` as a variable name,
+/// `[A-Za-z_][A-Za-z0-9_]*`. `export` refuses the `.` and `-` that a secret
+/// name may hold (CodeRabbit 4656381389).
+fn shell_variable_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// Resolve exact approval through the existing secret provider. The protected
 /// provider and DB owner are trusted boundaries, not adversaries this can sandbox.
 /// A refusal names the database and its approval secret, never the secret's
-/// value, and says how to approve this plan (#425).
-fn authorize(inputs: &CapturedInputs, saved: &Value) -> Result<()> {
+/// value, and says how to approve this plan (#425). `command` (`migrate` or
+/// `reconcile`) with `rerun`, its flags as shell words, runs this plan again.
+fn authorize(inputs: &CapturedInputs, saved: &Value, command: &str, rerun: &str) -> Result<()> {
     use crate::stdlib::secrets::ManifestSecretError::*;
     let database = &inputs.database_name;
     let refuse = |message: String, next_action: String| {
@@ -207,10 +219,15 @@ fn authorize(inputs: &CapturedInputs, saved: &Value) -> Result<()> {
             format!("Add a {} table to the manifest (the name only, never its value). The manifest is part of the plan, so then plan, review and approve again: set {name} to the new plan's plan_digest through the secrets provider and run migrate with that plan.", super::secrets_table(name)),
         )),
         // Unset, or a value that is not this plan's digest: say how to
-        // approve this plan.
+        // approve this plan. A name a shell cannot export is passed with
+        // `env`; neither the name nor the hex digest holds a quote.
         Ok(_) | Err(UnsetInEnvironment | UnsetInProvider) => Err(refuse(
             format!("Approval secret {name} (database {database}'s approval_secret) does not hold this plan's plan_digest; migrate runs a plan only when it does. No target or ledger writes were attempted; provider details suppressed."),
-            format!("Set {name} to this plan's plan_digest, {digest}, through the secrets provider (for local development with the env provider: export {name}={digest}), then rerun migrate with the same plan."),
+            if shell_variable_name(name) {
+                format!("Set {name} to this plan's plan_digest, {digest}, through the secrets provider (for local development with the env provider: export {name}={digest}), then rerun {command} with the same plan.")
+            } else {
+                format!("Set {name} to this plan's plan_digest, {digest}, through the secrets provider, then rerun {command} with the same plan. For local development with the env provider, run `env '{name}={digest}' ntnt db {command}{rerun}`: a shell cannot export {name}, which is not a shell variable name.")
+            },
         )),
         // The secret could not be read, so setting it again would not help:
         // say why, as for a connection secret (the provider's configuration,
@@ -476,11 +493,12 @@ fn uncertain_commit(report: &Value) -> Option<usize> {
 pub(super) async fn migrate(
     inputs: &CapturedInputs,
     saved: &Value,
+    rerun: &str,
     report: &mut Value,
 ) -> Result<()> {
     validate(inputs, saved)?;
     let action = Adoption::from_plan(inputs, saved)?;
-    authorize(inputs, saved)?;
+    authorize(inputs, saved, "migrate", rerun)?;
     report["database"] = json!(inputs.database_name);
     report["target"] = json!({"name":inputs.target_name,"schema":inputs.config.schema});
     report["plan_digest"] = saved["plan_digest"].clone();
@@ -873,6 +891,7 @@ async fn locked_attempt(
 pub(super) async fn reconcile_attempt(
     inputs: &CapturedInputs,
     saved: &Value,
+    rerun: &str,
     report: &mut Value,
 ) -> Result<()> {
     validate(inputs, saved)?;
@@ -882,7 +901,7 @@ pub(super) async fn reconcile_attempt(
             "Adoption plans have no non-transactional attempts to reconcile.",
         ));
     }
-    authorize(inputs, saved)?;
+    authorize(inputs, saved, "reconcile", rerun)?;
     report["database"] = json!(inputs.database_name);
     report["target"] = json!({"name":inputs.target_name,"schema":inputs.config.schema});
     report["plan_digest"] = saved["plan_digest"].clone();

@@ -1,3 +1,5 @@
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
 #[path = "support/sqlite_fixture.rs"]
 mod sqlite_fixture;
 use serde_json::Value;
@@ -1398,6 +1400,108 @@ fn approval_refusals_say_how_to_approve_the_plan() {
     // Following the advice literally: the same plan, approved.
     let applied = f.apply("review.json", Some(digest));
     assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
+/// CodeRabbit 4656381389: secret names may hold `.` and `-`, which no POSIX
+/// shell takes in `export`. For such a name the advice gives an `env` command
+/// with the same plan instead, and run by a shell as written, it migrates. A
+/// name that is a shell variable name keeps `export`, which works as written
+/// too. Both refusals, an unset secret and another value, give that advice.
+#[cfg(unix)]
+#[test]
+fn approval_advice_runs_as_written_for_any_secret_name() {
+    use bounded_output::BoundedOutput;
+    let json = |output: std::process::Output| -> Value {
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    for name in ["deploy.approval", "app-approval", "DB_APPROVAL"] {
+        let f = Fixture::new();
+        let manifest = f.root.path().join("ntnt.toml");
+        let declared = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace(
+                "approval_secret = \"DB_APPROVAL\"",
+                &format!("approval_secret = \"{name}\""),
+            )
+            .replace("[secrets.DB_APPROVAL]", &format!("[secrets.\"{name}\"]"));
+        std::fs::write(&manifest, declared).unwrap();
+        f.sql(
+            "0001_initial.sql",
+            "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+        );
+        let digest = f.plan("review.json")["plan_digest"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut advice = Vec::new();
+        for value in [None, Some("ntnt445_other_digest")] {
+            let mut migrate = f.process("migrate");
+            migrate.args(["--plan", "review.json"]).env_remove(name);
+            if let Some(value) = value {
+                migrate.env(name, value);
+            }
+            let r = json(migrate.bounded_output());
+            let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+            assert!(!r.to_string().contains("ntnt445_other_digest"), "{r}");
+            advice.push(d["next_action"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(advice[0], advice[1], "{name}");
+        let next_action = &advice[0];
+        assert!(
+            next_action.starts_with(&format!(
+                "Set {name} to this plan's plan_digest, {digest}, through the secrets provider"
+            )),
+            "{next_action}"
+        );
+        let script = if name == "DB_APPROVAL" {
+            // export, then the same plan, run again.
+            let export = format!("export {name}={digest}");
+            assert!(next_action.contains(&export), "{next_action}");
+            assert!(!next_action.contains("`env "), "{next_action}");
+            format!("{export} && ntnt db migrate --plan review.json --target test --json")
+        } else {
+            assert!(
+                !next_action.contains(&format!("export {name}=")),
+                "{next_action}"
+            );
+            // The command between backticks, as written.
+            let command = next_action
+                .split('`')
+                .nth(1)
+                .unwrap_or_else(|| panic!("no command: {next_action}"));
+            assert_eq!(
+                command,
+                format!(
+                    "env '{name}={digest}' ntnt db migrate --target test --plan review.json --json"
+                ),
+                "{next_action}"
+            );
+            command.to_owned()
+        };
+        // Run by a shell in the project, with this build's ntnt first on PATH.
+        let bin = std::path::Path::new(env!("CARGO_BIN_EXE_ntnt"))
+            .parent()
+            .unwrap();
+        let path = std::env::join_paths(std::iter::once(bin.to_owned()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        let applied = json(
+            std::process::Command::new("sh")
+                .args(["-c", &script])
+                .env("PATH", path)
+                .env("DB_TARGET", &f.target_path)
+                .env("DB_SCRATCH", &f.scratch_path)
+                .env("NTNT_ENV", "development")
+                .env("NTNT_SECRETS_PROVIDER", "env")
+                .env_remove(name)
+                .current_dir(f.root.path())
+                .bounded_output(),
+        );
+        assert_eq!(applied["outcome"], "pass", "{script}: {applied}");
+        assert_eq!(applied["plan_digest"], digest.as_str(), "{applied}");
+    }
 }
 
 /// CodeRabbit on #445 (execution.rs): an approval secret the provider cannot

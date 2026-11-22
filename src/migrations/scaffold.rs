@@ -131,7 +131,7 @@ fn shown(path: &Path) -> String {
 
 /// `value` as one POSIX shell word: unchanged when no character is special to a
 /// shell, otherwise single-quoted with each `'` written as `'\''`.
-fn shell_word(value: &str) -> String {
+pub(super) fn shell_word(value: &str) -> String {
     let plain = |b: u8| b.is_ascii_alphanumeric() || b"_./:@%+=,-".contains(&b);
     if !value.is_empty() && value.bytes().all(plain) {
         value.to_owned()
@@ -142,7 +142,7 @@ fn shell_word(value: &str) -> String {
 
 /// The arguments that keep a printed `ntnt db` command on the same manifest and
 /// logical database, as shell words.
-fn selection_flags(manifest: &Path, database: Option<&str>) -> String {
+pub(super) fn selection_flags(manifest: &Path, database: Option<&str>) -> String {
     let mut flags = String::new();
     if manifest != Path::new("ntnt.toml") {
         flags += &format!(" --manifest {}", shell_word(&manifest.to_string_lossy()));
