@@ -450,9 +450,13 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     ) -> Result<()> {
         // A cross-scope dependent is not an owned object. Even non-cascading changes
         // are conservatively rejected rather than promising a transitive effect bound.
-        // Foreign keys between schemas of the managed scope, and from the
-        // tables the history creates elsewhere (`outside`), are inspected.
-        let incoming = self.rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_class c ON c.oid=k.confrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_class f ON f.oid=k.conrelid JOIN pg_catalog.pg_namespace fn ON fn.oid=f.relnamespace WHERE n.nspname=ANY($1) AND fn.nspname<>ALL($1) AND quote_ident(fn.nspname)||'.relation:'||f.relname<>ALL($2))", &[&scope(schema, extra), &outside]).await?;
+        // A table is tracked when it is in a schema of the managed scope or is
+        // one the history creates elsewhere (`outside`, by catalog key). A
+        // foreign key from an untracked table into a tracked one blocks
+        // execution, whichever kind the tracked one is: a DELETE there could
+        // cascade into rows nothing inspects. One between two tracked tables
+        // does not.
+        let incoming = self.rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_class c ON c.oid=k.confrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_class f ON f.oid=k.conrelid JOIN pg_catalog.pg_namespace fn ON fn.oid=f.relnamespace WHERE (n.nspname=ANY($1) OR quote_ident(n.nspname)||'.relation:'||c.relname=ANY($2)) AND fn.nspname<>ALL($1) AND quote_ident(fn.nspname)||'.relation:'||f.relname<>ALL($2))", &[&scope(schema, extra), &outside]).await?;
         if incoming[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_EXTERNAL_DEPENDENCY",

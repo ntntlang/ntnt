@@ -372,7 +372,7 @@ For each PostgreSQL migration, the runner:
 4. Verifies the resulting catalog against that exact prefix fingerprint, records the relation locks the transaction holds in `progress[].locks`, and inserts the success ledger entry in the same transaction.
 5. Commits that migration before starting the next. Failure never rolls back an earlier committed migration.
 
-If a lock is not granted within one second, or the session is chosen as a deadlock victim, the whole migration transaction rolls back and is retried after a backoff (250 ms doubling, with jitter), up to 4 attempts; `progress[].lock_retries` counts them. A short lock timeout keeps application queries from queueing behind a migration that is waiting for a lock. Statements that need strong locks (most `ALTER TABLE`, `DROP`, `CREATE INDEX` without `CONCURRENTLY`) still block other access to their table while the migration transaction is open; this is **not online migration tooling** for long rewrites. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the [managed scope](#managed-scope) and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
+If a lock is not granted within one second, or the session is chosen as a deadlock victim, the whole migration transaction rolls back and is retried after a backoff (250 ms doubling, with jitter), up to 4 attempts; `progress[].lock_retries` counts them. A short lock timeout keeps application queries from queueing behind a migration that is waiting for a lock. Statements that need strong locks (most `ALTER TABLE`, `DROP`, `CREATE INDEX` without `CONCURRENTLY`) still block other access to their table while the migration transaction is open; this is **not online migration tooling** for long rewrites. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the [managed scope](#managed-scope), into its tables or into the [tables the history creates in other schemas](#objects-the-history-creates-in-other-schemas), and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
 
 Every source/plan is captured before I/O; no validated filename is reopened during execution. A new invocation recaptures it. Same-plan reruns after partial/all commits recognize matching immutable history and the expected catalog at each ordered prefix, without reapplying SQL or rerunning already-applied transition checks. Edited SQL/checks, missing/reordered history, catalog drift, other stores/targets, changed policy/authority or extra unsupported extensions fail closed.
 
@@ -702,7 +702,11 @@ policies and rules follow it, so an index added to `public.audit_log` out of ban
 drift, like an out-of-band `DROP TABLE public.audit_log`, `ALTER TABLE ... ADD COLUMN`
 or `GRANT` on it. The managed schema's coverage rules apply, and managed objects may
 refer to these (a view over `public.audit_log`, foreign keys between them) as they may
-to a created schema. A schema the history creates without a top-level `CREATE SCHEMA`
+to a created schema. A foreign key into one of them from a table the history does not
+create, such as another application's table in `public`, blocks every migration with
+`DB_EXTERNAL_DEPENDENCY`, as one into the managed scope does: a `DELETE` from
+`public.audit_log` could otherwise cascade into rows that nothing inspects. A schema
+the history creates without a top-level `CREATE SCHEMA`
 (in a `DO` block, say) is one of these objects, `schema:<name>`, with whatever the
 history creates in it. Members of an extension follow the extension, which stays
 uncovered when it is installed outside the managed scope.

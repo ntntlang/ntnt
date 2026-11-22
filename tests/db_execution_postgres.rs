@@ -2832,6 +2832,95 @@ CREATE VIEW app.recent AS SELECT id, msg FROM public.audit_log;",
     }
 }
 
+/// CodeRabbit 4656058134 on #445: a table the history does not create, with
+/// a foreign key into a table the history creates outside the managed scope,
+/// blocks execution as one into the managed scope does, with the same
+/// refusal, so an approved DELETE cannot cascade into its rows. Foreign keys
+/// between tables the history creates, managed and outside, in either
+/// direction, still migrate, and the DELETE's cascade reaches them.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn foreign_keys_into_tables_the_history_creates_outside_block_execution() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);
+CREATE TABLE public.audit_log (id int PRIMARY KEY, account int REFERENCES app.accounts (id));
+CREATE TABLE public.audit_detail (id int PRIMARY KEY, log int REFERENCES public.audit_log (id) ON DELETE CASCADE);
+CREATE TABLE app.entries (id int PRIMARY KEY, log int REFERENCES public.audit_log (id) ON DELETE CASCADE);",
+    );
+    migrate_all(&f, "first.json");
+    f.sql(
+        "0002_seed.sql",
+        "INSERT INTO app.accounts VALUES (1);
+INSERT INTO public.audit_log VALUES (1, 1), (2, 1);
+INSERT INTO public.audit_detail VALUES (1, 1), (2, 2);
+INSERT INTO app.entries VALUES (1, 1), (2, 2);",
+    );
+    migrate_all(&f, "second.json");
+    let rows = || -> Vec<i64> {
+        let row = f
+            .target()
+            .query_one(
+                "SELECT (SELECT count(*) FROM public.notes), (SELECT count(*) FROM public.audit_log), (SELECT count(*) FROM public.audit_detail), (SELECT count(*) FROM app.entries)",
+                &[],
+            )
+            .unwrap();
+        (0..4).map(|i| row.get(i)).collect()
+    };
+    let dependency = |r: &Value| {
+        r["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["code"] == "DB_EXTERNAL_DEPENDENCY")
+            .unwrap_or_else(|| panic!("{r}"))
+            .clone()
+    };
+
+    // Another application's table, which the history does not create, refers
+    // to public.audit_log.
+    f.target()
+        .batch_execute(
+            "CREATE TABLE public.notes (id int PRIMARY KEY, log int REFERENCES public.audit_log (id) ON DELETE CASCADE);
+INSERT INTO public.notes VALUES (1, 1), (2, 2);",
+        )
+        .unwrap();
+    f.sql(
+        "0003_prune.sql",
+        "DELETE FROM public.audit_log WHERE id = 2;",
+    );
+    let plan = f.plan("third.json");
+    let outside = f.apply("third.json", plan["plan_digest"].as_str());
+    assert_eq!(outside["outcome"], "fail", "{outside}");
+    assert_eq!(
+        dependency(&outside)["message"],
+        "Incoming foreign keys from outside the managed scope block execution."
+    );
+    assert_eq!(rows(), [2, 2, 2, 2]);
+
+    // A foreign key into the managed schema gets the same refusal.
+    f.target()
+        .batch_execute(
+            "ALTER TABLE public.notes DROP CONSTRAINT notes_log_fkey;
+CREATE TABLE public.notes_accounts (id int PRIMARY KEY, account int REFERENCES app.accounts (id));",
+        )
+        .unwrap();
+    let plan = f.plan("third-managed.json");
+    let managed = f.apply("third-managed.json", plan["plan_digest"].as_str());
+    assert_eq!(managed["outcome"], "fail", "{managed}");
+    assert_eq!(dependency(&managed), dependency(&outside));
+    assert_eq!(rows(), [2, 2, 2, 2]);
+
+    // With neither, the DELETE runs, and cascades only into tables the
+    // history creates.
+    f.target()
+        .batch_execute("DROP TABLE public.notes_accounts")
+        .unwrap();
+    migrate_all(&f, "third-clear.json");
+    assert_eq!(rows(), [2, 1, 1, 1]);
+}
+
 /// Objects a migration creates outside the managed scope without naming the
 /// schema in a statement NTNT reads, through search_path, a DO block or SQL
 /// sqlparser does not parse, are found by replay and inspected alike.
