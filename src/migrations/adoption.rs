@@ -206,24 +206,32 @@ fn sql_name(engine: &str, name: &str) -> String {
     }
 }
 
-/// The schema and name, as SQL writes them, of a table that a drift
-/// difference with catalog key `key` and observed definition `observed`
-/// names; `None` for any other object. PostgreSQL keys a table in the managed
-/// schema `relation:<name>` and one elsewhere `<quoted schema>.relation:<name>`
-/// (a relation of kind `r` or `p`); SQLite keys it `table:"<name>"`.
-fn table(engine: &str, schema: &str, key: &str, observed: &Value) -> Option<(String, String)> {
+/// The schema and name, as SQL writes them, and the name itself, of a
+/// table that a drift difference with catalog key `key` and observed
+/// definition `observed` names; `None` for any other object. PostgreSQL keys
+/// a table in the managed schema `relation:<name>` and one elsewhere
+/// `<quoted schema>.relation:<name>` (a relation of kind `r` or `p`); SQLite
+/// keys it `table:"<name>"`.
+fn table(
+    engine: &str,
+    schema: &str,
+    key: &str,
+    observed: &Value,
+) -> Option<(String, String, String)> {
     if engine == "sqlite" {
         let quoted = key.strip_prefix("table:\"")?.strip_suffix('"')?;
-        return Some((
-            "main".into(),
-            sql_name(engine, &quoted.replace("\"\"", "\"")),
-        ));
+        let name = quoted.replace("\"\"", "\"");
+        return Some(("main".into(), sql_name(engine, &name), name));
     }
     if !matches!(observed["kind"].as_str(), Some("r" | "p")) {
         return None;
     }
     if let Some(name) = key.strip_prefix("relation:") {
-        return Some((sql_name(engine, schema), sql_name(engine, name)));
+        return Some((
+            sql_name(engine, schema),
+            sql_name(engine, name),
+            name.to_owned(),
+        ));
     }
     // quote_ident quotes a schema name that holds a dot or a colon, and doubles
     // any quote inside it, so its key ends at the first quote that is not
@@ -243,7 +251,11 @@ fn table(engine: &str, schema: &str, key: &str, observed: &Value) -> Option<(Str
     };
     let (qualifier, rest) = key.split_at(end);
     let name = rest.strip_prefix(".relation:")?;
-    Some((qualifier.to_owned(), sql_name(engine, name)))
+    Some((
+        qualifier.to_owned(),
+        sql_name(engine, name),
+        name.to_owned(),
+    ))
 }
 
 /// Advice for an adoption of the migrations through `through_id` that is
@@ -252,7 +264,11 @@ fn table(engine: &str, schema: &str, key: &str, observed: &Value) -> Option<(Str
 /// names those tables, from the drift `differences` and never from rows, says
 /// how to retire a ledger on `engine` before planning again, and otherwise
 /// gives the `ordinary` advice. `None` when no such table differs. The refusal
-/// stays: an unexpected object is never adopted, moved or dropped.
+/// stays: an unexpected object is never adopted, moved or dropped. On SQLite
+/// the steps lose no data when followed as written: the shell stops at the
+/// first error, a table that refers to the ledger is found and its foreign
+/// key removed first, and the ledger is dropped only once its copy holds
+/// every row.
 pub(super) fn retire_ledger_advice(
     ordinary: &str,
     engine: &str,
@@ -260,21 +276,23 @@ pub(super) fn retire_ledger_advice(
     through_id: &str,
     differences: &Value,
 ) -> Option<String> {
-    let tables: Vec<(String, String)> = differences
+    let tables: Vec<(String, String, String)> = differences
         .as_array()?
         .iter()
         .filter(|d| d["change"] == "unexpected")
         .filter_map(|d| table(engine, schema, d["object"].as_str()?, &d["observed"]))
         .collect();
-    let listed: Vec<String> = tables.iter().map(|(s, n)| format!("{s}.{n}")).collect();
-    let (held, subject, qualified, name, placeholder) = match tables.as_slice() {
+    let listed: Vec<String> = tables.iter().map(|(s, n, _)| format!("{s}.{n}")).collect();
+    // The ledger's name in SQL, its schema-qualified name, and the name as a
+    // SQL string; `<table>` when there are several to choose from.
+    let (held, subject, qualified, name, literal) = match tables.as_slice() {
         [] => return None,
-        [(s, n)] => (
+        [(s, n, raw)] => (
             format!("a table that the migrations through ID {through_id} do not create: {s}.{n}"),
             "it is",
             format!("{s}.{n}"),
             n.clone(),
-            "",
+            format!("'{}'", raw.replace('\'', "''")),
         ),
         _ => (
             format!(
@@ -284,24 +302,31 @@ pub(super) fn retire_ledger_advice(
             "one of them is",
             "<table>".to_owned(),
             "<table>".to_owned(),
-            if engine == "sqlite" {
-                ", with <table> the ledger's table name,"
-            } else {
-                ", with <table> the ledger's name as listed"
-            },
+            "'<table>'".to_owned(),
         ),
     };
-    let retire = if engine == "sqlite" {
-        format!("then copy the table to another file and drop it by running `ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.{name} AS SELECT * FROM main.{name}; DROP TABLE main.{name}; DETACH DATABASE legacy;`{placeholder} on the target in the directory where legacy-ledger.sqlite should be written")
+    let several = tables.len() > 1;
+    let steps = if engine == "sqlite" {
+        let each = if several {
+            "writing the ledger's table name for <table> in each command, "
+        } else {
+            ""
+        };
+        format!("stop the old migration runner so it cannot recreate the table; {each}open the target with `sqlite3 -bail` in the directory where legacy-ledger.sqlite should be written, so that the shell stops at the first error; check that `SELECT s.name FROM main.sqlite_schema AS s, pragma_foreign_key_list(s.name) AS f WHERE s.type = 'table' AND s.name <> {literal} COLLATE NOCASE AND f.\"table\" = {literal} COLLATE NOCASE;` lists no table, and if it lists any, remove their foreign keys into the ledger with a reviewed migration first, because dropping the ledger would delete or change their rows (never turn foreign-key enforcement off instead); copy the table with `ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.{name} AS SELECT * FROM main.{name}; SELECT (SELECT count(*) FROM legacy.{name}) = (SELECT count(*) FROM main.{name}) AND NOT EXISTS (SELECT * FROM main.{name} EXCEPT SELECT * FROM legacy.{name});`, which must print 1; only then drop it with `DROP TABLE main.{name};`; then plan the adoption again")
     } else {
-        format!("then move the table to a schema of its own with `CREATE SCHEMA IF NOT EXISTS app_legacy; ALTER TABLE {qualified} SET SCHEMA app_legacy;`{placeholder} (or archive its rows and drop it)")
+        let placeholder = if several {
+            ", with <table> the ledger's name as listed"
+        } else {
+            ""
+        };
+        format!("stop the old migration runner so it cannot recreate the table, then move the table to a schema of its own with `CREATE SCHEMA IF NOT EXISTS app_legacy; ALTER TABLE {qualified} SET SCHEMA app_legacy;`{placeholder} (or archive its rows and drop it), and plan the adoption again")
     };
     let mut otherwise = ordinary.chars();
     let otherwise = otherwise
         .next()
         .map(|first| first.to_lowercase().chain(otherwise).collect::<String>())
         .unwrap_or_default();
-    Some(format!("The target holds {held}. If {subject} the application's previous migration ledger, retire it as {RETIRE_LEDGER_DOCS} describes: stop the old migration runner so it cannot recreate the table, {retire}, and plan the adoption again. Otherwise, {otherwise}"))
+    Some(format!("The target holds {held}. If {subject} the application's previous migration ledger, retire it as {RETIRE_LEDGER_DOCS} describes: {steps}. Otherwise, {otherwise}"))
 }
 
 #[cfg(test)]
@@ -339,7 +364,7 @@ mod tests {
         ]);
         assert_eq!(
             retire_ledger_advice(ORDINARY, "sqlite", "main", "1", &differences).unwrap(),
-            "The target holds a table that the migrations through ID 1 do not create: main.schema_migrations. If it is the application's previous migration ledger, retire it as docs/DATABASE_MIGRATIONS.md#retiring-an-applications-previous-migration-ledger describes: stop the old migration runner so it cannot recreate the table, then copy the table to another file and drop it by running `ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations; DROP TABLE main.schema_migrations; DETACH DATABASE legacy;` on the target in the directory where legacy-ledger.sqlite should be written, and plan the adoption again. Otherwise, review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state."
+            "The target holds a table that the migrations through ID 1 do not create: main.schema_migrations. If it is the application's previous migration ledger, retire it as docs/DATABASE_MIGRATIONS.md#retiring-an-applications-previous-migration-ledger describes: stop the old migration runner so it cannot recreate the table; open the target with `sqlite3 -bail` in the directory where legacy-ledger.sqlite should be written, so that the shell stops at the first error; check that `SELECT s.name FROM main.sqlite_schema AS s, pragma_foreign_key_list(s.name) AS f WHERE s.type = 'table' AND s.name <> 'schema_migrations' COLLATE NOCASE AND f.\"table\" = 'schema_migrations' COLLATE NOCASE;` lists no table, and if it lists any, remove their foreign keys into the ledger with a reviewed migration first, because dropping the ledger would delete or change their rows (never turn foreign-key enforcement off instead); copy the table with `ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations; SELECT (SELECT count(*) FROM legacy.schema_migrations) = (SELECT count(*) FROM main.schema_migrations) AND NOT EXISTS (SELECT * FROM main.schema_migrations EXCEPT SELECT * FROM legacy.schema_migrations);`, which must print 1; only then drop it with `DROP TABLE main.schema_migrations;`; then plan the adoption again. Otherwise, review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state."
         );
     }
 
@@ -374,10 +399,28 @@ mod tests {
             advice.contains("do not create: main.\"order\", main.schema_migrations, main.\"we\"\"ird\". If one of them is"),
             "{advice}"
         );
-        assert!(
-            advice.contains("`ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.<table> AS SELECT * FROM main.<table>; DROP TABLE main.<table>; DETACH DATABASE legacy;`, with <table> the ledger's table name, on the target in the directory"),
-            "{advice}"
-        );
+        for part in [
+            "cannot recreate the table; writing the ledger's table name for <table> in each command, open the target with `sqlite3 -bail` in the directory",
+            "`SELECT s.name FROM main.sqlite_schema AS s, pragma_foreign_key_list(s.name) AS f WHERE s.type = 'table' AND s.name <> '<table>' COLLATE NOCASE AND f.\"table\" = '<table>' COLLATE NOCASE;` lists no table",
+            "`ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.<table> AS SELECT * FROM main.<table>; SELECT (SELECT count(*) FROM legacy.<table>) = (SELECT count(*) FROM main.<table>) AND NOT EXISTS (SELECT * FROM main.<table> EXCEPT SELECT * FROM legacy.<table>);`, which must print 1; only then drop it with `DROP TABLE main.<table>;`; then plan",
+        ] {
+            assert!(advice.contains(part), "{part:?} is not in {advice:?}");
+        }
+    }
+
+    /// A ledger whose name holds a quote is written as SQL needs it: quoted
+    /// as a name, and with the quote doubled in the check's strings.
+    #[test]
+    fn a_sqlite_ledger_named_with_a_quote_is_written_as_sql_needs_it() {
+        let differences = json!([unexpected("table:\"it's\"", None)]);
+        let advice = retire_ledger_advice(ORDINARY, "sqlite", "main", "1", &differences).unwrap();
+        for part in [
+            "do not create: main.\"it's\".",
+            "AND s.name <> 'it''s' COLLATE NOCASE AND f.\"table\" = 'it''s' COLLATE NOCASE;`",
+            "`DROP TABLE main.\"it's\";`",
+        ] {
+            assert!(advice.contains(part), "{part:?} is not in {advice:?}");
+        }
     }
 
     /// Drift with no table the history does not create keeps the ordinary advice.

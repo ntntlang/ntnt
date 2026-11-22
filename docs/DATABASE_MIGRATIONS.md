@@ -866,17 +866,48 @@ the adoption again:
 
    Or archive its rows elsewhere, then `DROP TABLE public.schema_migrations;`.
 3. SQLite: a database file has no other schema that `ntnt db` leaves alone, so copy
-   the table to another file and drop it, for example in the `sqlite3` shell opened
-   on the target:
+   the table to another file, compare the copy with it, and only then drop it. Open
+   the target with `sqlite3 -bail`, followed by its path, in the directory where the
+   copy, `legacy-ledger.sqlite`, should be written. `-bail` stops the shell at the
+   first error; without it, the shell runs the next statement anyway (in a shell
+   that is already open, run `.bail on`). Then, in turn:
 
-   ```sql
-   ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy;
-   CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations;
-   DROP TABLE main.schema_migrations;
-   DETACH DATABASE legacy;
-   ```
+   1. List the other tables whose foreign keys refer to the ledger:
 
-   `legacy-ledger.sqlite` is created in the shell's current directory.
+      ```sql
+      SELECT s.name FROM main.sqlite_schema AS s, pragma_foreign_key_list(s.name) AS f
+      WHERE s.type = 'table' AND s.name <> 'schema_migrations' COLLATE NOCASE
+        AND f."table" = 'schema_migrations' COLLATE NOCASE;
+      ```
+
+      It must list no table. If it lists any, stop: with foreign-key enforcement
+      on, dropping the ledger first deletes its rows, and that deletes or changes
+      the rows that refer to them (`ON DELETE CASCADE`, `SET NULL`, `SET DEFAULT`)
+      or makes the drop fail. Remove those foreign keys into the ledger with a
+      reviewed migration first (SQLite removes a foreign key only by rebuilding
+      its table), then list again. Never turn foreign-key enforcement off to drop
+      the ledger: that leaves their references dangling.
+
+   2. Copy the table, and compare the copy with it:
+
+      ```sql
+      ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy;
+      CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations;
+      SELECT (SELECT count(*) FROM legacy.schema_migrations) = (SELECT count(*) FROM main.schema_migrations)
+        AND NOT EXISTS (SELECT * FROM main.schema_migrations EXCEPT SELECT * FROM legacy.schema_migrations);
+      ```
+
+      The last query must print `1`: the copy holds as many rows as the ledger,
+      and each of its rows. If a statement fails, for example because
+      `legacy-ledger.sqlite` already holds a `schema_migrations` table from an
+      earlier copy, the shell stops there and the ledger is untouched: move that
+      file aside and start again.
+
+   3. Only then drop the ledger:
+
+      ```sql
+      DROP TABLE main.schema_migrations;
+      ```
 
 Use the managed schema and table names that `next_action` gives. A table that is
 not an old ledger is ordinary drift: reconcile it deliberately before adopting.

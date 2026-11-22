@@ -980,11 +980,16 @@ fn postgres_adopts_populated_checkpoint_then_upgrades() {
 const DRIFT_ADVICE: &str = "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.";
 const SHELL_DATABASE: &str = "NTNT_TEST_SQLITE_SHELL_DATABASE";
 const SHELL_SQL: &str = "NTNT_TEST_SQLITE_SHELL_SQL";
+/// Mark each row `sqlite_shell_child` prints, and the error it stops at.
+const SHELL_ROW: &str = "sqlite shell row: ";
+const SHELL_ERROR: &str = "sqlite shell error: ";
 /// Run `sql` on the SQLite file `database` from `dir`, as an operator's
-/// `sqlite3` shell started there would: a relative `ATTACH` path resolves in
-/// `dir`. The child is this test binary running only `sqlite_shell_child`, so
-/// this process keeps its own working directory.
-fn sqlite_shell(dir: &Path, database: &Path, sql: &str) {
+/// `sqlite3 -bail` shell started there would: statement by statement, with a
+/// relative `ATTACH` path resolving in `dir`, stopping at the first error.
+/// The rows it printed, each as its values joined by `|`, or that error. The
+/// child is this test binary running only `sqlite_shell_child`, so this
+/// process keeps its own working directory.
+fn sqlite_shell(dir: &Path, database: &Path, sql: &str) -> Result<Vec<String>, String> {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "sqlite_shell_child", "--nocapture"])
         .env(SHELL_DATABASE, database)
@@ -998,19 +1003,137 @@ fn sqlite_shell(dir: &Path, database: &Path, sql: &str) {
         "{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let mut rows = vec![];
+    for line in stdout.lines() {
+        if let Some((_, error)) = line.split_once(SHELL_ERROR) {
+            return Err(error.to_owned());
+        }
+        if let Some((_, row)) = line.split_once(SHELL_ROW) {
+            rows.push(row.to_owned());
+        }
+    }
+    Ok(rows)
 }
 /// The SQL runner `sqlite_shell` starts; without its variables it does nothing.
 #[test]
 fn sqlite_shell_child() {
+    fn run(database: &std::ffi::OsStr, sql: &str) -> rusqlite::Result<()> {
+        use rusqlite::fallible_iterator::FallibleIterator;
+        use rusqlite::types::ValueRef;
+        let connection = rusqlite::Connection::open(database)?;
+        let mut statements = rusqlite::Batch::new(&connection, sql);
+        while let Some(mut statement) = statements.next()? {
+            let columns = statement.column_count();
+            let mut rows = statement.raw_query();
+            while let Some(row) = rows.next()? {
+                let values = (0..columns)
+                    .map(|i| {
+                        Ok(match row.get_ref(i)? {
+                            ValueRef::Null => String::new(),
+                            ValueRef::Integer(n) => n.to_string(),
+                            ValueRef::Real(x) => x.to_string(),
+                            ValueRef::Text(t) | ValueRef::Blob(t) => {
+                                String::from_utf8_lossy(t).into_owned()
+                            }
+                        })
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                println!("\n{SHELL_ROW}{}", values.join("|"));
+            }
+        }
+        Ok(())
+    }
     let (Some(database), Ok(sql)) = (std::env::var_os(SHELL_DATABASE), std::env::var(SHELL_SQL))
     else {
         return;
     };
-    rusqlite::Connection::open(database)
-        .unwrap()
-        .execute_batch(&sql)
+    if let Err(error) = run(&database, &sql) {
+        println!("\n{SHELL_ERROR}{error}");
+    }
+    println!("\nsqlite shell ran");
+}
+/// What docs/DATABASE_MIGRATIONS.md says to run to retire an application's
+/// previous ledger from a SQLite file: the `sqlite3` command to open the
+/// target with, then each SQL block, as written.
+fn documented_sqlite_retirement() -> (String, Vec<String>) {
+    let docs = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/DATABASE_MIGRATIONS.md"),
+    )
+    .unwrap()
+    .replace("\r\n", "\n");
+    let section = docs
+        .split("\n### Retiring an application's previous migration ledger\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n### ").next())
+        .expect("the retirement section");
+    let sqlite = &section[section.find("SQLite:").expect("its SQLite step")..];
+    let start = sqlite.find("`sqlite3").expect("the sqlite3 command") + 1;
+    let shell = sqlite[start..].split('`').next().unwrap().to_owned();
+    let steps = sqlite
+        .split("```sql\n")
+        .skip(1)
+        .map(|block| block.split("```").next().unwrap().to_owned())
+        .collect();
+    (shell, steps)
+}
+/// `sql` on one line, as advice gives it: each run of whitespace one space.
+fn one_line(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+/// Whether the `sqlite3` shell on PATH can run the documented retirement: a
+/// shell from SQLite 3.33 or later, which reads `sqlite_schema`. CI runners
+/// may have none; the tests that need it are skipped there.
+fn sqlite3_shell_found() -> bool {
+    let Ok(output) = std::process::Command::new("sqlite3")
+        .arg("-version")
+        .output()
+    else {
+        return false;
+    };
+    let version = String::from_utf8_lossy(&output.stdout);
+    let mut numbers = version
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .split('.')
+        .map(|n| n.parse::<u32>().unwrap_or(0));
+    let version = (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0));
+    output.status.success() && version >= (3, 33)
+}
+/// Feed `script` to the `sqlite3` shell, opened on `database`, a file in
+/// `dir`, from `dir` with `shell`, the command the docs give. `-init` with an
+/// empty file keeps the user's ~/.sqliterc out of the test. Whether the shell
+/// succeeded, the lines it printed and its errors.
+fn sqlite3(dir: &Path, shell: &str, database: &str, script: &str) -> (bool, Vec<String>, String) {
+    use std::io::Write;
+    let init = dir.join("empty.sqliterc");
+    std::fs::write(&init, "").unwrap();
+    let mut words = shell.split_whitespace();
+    assert_eq!(words.next(), Some("sqlite3"), "{shell}");
+    let mut child = std::process::Command::new("sqlite3")
+        .arg("-init")
+        .arg(&init)
+        .args(words)
+        .arg(database)
+        .current_dir(dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
-    println!("sqlite shell ran");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let printed = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim_end().to_owned())
+        .collect();
+    let errors = String::from_utf8_lossy(&output.stderr).into_owned();
+    (output.status.success(), printed, errors)
 }
 /// #431 (cli-03): an application that ran its own migrations keeps its own
 /// ledger in the managed schema. Adoption refuses that table as drift, and the
@@ -1077,11 +1200,12 @@ fn adopt_an_app_after_retiring_its_own_ledger(f: Fixture) {
     }
     // Names come from the catalog, never from rows.
     assert!(!advice.contains("001_items"), "{advice}");
-    let parts: Vec<&str> = advice.split('`').collect();
-    assert_eq!(parts.len(), 3, "one command in {advice:?}");
-    let retire = parts[1];
+    let commands: Vec<&str> = advice.split('`').skip(1).step_by(2).collect();
     match &f {
         Fixture::Postgres(_) => {
+            let &[retire] = commands.as_slice() else {
+                panic!("one command in {advice:?}")
+            };
             assert_eq!(
                 retire,
                 format!(
@@ -1095,11 +1219,21 @@ fn adopt_an_app_after_retiring_its_own_ledger(f: Fixture) {
             );
         }
         Fixture::Sqlite(sqlite) => {
-            assert_eq!(
-                retire,
-                "ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy; CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations; DROP TABLE main.schema_migrations; DETACH DATABASE legacy;"
-            );
-            sqlite_shell(f.root(), &sqlite.target_path, retire);
+            // The shell to open the target with, then the check, the copy
+            // and the drop, each as the docs give it.
+            let (shell, steps) = documented_sqlite_retirement();
+            let documented: Vec<String> = std::iter::once(shell)
+                .chain(steps.iter().map(|step| one_line(step)))
+                .collect();
+            assert_eq!(commands, documented, "{advice}");
+            let &[_, check, copy, drop] = commands.as_slice() else {
+                panic!("{advice}")
+            };
+            let shell = |sql: &str| sqlite_shell(f.root(), &sqlite.target_path, sql);
+            // No table refers to the ledger, and the copy holds every row.
+            assert_eq!(shell(check), Ok(vec![]));
+            assert_eq!(shell(copy), Ok(vec!["1".to_owned()]));
+            assert_eq!(shell(drop), Ok(vec![]));
             let archive =
                 rusqlite::Connection::open(f.root().join("legacy-ledger.sqlite")).unwrap();
             let rows: i64 = archive
@@ -1180,6 +1314,151 @@ fn sqlite_adopts_an_app_after_retiring_its_own_ledger() {
 #[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
 fn postgres_adopts_an_app_after_retiring_its_own_ledger() {
     adopt_an_app_after_retiring_its_own_ledger(Fixture::pg())
+}
+
+/// CodeRabbit 4656058159: the `sqlite3` shell runs the next statement after
+/// an error unless it was told to stop. Followed as the docs write it, pasted
+/// into one shell, retiring a ledger whose archive file already holds a table
+/// of its name stops at the failed copy, before the drop, and the ledger
+/// keeps every row. With that earlier archive moved aside, as the docs say,
+/// the same steps retire the ledger and the adoption plans. Needs the
+/// `sqlite3` shell; skipped where there is none.
+#[test]
+fn sqlite_retiring_a_ledger_stops_at_a_failed_copy() {
+    if !sqlite3_shell_found() {
+        eprintln!("skipped: no sqlite3 shell from SQLite 3.33 or later on PATH");
+        return;
+    }
+    let f = Fixture::sqlite();
+    let Fixture::Sqlite(sqlite) = &f else {
+        unreachable!()
+    };
+    let items = "CREATE TABLE main.items(id INTEGER PRIMARY KEY,value TEXT);";
+    f.sql("001_items.sql", items);
+    f.execute(&format!(
+        "{items}
+CREATE TABLE main.schema_migrations(version TEXT PRIMARY KEY NOT NULL);
+INSERT INTO main.schema_migrations VALUES('000_setup.sql'),('001_items.sql');"
+    ));
+    adoption_checks(
+        &f,
+        "SELECT NOT EXISTS (SELECT 1 FROM main.items WHERE value IS NULL)",
+    );
+    let refused = f.command("plan", &["--adopt-through", "1"]);
+    assert!(
+        diagnostic(&refused, "DB_DRIFT")["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("previous migration ledger"),
+        "{refused}"
+    );
+    // An earlier archive, made before the ledger's last row.
+    let earlier = f.root().join("legacy-ledger.sqlite");
+    rusqlite::Connection::open(&earlier)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE schema_migrations(version TEXT PRIMARY KEY NOT NULL);
+INSERT INTO schema_migrations VALUES('000_setup.sql');",
+        )
+        .unwrap();
+    let archived = |path: &Path| -> i64 {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM main.schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let ledgers = "SELECT count(*) FROM main.sqlite_schema WHERE name='schema_migrations'";
+
+    let (shell, steps) = documented_sqlite_retirement();
+    let script = steps.concat();
+    let database = sqlite.target_path.file_name().unwrap().to_str().unwrap();
+    let (succeeded, printed, errors) = sqlite3(f.root(), &shell, database, &script);
+    assert!(
+        !succeeded && errors.contains("already exists"),
+        "{printed:?} {errors}"
+    );
+    assert_eq!(f.count(ledgers), 1, "the ledger was dropped: {errors}");
+    assert_eq!(f.count("SELECT count(*) FROM main.schema_migrations"), 2);
+    assert_eq!(archived(&earlier), 1);
+
+    let aside = f.root().join("legacy-ledger.earlier.sqlite");
+    std::fs::rename(&earlier, &aside).unwrap();
+    let (succeeded, printed, errors) = sqlite3(f.root(), &shell, database, &script);
+    assert!(succeeded, "{printed:?} {errors}");
+    assert_eq!(printed, ["1"], "{errors}");
+    assert_eq!(f.count(ledgers), 0);
+    assert_eq!(archived(&earlier), 2);
+    assert_eq!(archived(&aside), 1);
+    let plan = f.command("plan", &["--adopt-through", "1"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+}
+
+/// CodeRabbit 4656058120: with foreign-key enforcement on, dropping a table
+/// first deletes its rows, so a table that refers to the ledger with ON
+/// DELETE CASCADE would lose rows. The retirement advice first lists the
+/// tables that refer to the ledger: here it names one, and says to remove
+/// that foreign key with a reviewed migration first, never by turning
+/// enforcement off. Followed that way, with enforcement on throughout, the
+/// ledger retires, the table keeps every row and the adoption migrates.
+#[test]
+fn sqlite_retiring_a_ledger_that_a_table_refers_to_keeps_that_tables_rows() {
+    let f = Fixture::sqlite();
+    let Fixture::Sqlite(sqlite) = &f else {
+        unreachable!()
+    };
+    // The history creates notes without a foreign key into the ledger; the
+    // application's own runner made it with one.
+    let notes = "CREATE TABLE main.notes(id INTEGER PRIMARY KEY,version TEXT NOT NULL)";
+    f.sql("001_notes.sql", &format!("{notes};"));
+    f.execute(
+        "CREATE TABLE main.schema_migrations(version TEXT PRIMARY KEY NOT NULL);
+INSERT INTO main.schema_migrations VALUES('001_notes.sql');
+CREATE TABLE main.notes(id INTEGER PRIMARY KEY,version TEXT NOT NULL REFERENCES schema_migrations(version) ON DELETE CASCADE);
+INSERT INTO main.notes VALUES(1,'001_notes.sql'),(2,'001_notes.sql');",
+    );
+    adoption_checks(
+        &f,
+        "SELECT NOT EXISTS (SELECT 1 FROM main.notes WHERE version IS NULL)",
+    );
+    let refused = f.command("plan", &["--adopt-through", "1"]);
+    let advice = diagnostic(&refused, "DB_DRIFT")["next_action"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for part in [
+        "remove their foreign keys into the ledger with a reviewed migration first",
+        "never turn foreign-key enforcement off",
+    ] {
+        assert!(advice.contains(part), "{part:?} is not in {advice:?}");
+    }
+    let commands: Vec<&str> = advice.split('`').skip(1).step_by(2).collect();
+    let &[_, check, copy, drop] = commands.as_slice() else {
+        panic!("{advice}")
+    };
+    let shell = |sql: &str| {
+        sqlite_shell(
+            f.root(),
+            &sqlite.target_path,
+            &format!("PRAGMA foreign_keys = ON; {sql}"),
+        )
+    };
+    assert_eq!(shell(check), Ok(vec!["notes".to_owned()]));
+    // The reviewed migration: SQLite removes a foreign key only by
+    // rebuilding its table.
+    f.execute(&format!(
+        "ALTER TABLE main.notes RENAME TO notes_old; {notes}; INSERT INTO main.notes SELECT * FROM main.notes_old; DROP TABLE main.notes_old;"
+    ));
+    assert_eq!(shell(check), Ok(vec![]));
+    assert_eq!(shell(copy), Ok(vec!["1".to_owned()]));
+    assert_eq!(shell(drop), Ok(vec![]));
+    assert_eq!(f.count("SELECT count(*) FROM main.notes"), 2);
+    let plan = f.command("plan", &["--adopt-through", "1", "--out", "adoption.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let adopted = f.apply("adoption.json", plan["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{adopted}");
+    assert_eq!(f.count("SELECT count(*) FROM main.notes"), 2);
 }
 
 #[test]
