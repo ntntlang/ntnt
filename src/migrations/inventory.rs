@@ -332,7 +332,7 @@ fn invalid(message: &str) -> Diagnostic {
 // What to do about a refused entry of the migrations directory (#422). Each
 // is about the directory, not the manifest.
 const MOVE_OR_RENAME: &str = "Move the named entry out of the migrations directory, or rename it to <positive-id>_<name>.sql for a migration or to the .toml sidecar name of an existing migration. Names use ASCII letters, digits, underscores or hyphens and a lowercase suffix. Apart from README files and names starting with a dot, which are ignored, the directory holds nothing else. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
-const RENUMBER: &str = "Rename whichever of the two named migrations has not been applied anywhere to an unused ID above the highest in the migrations directory (`ntnt db new <name>` takes the next free ID); never renumber an applied migration.";
+const RENUMBER: &str = "Rename whichever of the two named migrations has not been applied anywhere to an unused ID above the highest in the migrations directory (`ntnt db new <name>` takes the next free ID), and its .toml sidecar, if it has one, to the same new stem; never renumber an applied migration, and leave its sidecar as it is.";
 const SAVE_AS_UTF8: &str = "Save the named file as UTF-8 text; the migrations directory holds only UTF-8 migrations and sidecars.";
 const FIX_SIDECAR: &str = "Correct the named sidecar at the reported position. A sidecar holds only intent_ids = [\"<id>\", ...], [requires] and [ensures] tables that map check names to SQL strings, and, for SQLite, sqlite_rebuild = \"<table>\"; a migration without metadata needs no sidecar. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
 const FIX_INTENT_IDS: &str =

@@ -359,11 +359,14 @@ fn history_refusals_name_the_migration(f: Fixture) {
     f.sql("0030_c.sql", &c);
     passes();
 
-    // A teammate's branch merged a migration numbered below the last applied one.
+    // A teammate's branch merged a migration numbered below the last applied
+    // one, with a sidecar, which the advice renames with it (CodeRabbit,
+    // report.rs:234).
     f.sql(
         "0015_merged.sql",
         &format!("CREATE TABLE {s}.merged(id INTEGER PRIMARY KEY);\n"),
     );
+    f.sql("0015_merged.toml", "intent_ids = [\"merged\"]\n");
     let r = f.command("status", &[]);
     let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
     assert_eq!(d["source"], "0015_merged.sql", "{d}");
@@ -377,6 +380,10 @@ fn history_refusals_name_the_migration(f: Fixture) {
         next_action.contains("above 30") && next_action.contains("0031_merged.sql"),
         "{d}"
     );
+    assert!(
+        next_action.contains("Rename migrations/0015_merged.sql and its sidecar migrations/0015_merged.toml to an unused ID above 30, keeping one stem for both, such as migrations/0031_merged.sql and migrations/0031_merged.toml"),
+        "{d}"
+    );
     no_sql(d);
     // The human report says what is known about the history, never null counts.
     let human = f.human("status", &[]);
@@ -386,12 +393,17 @@ fn history_refusals_name_the_migration(f: Fixture) {
         .find(|line| line.starts_with("History: "))
         .unwrap_or_else(|| panic!("no History line: {human}"));
     assert!(!history.contains("null"), "{history}");
-    // Following the advice: the merged migration is renumbered above 30.
-    std::fs::rename(
-        f.root().join("migrations/0015_merged.sql"),
-        f.root().join("migrations/0031_merged.sql"),
-    )
-    .unwrap();
+    // Following the advice: the merged migration is renumbered above 30. Its
+    // sidecar alone left behind would be refused as an orphan.
+    let dir = f.root().join("migrations");
+    std::fs::rename(dir.join("0015_merged.sql"), dir.join("0031_merged.sql")).unwrap();
+    let orphan = f.command("status", &[]);
+    assert_eq!(
+        diagnostic(&orphan, "DB_CONFIG")["source"],
+        "migrations/0015_merged.toml",
+        "{orphan}"
+    );
+    std::fs::rename(dir.join("0015_merged.toml"), dir.join("0031_merged.toml")).unwrap();
     assert_eq!(passes()["history"]["pending_count"], 1);
 
     // An applied migration that is not the last one was renamed, its ID kept
@@ -420,6 +432,37 @@ fn history_refusals_name_the_migration(f: Fixture) {
     )
     .unwrap();
     assert_eq!(passes()["history"]["pending_count"], 1);
+
+    // Another branch's migration with an applied migration's ID, and a
+    // sidecar: renamed with its sidecar, as DB_DUPLICATE_ID advises
+    // (CodeRabbit, inventory.rs:335).
+    f.sql(
+        "30_dup.sql",
+        &format!("CREATE TABLE {s}.dup(id INTEGER PRIMARY KEY);\n"),
+    );
+    f.sql("30_dup.toml", "intent_ids = [\"dup\"]\n");
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_DUPLICATE_ID");
+    assert_eq!(d["source"], "migrations/30_dup.sql", "{d}");
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("and its .toml sidecar, if it has one, to the same new stem"),
+        "{d}"
+    );
+    // Following it: 32 is the first unused ID above the highest, 31.
+    std::fs::rename(
+        migrations.join("30_dup.sql"),
+        migrations.join("0032_dup.sql"),
+    )
+    .unwrap();
+    std::fs::rename(
+        migrations.join("30_dup.toml"),
+        migrations.join("0032_dup.toml"),
+    )
+    .unwrap();
+    assert_eq!(passes()["history"]["pending_count"], 2);
 }
 /// #423 (sq-12, cli-09): a stale plan names the binding that changed, for
 /// migrate and for --against; a plan for another target is refused before

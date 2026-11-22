@@ -224,14 +224,31 @@ fn renumbered(inputs: &CapturedInputs, name: &str, last: u64) -> Option<String> 
     }
     Some(format!("{id:0width$}_{rest}", width = digits.len()))
 }
-/// Advice for an unapplied migration `name` numbered below `last`, the ID
-/// the ledger records last, as `DB_DUPLICATE_ID` advises (#423).
-fn renumber_advice(inputs: &CapturedInputs, name: &str, last: u64) -> String {
+/// Advice for an unapplied `migration` numbered below `last`, the ID the
+/// ledger records last, as `DB_DUPLICATE_ID` advises (#423). The loader
+/// pairs a sidecar with its migration by stem, so a sidecar is renamed with
+/// it (CodeRabbit, report.rs:234).
+fn renumber_advice(inputs: &CapturedInputs, migration: &Migration, last: u64) -> String {
     let dir = &inputs.config.migrations_dir;
+    let name = &migration.name;
+    let sidecar = |name: &str| {
+        let stem = name.strip_suffix(".sql").unwrap_or(name);
+        format!("{dir}/{stem}.toml")
+    };
+    let (what, keep) = match migration.metadata {
+        Some(_) => (
+            format!("{dir}/{name} and its sidecar {}", sidecar(name)),
+            ", keeping one stem for both",
+        ),
+        None => (format!("{dir}/{name}"), ""),
+    };
     let example = renumbered(inputs, name, last)
-        .map(|new| format!(", such as {dir}/{new}"))
+        .map(|new| match migration.metadata {
+            Some(_) => format!(", such as {dir}/{new} and {}", sidecar(&new)),
+            None => format!(", such as {dir}/{new}"),
+        })
         .unwrap_or_default();
-    format!("This target has not applied {name}, but it is numbered below {last}, the last ID in the target's ledger, and migrations run in ID order. Rename {dir}/{name} to an unused ID above {last}{example}, as for DB_DUPLICATE_ID, if no other target has applied it yet; never renumber a migration that has been applied anywhere.")
+    format!("This target has not applied {name}, but it is numbered below {last}, the last ID in the target's ledger, and migrations run in ID order. Rename {what} to an unused ID above {last}{keep}{example}, as for DB_DUPLICATE_ID, if no other target has applied it yet; never renumber a migration that has been applied anywhere.")
 }
 /// `DB_HISTORY_DIVERGENT` at ledger position `position`, where the ledger
 /// records `entry` and the captured history has `migration` (#423).
@@ -259,7 +276,7 @@ fn divergent(
     if let Some(last) =
         last.filter(|last| migration.id < *last && !applied(&migration.name) && !renamed)
     {
-        let advice = renumber_advice(inputs, &migration.name, last);
+        let advice = renumber_advice(inputs, migration, last);
         return history_refusal("DB_HISTORY_DIVERGENT", &migration.name, message, advice);
     }
     match ledger_name(entry) {
@@ -327,7 +344,7 @@ fn divergent_checkpoint(
                     added.name,
                     added.id,
                 ));
-                let advice = renumber_advice(inputs, &added.name, last);
+                let advice = renumber_advice(inputs, added, last);
                 return history_refusal("DB_HISTORY_DIVERGENT", &added.name, message, advice);
             }
             message.push_str(&format!(
@@ -1624,6 +1641,33 @@ mod tests {
         let (_fixed, fixed) =
             named_inputs(&[A, C, ("0031_b.sql", "CREATE TABLE b(id INTEGER);\n"), D]);
         assert_eq!(prefix_with_attempt(&history, &fixed).unwrap(), (2, None));
+    }
+
+    /// CodeRabbit (report.rs:234): the loader pairs a sidecar with its
+    /// migration by stem, so the renumber advice for a migration that has one
+    /// renames both to one new stem; followed, nothing is orphaned.
+    #[test]
+    fn a_renumbered_migration_takes_its_sidecar_along() {
+        let (_before, applied) = named_inputs(&[A, C, D]);
+        let history = ledger(&applied, 0, 2);
+        let (sql, toml) = ("CREATE TABLE b(id INTEGER);\n", "intent_ids = [\"b\"]\n");
+        let (_after, now) = named_inputs(&[A, ("0020_b.sql", sql), ("0020_b.toml", toml), C, D]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+        assert_eq!(d.source.as_deref(), Some("0020_b.sql"), "{d:?}");
+        assert!(
+            d.next_action.contains("Rename migrations/0020_b.sql and its sidecar migrations/0020_b.toml to an unused ID above 30, keeping one stem for both, such as migrations/0031_b.sql and migrations/0031_b.toml, as for DB_DUPLICATE_ID"),
+            "{}",
+            d.next_action
+        );
+        // Following the advice: the sidecar stays paired with its migration.
+        let (_fixed, fixed) = named_inputs(&[A, C, ("0031_b.sql", sql), ("0031_b.toml", toml), D]);
+        assert!(fixed.migrations[2].metadata.is_some());
+        assert_eq!(prefix_with_attempt(&history, &fixed).unwrap(), (2, None));
+        // The advice for a migration without a sidecar names none.
+        let (_after, now) = named_inputs(&[A, ("0020_b.sql", sql), C, D]);
+        let d = refusal(&history, &now);
+        assert!(!d.next_action.contains(".toml"), "{}", d.next_action);
     }
 
     /// #423: an applied migration renamed in migrations/ is named under the

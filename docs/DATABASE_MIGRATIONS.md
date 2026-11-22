@@ -67,7 +67,8 @@ saved just before `init` replaces the file can be lost, so do not run `init` whi
 `ntnt.toml` is being edited. No local lock helps across branches: two branches
 that each add the next migration still produce two files with the same ID.
 `status` and `plan` reject that history with `DB_DUPLICATE_ID`, naming both files;
-renumbering the migration that has not been applied anywhere fixes it. A merged
+renumbering the migration that has not been applied anywhere, with its `.toml`
+sidecar renamed to the same new stem, fixes it. A merged
 migration numbered below one a target already applied is refused for that target
 with `DB_HISTORY_DIVERGENT`, which names it and the ID to renumber it above. An
 applied migration renamed with its ID kept is refused the same way, but named by
@@ -505,7 +506,8 @@ missing from the migrations directory. `DB_HISTORY_DIVERGENT` names the first
 ledger position whose ID or name differs, with both names. A migration this target
 has not applied that is numbered below the last ID in its ledger, such as one merged
 from another branch, is named with advice to rename it to an unused ID above that
-ID, as for `DB_DUPLICATE_ID`, if no other target has applied it. An adopted
+ID, as for `DB_DUPLICATE_ID`, if no other target has applied it; when it has a
+sidecar, the advice names both files and one new stem for them. An adopted
 checkpoint records one checksum for the whole prefix it covers, so its
 `DB_HISTORY_EDITED` names that range of migrations rather than one file. That
 checksum also tells a migration added below the checkpoint's last one from the ones
