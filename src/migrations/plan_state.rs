@@ -180,7 +180,22 @@ pub(super) fn policy(
     let table = format!("[databases.{database}]");
     let replan =
         "Plan, review and approve again: the plan was reviewed under the previous configuration.";
-    // Limits first: they are policy too, and the plan records them.
+    // The engine first: limits differ by engine (PostgreSQL binds its
+    // defaults without a limits table, SQLite binds none), so restoring
+    // limits cannot make a plan for another engine match (CodeRabbit).
+    let adapter = super::adapter::catalog_format(&inputs.config.engine);
+    if b["adapter"] != adapter {
+        return Err(stale(
+            format!(
+                "{table} in {} now declares engine {}, and the plan was made for another engine ({}).",
+                files.manifest(),
+                inputs.config.engine,
+                simple(&b["adapter"]).unwrap_or("unknown")
+            ),
+            replan.to_owned(),
+        ));
+    }
+    // Limits next: they are policy too, and the plan records them.
     let planned = plan["execution"].get("limits");
     let now = inputs.plan_limits();
     let limits = format!("[databases.{database}.limits]");
@@ -216,18 +231,6 @@ pub(super) fn policy(
             format!(
                 "{replan} To run the reviewed plan instead, restore the limits it was made with."
             ),
-        ));
-    }
-    let adapter = super::adapter::catalog_format(&inputs.config.engine);
-    if b["adapter"] != adapter {
-        return Err(stale(
-            format!(
-                "{table} in {} now declares engine {}, and the plan was made for another engine ({}).",
-                files.manifest(),
-                inputs.config.engine,
-                simple(&b["adapter"]).unwrap_or("unknown")
-            ),
-            replan.to_owned(),
         ));
     }
     if b["managed_schema"] != inputs.config.schema {
@@ -297,19 +300,32 @@ fn adopted_ledger(inputs: &CapturedInputs, adopted: usize, through: usize) -> Op
     Some(history)
 }
 
+/// Whether the first `base` captured migrations still rebuild the ledger
+/// the plan was made with, whose digest is `digest`: all applied with
+/// `ntnt db migrate`, or after an adopted checkpoint. With none applied,
+/// no migration can have changed.
+fn base_unchanged(inputs: &CapturedInputs, digest: &Value, base: usize) -> bool {
+    base == 0
+        || json_digest(&applied_ledger(inputs, base)) == *digest
+        || (1..=base).rev().any(|adopted| {
+            adopted_ledger(inputs, adopted, base).is_some_and(|h| json_digest(&h) == *digest)
+        })
+}
+
 /// The refusal of a plan whose first pending migration, `first`, is now at
 /// index `at` of the captured migrations, though the plan treats the `base`
 /// before it as applied: migrations numbered below it were added or removed
-/// after the plan was made (review r1). An added migration is named when
-/// the plan's base ledger is one `ntnt db migrate` wrote, so the files it
-/// covers can be told from the new ones; a removed one is gone, and
-/// `ntnt db status` names it from the target's ledger.
+/// after the plan was made (review r1). With nothing pending (`first` is
+/// `None`), `at` is the number of captured migrations. An added migration
+/// is named when the plan's base ledger is one `ntnt db migrate` wrote, so
+/// the files it covers can be told from the new ones; a removed one is
+/// gone, and `ntnt db status` names it from the target's ledger.
 fn changed_below(
     inputs: &CapturedInputs,
     binding: &Value,
     base: usize,
     at: usize,
-    first: &str,
+    first: Option<&str>,
 ) -> Diagnostic {
     let dir = &inputs.config.migrations_dir;
     let migrations = &inputs.migrations;
@@ -317,9 +333,19 @@ fn changed_below(
         "`ntnt db status --database {} --target {}`",
         inputs.database_name, inputs.target_name
     );
+    let (treats, scope) = match first {
+        Some(first) => (
+            format!("The plan treats {base} migration(s) as applied, all numbered below {first}, the first it would apply, and {dir}/ now holds {at} numbered below it"),
+            format!("migrations below {first}"),
+        ),
+        None => (
+            format!("The plan treats {base} migration(s) as applied and would apply none, and {dir}/ now holds {at} migrations"),
+            "migrations".to_owned(),
+        ),
+    };
     if at < base {
         return stale(
-            format!("The plan treats {base} migration(s) as applied, all numbered below {first}, the first it would apply, and {dir}/ now holds {at} numbered below it: applied migrations were removed or renumbered after the plan was made."),
+            format!("{treats}: applied migrations were removed or renumbered after the plan was made."),
             format!("{status} names an applied migration that is missing from {dir}/ and how to restore it. Restore each one under the name it was applied with, then rerun migrate with this plan."),
         );
     }
@@ -328,22 +354,17 @@ fn changed_below(
         json_digest(&ledger_of(inputs, applied.iter().copied())) == *digest
     };
     let before: Vec<&Migration> = migrations[..at].iter().collect();
-    // The first `base` are still the applied ones when they rebuild the
-    // plan's ledger, with or without an adopted checkpoint first.
-    let unchanged = planned(&before[..base])
-        || (1..=base).any(|adopted| {
-            adopted_ledger(inputs, adopted, base).is_some_and(|h| json_digest(&h) == *digest)
-        });
-    if unchanged {
+    if base_unchanged(inputs, digest, base) {
         // The applied migrations are unchanged: the new ones follow them.
         let added = &before[base..];
         let more = match added.len() {
             1 => " was".to_owned(),
             n => format!(" and {} more migration(s) were", n - 1),
         };
+        let place = first.map_or_else(String::new, |first| format!(", before {first}"));
         return stale(
             format!(
-                "{}{more} added to {dir}/ after the plan was made, before {first}.",
+                "{}{more} added to {dir}/ after the plan was made{place}.",
                 added[0].name
             ),
             "Plan, review and approve again: the reviewed SQL is no longer what would run."
@@ -372,9 +393,11 @@ fn changed_below(
                 format!("To run this plan as reviewed, move {dir}/{added} out of {dir}/ and rerun migrate with it. To keep {added}, renumber it as {status} advises (DB_HISTORY_DIVERGENT), then plan, review and approve again."),
             )
         }
+        // Not one added migration: an applied one may be gone or changed
+        // too, which moving files out would not restore (CodeRabbit).
         None => stale(
-            format!("The plan treats {base} migration(s) as applied, all numbered below {first}, the first it would apply, and {dir}/ now holds {at} numbered below it: migrations were added after the plan was made."),
-            format!("To run this plan as reviewed, move the added migrations out of {dir}/ and rerun migrate with it. To keep them, renumber each one {status} names as numbered below an applied migration (DB_HISTORY_DIVERGENT) as it advises, then plan, review and approve again."),
+            format!("{treats} that do not match them: {scope} were added, removed, renamed or edited after the plan was made."),
+            format!("Run {status}: it names the first migration that differs from the target's history and how to fix it. Follow its advice for each migration it names until status passes, then plan, review and approve again."),
         ),
     }
 }
@@ -443,7 +466,7 @@ pub(super) fn inputs(
             };
             if let Some(at) = migrations.iter().position(|m| m.name == name) {
                 if at != base {
-                    return Err(changed_below(inputs, b, base, at, name));
+                    return Err(changed_below(inputs, b, base, at, Some(name)));
                 }
             }
         }
@@ -485,16 +508,23 @@ pub(super) fn inputs(
             }
         }
         if let Some(added) = current.get(planned.len()) {
+            // With nothing pending, no first pending migration placed the
+            // applied ones, so the file after them is new only when they
+            // are unchanged (CodeRabbit, plan_state.rs:487).
+            if planned.is_empty() && !base_unchanged(inputs, &b["base_history_digest"], base) {
+                return Err(changed_below(inputs, b, base, migrations.len(), None));
+            }
             return changed(format!(
                 "{} was added to {dir}/ after the plan was made.",
                 added.name
             ));
         }
     }
-    // Neither: the applied migrations or the manifest. A ledger of plain
-    // applied migrations can be rebuilt from the files as they are now; if
-    // it matches the plan's, the applied migrations are unchanged.
-    if base == 0 || json_digest(&applied_ledger(inputs, base)) == b["base_history_digest"] {
+    // Neither: the applied migrations or the manifest. The plan's ledger
+    // can be rebuilt from the files as they are now, applied or after an
+    // adopted checkpoint; if it matches, the applied migrations are
+    // unchanged (CodeRabbit, plan_state.rs:497).
+    if base_unchanged(inputs, &b["base_history_digest"], base) {
         return changed(format!(
             "{} changed after the plan was made: the plan binds its exact bytes, although the selected database's configuration is unchanged.",
             files.manifest()
@@ -691,4 +721,78 @@ pub(super) fn against(saved: &Value, report: &Value) -> Option<Diagnostic> {
         }
     };
     (!matches).then(|| Diagnostic::new("DB_PLAN_STALE", "Saved plan is bound to different source, policy, target or base state. Generate a new plan."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Captured inputs for database `app`, target `test`, on `engine`, with
+    /// `extra` in its table and one migration.
+    fn captured(engine: &str, extra: &str) -> (tempfile::TempDir, CapturedInputs) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("migrations")).unwrap();
+        let (schema, endpoint) = match engine {
+            "sqlite" => ("main", ""),
+            _ => ("app", "database = \"app\"\nrole = \"app\"\n"),
+        };
+        std::fs::write(
+            root.join("ntnt.toml"),
+            format!("[databases.app]\nengine = \"{engine}\"\nschema = \"{schema}\"\nmigrations_dir = \"migrations\"\n{extra}[databases.app.targets.test]\nconnection_secret = \"DB_TARGET\"\n{endpoint}[secrets.DB_TARGET]\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("migrations/0001_a.sql"),
+            format!("CREATE TABLE {schema}.a(id INTEGER);\n"),
+        )
+        .unwrap();
+        let inputs = CapturedInputs::load(&root.join("ntnt.toml"), "test", None).unwrap();
+        (dir, inputs)
+    }
+
+    /// CodeRabbit (plan_state.rs:196): a plan for PostgreSQL, which binds its
+    /// limits even without a limits table, is refused for its engine once
+    /// the manifest selects SQLite without one, never for a limits table
+    /// that restoring could not fix. On one engine, the limits advice stays.
+    #[test]
+    fn a_plan_for_another_engine_is_refused_for_its_engine_before_its_limits() {
+        let (_postgres, postgres) = captured("postgresql", "");
+        let saved = json!({"plan": {
+            "execution": {"limits": postgres.plan_limits()},
+            "binding": {
+                "adapter": super::super::adapter::catalog_format("postgresql"),
+                "managed_schema": "app",
+                "policy_digest": postgres.policy_digest,
+            },
+        }});
+        assert!(saved["plan"]["execution"]["limits"].is_object(), "{saved}");
+        policy(&postgres, &saved, Files::default()).unwrap();
+        let (_sqlite, sqlite) = captured("sqlite", "");
+        assert_eq!(sqlite.plan_limits(), None);
+        let d = policy(&sqlite, &saved, Files::default()).unwrap_err();
+        assert_eq!(
+            d.message,
+            "[databases.app] in the manifest now declares engine sqlite, and the plan was made for another engine (postgresql-catalog-v1)."
+        );
+        assert!(!d.next_action.contains("limits"), "{}", d.next_action);
+        let (_limited, limited) = captured(
+            "postgresql",
+            "[databases.app.limits]\nstatement_seconds = 91\n",
+        );
+        let d = policy(&limited, &saved, Files::default()).unwrap_err();
+        assert!(
+            d.message.starts_with(
+                "[databases.app.limits] in the manifest changed after the plan was made: statement_seconds: plan "
+            ),
+            "{}",
+            d.message
+        );
+        assert!(
+            d.next_action
+                .contains("restore the limits it was made with"),
+            "{}",
+            d.next_action
+        );
+    }
 }

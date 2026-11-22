@@ -1115,10 +1115,13 @@ and `--against` alike, and the message names the binding that changed:
 - an input: the pending migration that changed (with both checksums), was added or
   was removed; a migration added below the ones the plan treats as applied (named
   when the plan's ledger tells it from them, with how to run the plan without it or
-  renumber it) or an applied one removed (`status` names it and how to restore it);
-  or the manifest itself;
-- the policy: `[databases.app.limits] in ntnt.toml changed after the plan was made:
-  statement_seconds: plan 90, now 600.`, the engine or schema, or another part of the
+  renumber it, also when the plan has nothing pending) or an applied one removed
+  (`status` names it and how to restore it); other changes below them, such as one
+  added and one removed, which `status` names one at a time before you plan again;
+  or the manifest itself, also on an adopted target;
+- the policy: the engine, checked first because limits differ by engine; the
+  limits, as in `[databases.app.limits] in ntnt.toml changed after the plan was
+  made: statement_seconds: plan 90, now 600.`; the schema; or another part of the
   database's configuration;
 - the target: each identity field that differs, such as `target setting journal_mode:
   plan delete, now wal` when the application opened a new SQLite file between `plan`

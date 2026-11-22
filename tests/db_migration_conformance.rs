@@ -815,6 +815,260 @@ fn sqlite_a_migration_added_below_an_adoption_is_named() {
 fn postgres_a_migration_added_below_an_adoption_is_named() {
     a_migration_added_below_an_adoption_is_named(Fixture::pg())
 }
+/// CodeRabbit (plan_state.rs:196): a PostgreSQL plan binds its limits
+/// without a limits table, so once the manifest selects SQLite it is refused
+/// for its engine, not for a limits table that restoring could not fix; and
+/// planning again for SQLite, as advised, gives a passing migrate.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_a_plan_for_another_engine_names_the_engine() {
+    let f = Fixture::pg();
+    let Fixture::Postgres(pg) = &f else {
+        unreachable!()
+    };
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.items(id INTEGER PRIMARY KEY);\n",
+    );
+    let plan = f.plan("review.json");
+    assert!(plan["plan"]["execution"]["limits"].is_object(), "{plan}");
+    // The project moves to SQLite: the same database, target and secrets.
+    let root = f.root().canonicalize().unwrap();
+    let (target, scratch) = (root.join("deployment.sqlite"), root.join("scratch.sqlite"));
+    for path in [&target, &scratch] {
+        rusqlite::Connection::open(path).unwrap();
+    }
+    std::fs::write(
+        root.join("ntnt.toml"),
+        "[databases.app]\nengine = \"sqlite\"\nschema = \"main\"\nmigrations_dir = \"migrations\"\napproval_secret = \"DB_APPROVAL\"\n[databases.app.targets.test]\nconnection_secret = \"DB_TARGET\"\n[databases.app.scratch]\nconnection_secret = \"DB_SCRATCH\"\ndisposable = true\n[secrets.DB_TARGET]\n[secrets.DB_SCRATCH]\n[secrets.DB_APPROVAL]\n",
+    )
+    .unwrap();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE main.items(id INTEGER PRIMARY KEY);\n",
+    );
+    let sqlite = |command: &str, args: &[&str], approval: Option<&str>| -> Value {
+        let mut process = pg.process(command);
+        process
+            .env("DB_TARGET", &target)
+            .env("DB_SCRATCH", &scratch)
+            .args(args);
+        if let Some(approval) = approval {
+            process.env("DB_APPROVAL", approval);
+        }
+        let output = process.output().unwrap();
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    let r = sqlite(
+        "migrate",
+        &["--plan", "review.json"],
+        plan["plan_digest"].as_str(),
+    );
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert_eq!(
+        d["message"],
+        "[databases.app] in ntnt.toml now declares engine sqlite, and the plan was made for another engine (postgresql-catalog-v1).",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("Plan, review and approve again"),
+        "{d}"
+    );
+    // Following the advice: a plan made for SQLite runs.
+    let again = sqlite("plan", &["--out", "sqlite.json"], None);
+    assert_eq!(again["outcome"], "pass", "{again}");
+    let r = sqlite(
+        "migrate",
+        &["--plan", "sqlite.json"],
+        again["plan_digest"].as_str(),
+    );
+    assert_eq!(r["outcome"], "pass", "{r}");
+}
+/// CodeRabbit (plan_state.rs:376-377): when no one added migration explains
+/// the files below a plan's first pending one, an applied one may be gone
+/// too, so the refusal sends the operator to `ntnt db status`, never to move
+/// files out. Following status's advice, then planning again, gives a
+/// passing migrate.
+fn stale_plans_send_other_changes_below_the_plan_to_status(f: Fixture) {
+    let s = f.schema();
+    let table = |name: &str| format!("CREATE TABLE {s}.{name}(id INTEGER PRIMARY KEY);\n");
+    let dir = f.root().join("migrations");
+    f.sql("0010_a.sql", &table("a"));
+    f.sql("0020_b.sql", &table("b"));
+    let initial = f.plan("initial.json");
+    let applied = f.apply("initial.json", initial["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    f.sql("0030_c.sql", &table("c"));
+    let plan = f.plan("review.json");
+    // The applied 0020_b.sql removed; 0005_x.sql and 0025_y.sql added.
+    std::fs::remove_file(dir.join("0020_b.sql")).unwrap();
+    f.sql("0005_x.sql", &table("x"));
+    f.sql("0025_y.sql", &table("y"));
+    let r = f.apply("review.json", plan["plan_digest"].as_str());
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert_eq!(
+        d["message"],
+        "The plan treats 2 migration(s) as applied, all numbered below 0030_c.sql, the first it would apply, and migrations/ now holds 3 numbered below it that do not match them: migrations below 0030_c.sql were added, removed, renamed or edited after the plan was made.",
+        "{d}"
+    );
+    assert_eq!(
+        d["next_action"],
+        "Run `ntnt db status --database app --target test`: it names the first migration that differs from the target's history and how to fix it. Follow its advice for each migration it names until status passes, then plan, review and approve again.",
+        "{d}"
+    );
+    // Following it: status names each migration in turn.
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(d["source"], "0005_x.sql", "{r}");
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("such as migrations/0021_x.sql"),
+        "{r}"
+    );
+    std::fs::rename(dir.join("0005_x.sql"), dir.join("0021_x.sql")).unwrap();
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(d["source"], "0020_b.sql", "{r}");
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("restore migrations/0020_b.sql"),
+        "{r}"
+    );
+    f.sql("0020_b.sql", &table("b"));
+    let r = f.command("status", &[]);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let again = f.plan("again.json");
+    let r = f.apply("again.json", again["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("status", &[])["history"]["applied_count"], 5);
+}
+/// CodeRabbit (plan_state.rs:487): a plan with nothing pending names a
+/// migration added below the applied ones, never an applied one as added,
+/// and following either piece of its advice gives a passing migrate.
+fn stale_plans_with_nothing_pending_name_a_migration_added_below(f: Fixture) {
+    let s = f.schema();
+    let table = |name: &str| format!("CREATE TABLE {s}.{name}(id INTEGER PRIMARY KEY);\n");
+    let dir = f.root().join("migrations");
+    f.sql("0010_a.sql", &table("a"));
+    f.sql("0030_c.sql", &table("c"));
+    let initial = f.plan("initial.json");
+    let applied = f.apply("initial.json", initial["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let plan = f.plan("review.json");
+    assert_eq!(plan["plan"]["pending"], serde_json::json!([]), "{plan}");
+    f.sql("0020_b.sql", &table("b"));
+    let r = f.apply("review.json", plan["plan_digest"].as_str());
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    let added = "0020_b.sql was added to migrations/ after the plan was made, numbered below 0030_c.sql, which the plan treats as applied.";
+    assert_eq!(d["message"], added, "{d}");
+    let against = f.command("status", &["--against", "review.json"]);
+    assert_eq!(diagnostic(&against, "DB_PLAN_STALE")["message"], added);
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.starts_with("To run this plan as reviewed, move migrations/0020_b.sql out of migrations/ and rerun migrate with it."),
+        "{d}"
+    );
+    // Following its first advice: the plan runs as reviewed.
+    std::fs::rename(dir.join("0020_b.sql"), f.root().join("0020_b.sql")).unwrap();
+    let r = f.apply("review.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    // Following its second: the migration kept, renumbered as status advises.
+    std::fs::rename(f.root().join("0020_b.sql"), dir.join("0020_b.sql")).unwrap();
+    let r = f.command("status", &[]);
+    let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+    assert_eq!(d["source"], "0020_b.sql", "{r}");
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("such as migrations/0031_b.sql"),
+        "{r}"
+    );
+    std::fs::rename(dir.join("0020_b.sql"), dir.join("0031_b.sql")).unwrap();
+    let next = f.plan("next.json");
+    let r = f.apply("next.json", next["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("status", &[])["history"]["applied_count"], 3);
+}
+/// CodeRabbit (plan_state.rs:497): on an adopted target, a plan whose
+/// history and migrations are unchanged is refused for the manifest's bytes
+/// alone, as status agrees, and planning again, as advised, gives a passing
+/// migrate.
+fn stale_plans_name_a_manifest_edit_on_an_adopted_target(f: Fixture) {
+    let s = f.schema();
+    let table = |name: &str| format!("CREATE TABLE {s}.{name}(id INTEGER PRIMARY KEY);\n");
+    f.sql("0010_a.sql", &table("a"));
+    f.execute(&table("a"));
+    adoption_checks(
+        &f,
+        &format!("SELECT NOT EXISTS (SELECT 1 FROM {s}.a WHERE id IS NULL)"),
+    );
+    let adoption = f.command("plan", &["--adopt-through", "10", "--out", "adoption.json"]);
+    assert_eq!(adoption["outcome"], "pass", "{adoption}");
+    let adopted = f.apply("adoption.json", adoption["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{adopted}");
+    f.sql("0020_b.sql", &table("b"));
+    let plan = f.plan("review.json");
+    // A comment-only edit to the manifest.
+    let manifest = f.root().join("ntnt.toml");
+    let declared = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, format!("{declared}# reviewed\n")).unwrap();
+    let r = f.apply("review.json", plan["plan_digest"].as_str());
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert_eq!(
+        d["message"],
+        "ntnt.toml changed after the plan was made: the plan binds its exact bytes, although the selected database's configuration is unchanged.",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("Plan, review and approve again"),
+        "{d}"
+    );
+    let status = f.command("status", &[]);
+    assert_eq!(status["outcome"], "pass", "{status}");
+    // Following the advice: a new plan runs.
+    let again = f.plan("again.json");
+    let r = f.apply("again.json", again["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+}
+#[test]
+fn sqlite_stale_plans_send_other_changes_below_the_plan_to_status() {
+    stale_plans_send_other_changes_below_the_plan_to_status(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_stale_plans_send_other_changes_below_the_plan_to_status() {
+    stale_plans_send_other_changes_below_the_plan_to_status(Fixture::pg())
+}
+#[test]
+fn sqlite_stale_plans_with_nothing_pending_name_a_migration_added_below() {
+    stale_plans_with_nothing_pending_name_a_migration_added_below(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_stale_plans_with_nothing_pending_name_a_migration_added_below() {
+    stale_plans_with_nothing_pending_name_a_migration_added_below(Fixture::pg())
+}
+#[test]
+fn sqlite_stale_plans_name_a_manifest_edit_on_an_adopted_target() {
+    stale_plans_name_a_manifest_edit_on_an_adopted_target(Fixture::sqlite())
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_stale_plans_name_a_manifest_edit_on_an_adopted_target() {
+    stale_plans_name_a_manifest_edit_on_an_adopted_target(Fixture::pg())
+}
 fn contract_failures(create: fn() -> Fixture) {
     for (phase, check) in [
         ("requires", "SELECT false"),
