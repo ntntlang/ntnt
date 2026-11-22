@@ -52,15 +52,40 @@ impl Drop for Reaped {
 /// Run `command` to completion, or kill and reap it at `limit`. Either way the
 /// status is the one the child was reaped with.
 pub fn output_within(command: &mut Command, limit: Duration) -> Result<Output, Stalled> {
+    run_within(command, Stdio::null(), limit)
+        .unwrap_or_else(|error| panic!("cannot start {command:?}: {error}"))
+}
+
+/// [`output_within`] with `input` as the child's stdin, or the error that kept
+/// the child from starting, such as a program that is not on PATH. The child
+/// reads `input` from a file written before it starts, so no write to it can
+/// block: the deadline bounds the whole run.
+pub fn try_output_within(
+    command: &mut Command,
+    input: &[u8],
+    limit: Duration,
+) -> std::io::Result<Result<Output, Stalled>> {
+    use std::io::Write;
+    let mut stdin = tempfile::tempfile().expect("temporary input file");
+    stdin.write_all(input).expect("write the input file");
+    stdin.rewind().expect("rewind the input file");
+    run_within(command, Stdio::from(stdin), limit)
+}
+
+/// `Err` only when the child cannot be started.
+fn run_within(
+    command: &mut Command,
+    stdin: Stdio,
+    limit: Duration,
+) -> std::io::Result<Result<Output, Stalled>> {
     let capture = || tempfile::tempfile().expect("temporary output file");
     let (mut stdout, mut stderr) = (capture(), capture());
     let mut child = Reaped(
         command
-            .stdin(Stdio::null())
+            .stdin(stdin)
             .stdout(stdout.try_clone().unwrap())
             .stderr(stderr.try_clone().unwrap())
-            .spawn()
-            .unwrap_or_else(|error| panic!("cannot start {command:?}: {error}")),
+            .spawn()?,
     );
     let deadline = Instant::now() + limit;
     let exited = loop {
@@ -84,18 +109,18 @@ pub fn output_within(command: &mut Command, limit: Duration) -> Result<Output, S
     };
     let (stdout, stderr) = (read(&mut stdout), read(&mut stderr));
     if exited {
-        return Ok(Output {
+        return Ok(Ok(Output {
             status,
             stdout,
             stderr,
-        });
+        }));
     }
-    Err(Stalled {
+    Ok(Err(Stalled {
         status,
         report: format!(
             "{command:?} did not exit within {limit:?}; it was killed and reaped ({status})\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&stdout),
             String::from_utf8_lossy(&stderr)
         ),
-    })
+    }))
 }

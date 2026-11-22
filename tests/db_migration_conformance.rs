@@ -1,4 +1,6 @@
 //! The same lifecycle, contract and recovery expectations run on both adapters.
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
 #[path = "support/db_fixture.rs"]
 mod pg_fixture;
 #[path = "support/sqlite_fixture.rs"]
@@ -1518,14 +1520,17 @@ fn one_line(sql: &str) -> String {
 }
 /// Whether the `sqlite3` shell on PATH can run the documented retirement: a
 /// shell from SQLite 3.33 or later, which reads `sqlite_schema`. CI runners
-/// may have none; the tests that need it are skipped there.
+/// may have none; the tests that need it are skipped there. A shell that
+/// does not answer within the deadline is killed and fails the test.
 fn sqlite3_shell_found() -> bool {
-    let Ok(output) = std::process::Command::new("sqlite3")
-        .arg("-version")
-        .output()
+    let mut probe = std::process::Command::new("sqlite3");
+    probe.arg("-version");
+    let Ok(probed) = bounded_output::try_output_within(&mut probe, b"", bounded_output::DEADLINE)
     else {
         return false;
     };
+    let output =
+        probed.unwrap_or_else(|stalled| panic!("the sqlite3 version probe stalled: {stalled}"));
     let version = String::from_utf8_lossy(&output.stdout);
     let mut numbers = version
         .split_whitespace()
@@ -1539,31 +1544,33 @@ fn sqlite3_shell_found() -> bool {
 /// Feed `script` to the `sqlite3` shell, opened on `database`, a file in
 /// `dir`, from `dir` with `shell`, the command the docs give. `-init` with an
 /// empty file keeps the user's ~/.sqliterc out of the test. Whether the shell
-/// succeeded, the lines it printed and its errors.
-fn sqlite3(dir: &Path, shell: &str, database: &str, script: &str) -> (bool, Vec<String>, String) {
-    use std::io::Write;
+/// succeeded, the lines it printed and its errors. A shell that does not
+/// finish within the deadline is killed, and the test fails naming `step`.
+fn sqlite3(
+    dir: &Path,
+    shell: &str,
+    database: &str,
+    script: &str,
+    step: &str,
+) -> (bool, Vec<String>, String) {
     let init = dir.join("empty.sqliterc");
     std::fs::write(&init, "").unwrap();
     let mut words = shell.split_whitespace();
     assert_eq!(words.next(), Some("sqlite3"), "{shell}");
-    let mut child = std::process::Command::new("sqlite3")
+    let mut command = std::process::Command::new("sqlite3");
+    command
         .arg("-init")
         .arg(&init)
         .args(words)
         .arg(database)
-        .current_dir(dir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(script.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
+        .current_dir(dir);
+    let output = bounded_output::try_output_within(
+        &mut command,
+        script.as_bytes(),
+        bounded_output::DEADLINE,
+    )
+    .unwrap_or_else(|error| panic!("{step}: cannot start sqlite3: {error}"))
+    .unwrap_or_else(|stalled| panic!("{step} stalled: {stalled}"));
     let printed = String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(|line| line.trim_end().to_owned())
@@ -1825,7 +1832,8 @@ INSERT INTO schema_migrations VALUES('000_setup.sql');",
     let (shell, steps) = documented_sqlite_retirement();
     let script = steps.concat();
     let database = sqlite.target_path.file_name().unwrap().to_str().unwrap();
-    let (succeeded, printed, errors) = sqlite3(f.root(), &shell, database, &script);
+    let step = "the sqlite3 retirement script, with an earlier archive in place,";
+    let (succeeded, printed, errors) = sqlite3(f.root(), &shell, database, &script, step);
     assert!(
         !succeeded && errors.contains("already exists"),
         "{printed:?} {errors}"
@@ -1836,7 +1844,8 @@ INSERT INTO schema_migrations VALUES('000_setup.sql');",
 
     let aside = f.root().join("legacy-ledger.earlier.sqlite");
     std::fs::rename(&earlier, &aside).unwrap();
-    let (succeeded, printed, errors) = sqlite3(f.root(), &shell, database, &script);
+    let step = "the sqlite3 retirement script, with the earlier archive moved aside,";
+    let (succeeded, printed, errors) = sqlite3(f.root(), &shell, database, &script, step);
     assert!(succeeded, "{printed:?} {errors}");
     assert_eq!(printed, ["1"], "{errors}");
     assert_eq!(f.count(ledgers), 0);
