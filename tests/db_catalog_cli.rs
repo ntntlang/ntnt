@@ -20,9 +20,15 @@ role = "target_role"
     .unwrap();
     root
 }
+/// `ntnt db status` in `root` with the development env provider and no
+/// DB_TARGET, whatever the developer's shell sets: a test that reaches the
+/// secret gets DB_SECRET, never a connection (#382).
 fn inspect(root: &std::path::Path) -> serde_json::Value {
     let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
         .args(["db", "status", "--target", "local", "--json"])
+        .env("NTNT_ENV", "development")
+        .env("NTNT_SECRETS_PROVIDER", "env")
+        .env_remove("DB_TARGET")
         .current_dir(root)
         .output()
         .unwrap();

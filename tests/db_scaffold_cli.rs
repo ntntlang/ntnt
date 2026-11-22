@@ -1037,10 +1037,15 @@ fn the_printed_next_change_loop_works_every_time() {
         let printed = commands(&String::from_utf8_lossy(&output.stdout));
         let plan = printed[0].replace("<target>", "development");
         assert!(plan.ends_with(&format!("--out {review}")), "{plan}");
+        // By file name: the temporary directory's own name could hold `name`.
+        let file = format!("_{name}.sql");
         let migration = std::fs::read_dir(root.path().join("migrations"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .find(|path| path.to_string_lossy().contains(name))
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|f| f.to_string_lossy().ends_with(&file))
+            })
             .unwrap();
         let mut text = std::fs::read_to_string(&migration).unwrap();
         text.push_str(sql);
