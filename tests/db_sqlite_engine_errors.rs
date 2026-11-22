@@ -494,10 +494,13 @@ fn sqlite_busy_target_names_the_lock_and_retry_works() {
         "{failed}"
     );
     assert!(text.contains("EXCLUSIVE locking mode"), "{failed}");
+    // The busy timeout is a limit, not a wait that happened: SQLite reports
+    // some conflicts at once (CodeRabbit on #445, sqlite.rs).
     assert!(
-        text.contains("ntnt waited its 2-second busy timeout"),
+        text.contains("ntnt waits up to its 2-second busy timeout for such a lock, and SQLite reports some conflicts at once, without waiting."),
         "{failed}"
     );
+    assert!(!text.contains("waited"), "{failed}");
     assert!(text.contains("Nothing was committed"), "{failed}");
     assert!(
         next_action(d).starts_with("Retry once the writer finishes"),

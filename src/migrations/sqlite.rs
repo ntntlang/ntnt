@@ -73,11 +73,20 @@ fn sql_error(error: rusqlite::Error) -> Diagnostic {
     // SQLite's own message only in shapes that hold identifiers alone, and
     // always the extended result code's name (#424).
     let message = match sqlite {
-        // A locked file is not a statement's fault (#425).
-        Some(e) if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => format!(
-            "{FILE_SUBJECT}is locked ({}): another connection holds its write lock or keeps it in EXCLUSIVE locking mode, or, in rollback-journal mode, is reading it while ntnt commits. ntnt waited its {}-second busy timeout.",
+        // A locked file is not a statement's fault (#425). SQLITE_BUSY is
+        // another connection's lock. The busy timeout bounds the wait for it,
+        // but SQLite returns at once where waiting could deadlock, so the
+        // message gives the limit and never claims the wait happened.
+        Some(e) if e.code == rusqlite::ErrorCode::DatabaseBusy => format!(
+            "{FILE_SUBJECT}is locked ({}): another connection holds its write lock or keeps it in EXCLUSIVE locking mode, or, in rollback-journal mode, is reading it while ntnt commits. ntnt waits up to its {}-second busy timeout for such a lock, and SQLite reports some conflicts at once, without waiting.",
             super::sqlite_errors::name(e.extended_code),
             BUSY_TIMEOUT.as_secs()
+        ),
+        // SQLITE_LOCKED is a conflict within one connection (ntnt opens no
+        // shared cache), so no other writer is named.
+        Some(e) if e.code == rusqlite::ErrorCode::DatabaseLocked => format!(
+            "{FILE_SUBJECT}reported a lock conflict within ntnt's own connection to it ({}), not a lock held by another connection.",
+            super::sqlite_errors::name(e.extended_code)
         ),
         // A file SQLite cannot write is not a statement's fault.
         Some(e) if e.code == rusqlite::ErrorCode::ReadOnly => format!(
@@ -97,7 +106,11 @@ fn sql_error(error: rusqlite::Error) -> Diagnostic {
         }
         None => "SQLite operation failed (code -1). Details suppressed.".to_owned(),
     };
-    Diagnostic::new(code, &message)
+    let mut d = Diagnostic::new(code, &message);
+    if sqlite.is_some_and(|e| e.code == rusqlite::ErrorCode::DatabaseLocked) {
+        d.next_action = "SQLITE_LOCKED is a conflict inside ntnt's own connection, so waiting for another connection does not clear it. Rerun the same command (migrate, rerun with the same plan, skips any migration already committed); if it fails the same way again, report it as an ntnt bug at https://github.com/ntntlang/ntnt/issues with this message.".to_owned();
+    }
+    d
 }
 fn reserved(name: &str) -> bool {
     name.to_ascii_lowercase().starts_with("_ntnt")
@@ -850,7 +863,7 @@ fn attribute(owner: &super::sqlite_file::Owner, mut d: Diagnostic, execute: bool
     };
     let (role, secret) = (owner.role, &owner.secret);
     d.message = format!("The SQLite {role} file (secret {secret}) {rest}");
-    // What the operation that waited had committed: nothing. Inspection
+    // What the operation that hit the lock had committed: nothing. Inspection
     // never writes and replay never commits. On a target, BEGIN
     // IMMEDIATE never began, a statement or the ledger insert rolls
     // back with its migration, and a busy COMMIT leaves the transaction
@@ -859,7 +872,7 @@ fn attribute(owner: &super::sqlite_file::Owner, mut d: Diagnostic, execute: bool
         d.message.push(' ');
         d.message.push_str(match (role, execute) {
             ("scratch", _) => "Replay never commits: nothing was committed, and the target was not changed.",
-            (_, true) => "Nothing was committed by the transaction that waited; progress shows any migration this run committed before it.",
+            (_, true) => "Nothing was committed by the transaction that hit the lock; progress shows any migration this run committed before it.",
             _ => "Inspection writes nothing, so nothing was committed.",
         });
     }
@@ -1784,5 +1797,54 @@ impl Sqlite {
         json!({"adapter":"sqlite-catalog-v1","canonicalization_version":1,"sqlite_version_number":version,
             "operations":{"catalog_inspection":"supported_subset","target_ddl":"exact_plan_transactional_subset","sql_contracts":"integer_boolean_native_authorizer","baseline_adoption":"reviewed_prefix_checkpoint","concurrent_indexes":"unsupported"},
             "guarantees":{"execution_transaction":"begin_immediate_before_inspection","atomic_target_ddl_checks_ledger":true,"checks":"native_authorizer_and_closed_expression_grammar","authority":"external_filesystem_and_secret_provider"}})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// CodeRabbit on #445 (sqlite.rs): DB_BUSY says only what is known.
+    /// SQLITE_BUSY is another connection's lock, and the busy timeout is a
+    /// limit, not a wait that happened. SQLITE_LOCKED is a conflict within
+    /// ntnt's own connection, so its advice is not to wait for a writer.
+    #[test]
+    fn lock_errors_say_only_what_is_known() {
+        let error = |code| {
+            super::sql_error(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        let busy = error(rusqlite::ffi::SQLITE_BUSY);
+        assert_eq!(busy.code, "DB_BUSY");
+        assert!(
+            busy.message.starts_with(
+                "The SQLite file is locked (SQLITE_BUSY): another connection holds its write lock"
+            ),
+            "{}",
+            busy.message
+        );
+        assert!(
+            busy.message.ends_with("ntnt waits up to its 2-second busy timeout for such a lock, and SQLite reports some conflicts at once, without waiting."),
+            "{}",
+            busy.message
+        );
+        assert!(busy
+            .next_action
+            .starts_with("Retry once the writer finishes"));
+        assert!(!busy.next_action.contains("waited"), "{}", busy.next_action);
+        let locked = error(rusqlite::ffi::SQLITE_LOCKED);
+        assert_eq!(locked.code, "DB_BUSY");
+        assert_eq!(
+            locked.message,
+            "The SQLite file reported a lock conflict within ntnt's own connection to it (SQLITE_LOCKED), not a lock held by another connection."
+        );
+        assert!(
+            locked
+                .next_action
+                .starts_with("SQLITE_LOCKED is a conflict inside ntnt's own connection"),
+            "{}",
+            locked.next_action
+        );
+        assert!(!locked.next_action.contains("writer finishes"));
     }
 }

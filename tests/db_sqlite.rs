@@ -2017,6 +2017,26 @@ fn sqlite_dropping_a_table_with_on_delete_children_requires_rebuild_mode() {
     assert!(message.contains("`posts` (ON DELETE CASCADE)"), "{message}");
     assert!(!message.contains("tags"), "{message}");
     assert_eq!(d["source"], "0002_rebuild.sql", "{d}");
+    // Statements 1 and 2 ran in the replay; the DROP did not, and the
+    // migration was rolled back. The advice says so, not that nothing ran
+    // (CodeRabbit on #445, sqlite.rs).
+    let action = d["next_action"].as_str().unwrap();
+    assert!(
+        action.ends_with("The DROP TABLE did not run; statements before it in the migration may have run, but the migration was rolled back, so none of their changes were committed."),
+        "{action}"
+    );
+    assert!(!action.contains("Nothing ran"), "{action}");
+    for file in [&f.target_path, &f.scratch_path] {
+        let copies: i64 = rusqlite::Connection::open(file)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name = 'accounts_new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(copies, 0, "{}", file.display());
+    }
     let kept: i64 = f
         .target()
         .query_row("SELECT (SELECT count(*) FROM posts) + (SELECT count(*) FROM comments WHERE account_id = 1)", [], |r| r.get(0))
