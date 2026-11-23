@@ -1,8 +1,17 @@
 # Changelog
 
-## Unreleased (0.6.4)
+## Unreleased
 
-See [unreleased notes](docs/release-notes/unreleased.md).
+No changes recorded since 0.6.4.
+
+## 0.6.4
+
+See the [versioned announcement and upgrade guidance](docs/release-notes/v0.6.4.md).
+
+### Security
+
+- Update `url` to 2.5.9 for RUSTSEC-2026-0592 (#450).
+- Keep exclusive access to a SQLite target until the verified old ledger is dropped (#451).
 
 ### Fixed
 
