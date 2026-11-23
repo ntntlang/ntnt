@@ -1675,14 +1675,15 @@ fn adopt_an_app_after_retiring_its_own_ledger(f: Fixture) {
                 .chain(steps.iter().map(|step| one_line(step)))
                 .collect();
             assert_eq!(commands, documented, "{advice}");
-            let &[_, check, copy, drop] = commands.as_slice() else {
+            let &[_, lock, check, copy, drop] = commands.as_slice() else {
                 panic!("{advice}")
             };
             let shell = |sql: &str| sqlite_shell(f.root(), &sqlite.target_path, sql);
             // No table refers to the ledger, and the copy holds every row.
-            assert_eq!(shell(check), Ok(vec![]));
-            assert_eq!(shell(copy), Ok(vec!["1".to_owned()]));
-            assert_eq!(shell(drop), Ok(vec![]));
+            assert_eq!(
+                shell(&[lock, check, copy, drop].join(" ")),
+                Ok(vec!["exclusive".into(), "1".into()])
+            );
             let archive =
                 rusqlite::Connection::open(f.root().join("legacy-ledger.sqlite")).unwrap();
             let rows: i64 = archive
@@ -1774,6 +1775,44 @@ fn postgres_adopts_an_app_after_retiring_its_own_ledger_from_app_legacy() {
     )))
 }
 
+/// Attempt a real write exactly between archive verification and DROP, without
+/// relying on thread scheduling, an installed shell, or a busy timeout.
+#[test]
+fn sqlite_retirement_excludes_writes_after_verification() {
+    let (_, steps) = documented_sqlite_retirement();
+    let (drop_step, preparation) = steps.split_last().unwrap();
+    for mode in ["DELETE", "WAL"] {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app.sqlite");
+        let archive = dir.path().join("legacy-ledger.sqlite");
+        let shell = rusqlite::Connection::open(&target).unwrap();
+        shell.pragma_update(None, "journal_mode", mode).unwrap();
+        shell.execute_batch("CREATE TABLE schema_migrations(version INTEGER); INSERT INTO schema_migrations VALUES (1);").unwrap();
+        let writer = rusqlite::Connection::open(&target).unwrap();
+        writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+        // The real shell runs in `dir`; resolve its relative ATTACH here
+        // without changing the working directory of the test process.
+        let prepare = preparation.concat().replace(
+            "'legacy-ledger.sqlite'",
+            &format!("'{}'", archive.display().to_string().replace('\'', "''")),
+        );
+        shell.execute_batch(&prepare).unwrap();
+        let write = writer.execute("INSERT INTO schema_migrations VALUES (2)", []);
+        assert_eq!(
+            write.as_ref().err().and_then(|e| e.sqlite_error_code()),
+            Some(rusqlite::ErrorCode::DatabaseBusy),
+            "{mode}: {write:?}"
+        );
+        // The archive is independently committed before the source is dropped.
+        let archived = rusqlite::Connection::open(&archive).unwrap();
+        let versions: i64 = archived
+            .query_row("SELECT version FROM schema_migrations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(versions, 1);
+        shell.execute_batch(drop_step).unwrap();
+    }
+}
+
 /// CodeRabbit 4656058159: the `sqlite3` shell runs the next statement after
 /// an error unless it was told to stop. Followed as the docs write it, pasted
 /// into one shell, retiring a ledger whose archive file already holds a table
@@ -1847,7 +1886,7 @@ INSERT INTO schema_migrations VALUES('000_setup.sql');",
     let step = "the sqlite3 retirement script, with the earlier archive moved aside,";
     let (succeeded, printed, errors) = sqlite3(f.root(), &shell, database, &script, step);
     assert!(succeeded, "{printed:?} {errors}");
-    assert_eq!(printed, ["1"], "{errors}");
+    assert_eq!(printed, ["exclusive", "1"], "{errors}");
     assert_eq!(f.count(ledgers), 0);
     assert_eq!(archived(&earlier), 2);
     assert_eq!(archived(&aside), 1);
@@ -1894,7 +1933,7 @@ INSERT INTO main.notes VALUES(1,'001_notes.sql'),(2,'001_notes.sql');",
         assert!(advice.contains(part), "{part:?} is not in {advice:?}");
     }
     let commands: Vec<&str> = advice.split('`').skip(1).step_by(2).collect();
-    let &[_, check, copy, drop] = commands.as_slice() else {
+    let &[_, lock, check, copy, drop] = commands.as_slice() else {
         panic!("{advice}")
     };
     let shell = |sql: &str| {
@@ -1904,15 +1943,19 @@ INSERT INTO main.notes VALUES(1,'001_notes.sql'),(2,'001_notes.sql');",
             &format!("PRAGMA foreign_keys = ON; {sql}"),
         )
     };
-    assert_eq!(shell(check), Ok(vec!["notes".to_owned()]));
+    assert_eq!(
+        shell(&[lock, check].join(" ")),
+        Ok(vec!["exclusive".into(), "notes".into()])
+    );
     // The reviewed migration: SQLite removes a foreign key only by
     // rebuilding its table.
     f.execute(&format!(
         "ALTER TABLE main.notes RENAME TO notes_old; {notes}; INSERT INTO main.notes SELECT * FROM main.notes_old; DROP TABLE main.notes_old;"
     ));
-    assert_eq!(shell(check), Ok(vec![]));
-    assert_eq!(shell(copy), Ok(vec!["1".to_owned()]));
-    assert_eq!(shell(drop), Ok(vec![]));
+    assert_eq!(
+        shell(&[lock, check, copy, drop].join(" ")),
+        Ok(vec!["exclusive".into(), "1".into()])
+    );
     assert_eq!(f.count("SELECT count(*) FROM main.notes"), 2);
     let plan = f.command("plan", &["--adopt-through", "1", "--out", "adoption.json"]);
     assert_eq!(plan["outcome"], "pass", "{plan}");
