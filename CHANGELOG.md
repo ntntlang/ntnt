@@ -32,11 +32,41 @@ See [unreleased notes](docs/release-notes/unreleased.md).
   DB_OUTSIDE_SCOPE refuses only changes to `_ntnt` and system schemas;
   DB_TARGET_CHANGED reports a target that changed between verify's two reads
   (#420).
+- `ntnt db` (PostgreSQL): a foreign key from an untracked table into a table the
+  history creates outside the managed schema blocks execution with
+  DB_EXTERNAL_DEPENDENCY (#420).
 - `ntnt db` (SQLite): replay inspection reuses unchanged work, so long
   histories, including ones dense in foreign keys, plan in seconds; SQLite
   operations get an 8 MiB stack (#421).
+- `ntnt db` (PostgreSQL): contract checks are refused before they run when a view
+  they can read reaches a non-builtin or volatile function through views in
+  another schema (#420).
 - `ntnt db` (PostgreSQL): a policy that calls a routine outside the managed scope
   is uncovered (#434).
+- `ntnt db`: refusals name the file, secret, migration or flag they are about and
+  the cause, with advice for that cause: `DB_INPUT_IO`, inventory and sidecar
+  refusals, `DB_SECRET`, `DB_FILE_IDENTITY`, unknown `--target` and `--database`
+  values, and `DB_ADOPTION_INPUT` (#422).
+- `ntnt db`: dotfiles and `README` files in the migrations directory are ignored
+  (#422).
+- `ntnt db`: history refusals name the migration and how to restore it, and
+  `DB_PLAN_STALE` names the binding that changed (#423).
+- `ntnt db`: `DB_APPROVAL_REQUIRED` says how to approve the plan, or why the
+  approval secret cannot be read; `DB_OUTPUT` names the file, an `--out` that
+  exists, has no directory or passes through a file is refused before any
+  work, and an incomplete report is removed (#425).
+- `ntnt db`: each subcommand's `--help` lists only the flags it takes (#432).
+- `ntnt db` (SQLite): failures name the result code and, where it holds only
+  names, SQLite's message; an unwritable file is named by role and secret; the
+  parser gate names the statement and the cause; `DB_BUSY` says who holds the
+  lock and that nothing was committed (#424, #425).
+- `ntnt db` (SQLite): an empty scratch also takes the target's page size,
+  encoding and auto-vacuum (#425).
+- `ntnt db`: an adoption plan refused because the target holds tables the history
+  does not create names them, and says how to retire an application's previous
+  migration ledger (#431).
+- `ntnt db new` pads a new migration's ID to the width of the widest existing ID,
+  or four digits in an empty directory (#431).
 - `ntnt run`: a runtime error raised in an imported module names that module's
   file and line, shows its source, and lists the call sites that led there
   (#412).

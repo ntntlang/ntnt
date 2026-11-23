@@ -1,7 +1,7 @@
 use super::{Diagnostic, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -328,60 +328,396 @@ pub(crate) struct CapturedInputs {
 fn invalid(message: &str) -> Diagnostic {
     Diagnostic::new("DB_CONFIG", message)
 }
+
+// What to do about a refused entry of the migrations directory (#422). Each
+// is about the directory, not the manifest.
+const MOVE_OR_RENAME: &str = "Move the named entry out of the migrations directory, or rename it to <positive-id>_<name>.sql for a migration or to the .toml sidecar name of an existing migration. Names use ASCII letters, digits, underscores or hyphens and a lowercase suffix. Apart from README files and names starting with a dot, which are ignored, the directory holds nothing else. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const RENUMBER: &str = "Rename whichever of the two named migrations has not been applied anywhere to an unused ID above the highest in the migrations directory (`ntnt db new <name>` takes the next free ID), and its .toml sidecar, if it has one, to the same new stem; never renumber an applied migration, and leave its sidecar as it is.";
+const SAVE_AS_UTF8: &str = "Save the named file as UTF-8 text; the migrations directory holds only UTF-8 migrations and sidecars.";
+const FIX_SIDECAR: &str = "Correct the named sidecar at the reported position. A sidecar holds only intent_ids = [\"<id>\", ...], [requires] and [ensures] tables that map check names to SQL strings, and, for SQLite, sqlite_rebuild = \"<table>\"; a migration without metadata needs no sidecar. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const FIX_INTENT_IDS: &str =
+    "Give each intent_ids entry in the named sidecar 1-128 characters and no control characters.";
+const FIX_CHECKS: &str = "Rewrite each named check in the sidecar as one schema-qualified SELECT within the documented check subset, or remove it. Check names are simple ASCII identifiers, each check is at most 64 KiB and a migration has at most 64. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const FIX_REBUILD: &str = "Remove sqlite_rebuild from the named sidecar, or set it to the one ordinary table (not a sqlite_ table) that the SQLite migration rebuilds; PostgreSQL migrations take no sqlite_rebuild. See docs/DATABASE_MIGRATIONS.md#sqlite-native-files-and-rebuilds.";
+const ORPHAN: &str = "Add the matching .sql migration to the migrations directory, rename the sidecar to the stem of the migration it belongs to, or remove it.";
+const DIRECTORY_LIMITS: &str = "Remove files that do not belong to this database's history from the migrations directory: capture reads at most 1,024 migrations, 2,048 files and 16 MiB. See docs/DATABASE_MIGRATIONS.md#immutable-sql-inventory.";
+const UNLISTABLE: &str =
+    "Make the migrations directory readable and listable by this user, then rerun.";
+
+/// Entries of the migrations directory that are not part of its history and
+/// are never read: names starting with `.` (`.gitkeep`, `.DS_Store`, editor
+/// swap files and lock links, macOS `._` files) and README or README.<ext>
+/// (one extension, such as README.md or readme.txt) in any letter case.
+fn ignored_entry(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_lowercase();
+    name.starts_with('.')
+        || name == "readme"
+        || name
+            .strip_prefix("readme.")
+            .is_some_and(|extension| !extension.is_empty() && !extension.contains('.'))
+}
+/// Refuse an entry of the migrations directory (or the directory itself),
+/// naming it in the message and in `source` with advice about the directory.
+fn refuse_entry(code: &str, entry: &str, problem: &str, next_action: &str) -> Diagnostic {
+    let mut d = Diagnostic::new(code, &format!("{entry}: {problem}"));
+    d.source = Some(entry.to_owned());
+    d.next_action = next_action.to_owned();
+    d
+}
+/// A file name or path as diagnostics show it: as written, or quoted and
+/// escaped when it is not UTF-8 or holds a character a terminal could
+/// interpret.
+pub(super) fn shown_os(text: &std::ffi::OsStr) -> String {
+    match text.to_str() {
+        Some(plain) if plain.escape_debug().eq(plain.chars()) => plain.to_owned(),
+        _ => format!("{text:?}"),
+    }
+}
+/// An entry of the migrations directory `dir` as diagnostics name it, relative
+/// to the project: `migrations/0001_initial.sql`.
+fn entry_label(dir: &str, name: &std::ffi::OsStr) -> String {
+    format!("{dir}/{}", shown_os(name))
+}
+fn shown_entry(dir: &str, name: &str) -> String {
+    entry_label(dir, std::ffi::OsStr::new(name))
+}
+/// A check name or metadata key as diagnostics show it: as written when it is
+/// a simple name, otherwise quoted and escaped, at most 64 characters.
+fn shown_key(key: &str) -> String {
+    if !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return key.to_owned();
+    }
+    let mut bounded: String = key.chars().take(64).collect();
+    if bounded.len() < key.len() {
+        bounded.push('…');
+    }
+    format!("{bounded:?}")
+}
+/// The line and column (1-based, in characters) just after `text`.
+fn line_column(text: &str) -> (usize, usize) {
+    let line = 1 + text.matches('\n').count();
+    let column = 1 + text.rsplit('\n').next().unwrap_or_default().chars().count();
+    (line, column)
+}
+/// The position of the first byte of `bytes` that is not UTF-8.
+fn invalid_utf8_position(bytes: &[u8], error: std::str::Utf8Error) -> String {
+    let valid = std::str::from_utf8(&bytes[..error.valid_up_to()]).unwrap_or_default();
+    let (line, column) = line_column(valid);
+    format!("line {line}, column {column}")
+}
+/// The position of byte `offset` of `text` as toml's own messages give it:
+/// the end of the input is one column past its last character.
+fn toml_position(text: &str, offset: usize) -> String {
+    let offset = (0..=offset.min(text.len()))
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or_default();
+    let (line, column) = match text[..offset].char_indices().last() {
+        Some((last, _)) if offset == text.len() => {
+            let (line, column) = line_column(&text[..last]);
+            (line, column + 1)
+        }
+        _ => line_column(&text[..offset]),
+    };
+    format!("line {line}, column {column}")
+}
+/// Parse a sidecar. A refusal names the sidecar, the position and what is
+/// wrong, never what the file holds.
+fn parse_metadata(sidecar: &str, bytes: &[u8]) -> Result<Metadata> {
+    let refuse =
+        |problem: String| refuse_entry("DB_METADATA_UNSUPPORTED", sidecar, &problem, FIX_SIDECAR);
+    let text = std::str::from_utf8(bytes).map_err(|error| {
+        refuse(format!(
+            "metadata must be UTF-8; the first other byte is at {}.",
+            invalid_utf8_position(bytes, error)
+        ))
+    })?;
+    let at = |span: Option<std::ops::Range<usize>>| {
+        toml_position(text, span.map_or(0, |span| span.start))
+    };
+    toml::from_str::<Metadata>(text).map_err(|error| match text.parse::<toml::Table>() {
+        Err(syntax) => refuse(format!("not valid TOML at {}.", at(syntax.span()))),
+        Ok(table) => refuse(format!(
+            "unsupported metadata at {}: {}.",
+            at(error.span()),
+            metadata_problems(&table)
+        )),
+    })
+}
+/// What a sidecar that is valid TOML holds besides the supported fields.
+fn metadata_problems(table: &toml::Table) -> String {
+    let mut problems = Vec::new();
+    for (key, value) in table {
+        let (fits, expected) = match key.as_str() {
+            "intent_ids" => (
+                value
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().all(toml::Value::is_str)),
+                "intent_ids must be an array of strings".to_owned(),
+            ),
+            phase @ ("requires" | "ensures") => (
+                value
+                    .as_table()
+                    .is_some_and(|checks| checks.values().all(toml::Value::is_str)),
+                format!("[{phase}] must map each check name to an SQL string"),
+            ),
+            "sqlite_rebuild" => (
+                value.is_str(),
+                "sqlite_rebuild must be a table name".to_owned(),
+            ),
+            other => (false, format!("unknown key `{}`", shown_key(other))),
+        };
+        if !fits {
+            problems.push(expected);
+        }
+    }
+    if problems.is_empty() {
+        "the fields do not match intent_ids, requires, ensures and sqlite_rebuild".into()
+    } else {
+        problems.join("; ")
+    }
+}
+/// At most this many declared names are listed in a diagnostic.
+const NAMES_SHOWN: usize = 20;
+/// Declared manifest keys for a diagnostic: shown as `shown_key` shows them,
+/// at most `NAMES_SHOWN`, or `none`.
+fn declared_names<'a>(names: impl ExactSizeIterator<Item = &'a String>) -> String {
+    let total = names.len();
+    let mut shown: Vec<String> = names
+        .take(NAMES_SHOWN)
+        .map(|name| shown_key(name))
+        .collect();
+    if total > NAMES_SHOWN {
+        shown.push(format!("and {} more", total - NAMES_SHOWN));
+    }
+    if shown.is_empty() {
+        "none".to_owned()
+    } else {
+        shown.join(", ")
+    }
+}
+/// What is wrong with checks outside the supported subset, naming each (with
+/// its phase when there are several), or `None` when every check is supported.
+fn unsupported_checks(
+    phases: &[(&str, &BTreeMap<String, String>)],
+    schema: &str,
+) -> Option<String> {
+    let several = phases.len() > 1;
+    let count: usize = phases.iter().map(|(_, checks)| checks.len()).sum();
+    if count > 64 {
+        return Some(format!("{count} checks; at most 64 are allowed."));
+    }
+    let named: Vec<String> = phases
+        .iter()
+        .flat_map(|(phase, checks)| {
+            checks
+                .iter()
+                .filter(|(name, sql)| {
+                    !identifier(name)
+                        || sql.len() > 65536
+                        || !super::analysis::contract_supported(sql, schema)
+                })
+                .map(move |(name, _)| match several {
+                    true => format!("{} ([{phase}])", shown_key(name)),
+                    false => shown_key(name),
+                })
+        })
+        .collect();
+    match named.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "check {one} is outside the supported check subset; unsupported SQL is never executed."
+        )),
+        many => Some(format!(
+            "checks {} are outside the supported check subset; unsupported SQL is never executed.",
+            many.join(", ")
+        )),
+    }
+}
 pub(crate) fn identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 63
         && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
         && s.as_bytes()[0].is_ascii_alphabetic()
 }
+/// An input file, and how its diagnostics name it: as the user gave it, or,
+/// for an entry of the migrations directory, relative to the project.
+#[derive(Clone, Copy)]
+pub(super) enum Input<'a> {
+    /// The manifest (`--manifest`, ntnt.toml by default).
+    Manifest(&'a Path),
+    /// A saved plan, given with `flag` (`--plan` or `--against`).
+    Plan(&'a Path, &'static str),
+    /// An entry of the migrations directory at a path, named as shown.
+    Entry(&'a Path, &'a str),
+}
+/// Why an input file could not be captured (#422).
+enum Unreadable {
+    Missing,
+    Symlink,
+    NotRegular,
+    TooLarge,
+    Linked,
+    Changed,
+    Io(std::io::Error),
+}
+impl Input<'_> {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Manifest(path) | Self::Plan(path, _) | Self::Entry(path, _) => path,
+        }
+    }
+    /// Refuse the file for `cause`, naming it in the message and `source`,
+    /// with advice for this kind of input.
+    fn refuse(&self, cause: Unreadable) -> Diagnostic {
+        use Unreadable::*;
+        let shown = match self {
+            Self::Manifest(path) | Self::Plan(path, _) => shown_os(path.as_os_str()),
+            Self::Entry(_, shown) => (*shown).to_owned(),
+        };
+        let reason = match &cause {
+            Missing => "not found".to_owned(),
+            Symlink => "a symbolic link; `ntnt db` reads only regular files".to_owned(),
+            NotRegular => "not a regular file".to_owned(),
+            TooLarge => "larger than 1 MiB, the limit for one input file".to_owned(),
+            Linked => {
+                "more than one hard link; `ntnt db` reads only files with a single link".to_owned()
+            }
+            Changed => "changed while it was being read".to_owned(),
+            Io(error) => format!("cannot be read ({error})"),
+        };
+        let (message, next_action) = match self {
+            Self::Manifest(path) => {
+                let message = match cause {
+                    Missing => {
+                        // A bare file name is looked up in the current directory only.
+                        let here = if path.components().count() == 1 {
+                            " in the current directory"
+                        } else {
+                            ""
+                        };
+                        format!("Manifest {shown}: not found{here}; run from the project directory or pass --manifest <path>.")
+                    }
+                    _ => format!("Manifest {shown}: {reason}."),
+                };
+                let next_action = match cause {
+                    Missing => "Run the command from the project directory that holds ntnt.toml, or pass --manifest <path> naming that file; `ntnt db` does not search parent directories. `ntnt db init` creates a manifest.",
+                    Symlink => "Pass --manifest with the path of the file the link points to, or replace the link with that file.",
+                    NotRegular => "Pass --manifest with the path of the project's ntnt.toml file, not a directory or special file.",
+                    TooLarge => "Keep the manifest under 1 MiB: move large configuration out of it.",
+                    Linked => "Give the manifest a single link: copy it to a new name, then rename the copy over it.",
+                    Changed => "Rerun once nothing is changing the manifest, such as an editor saving it or another `ntnt db init` or `ntnt db new`.",
+                    Io(_) => "Make the manifest readable by this user, then rerun. On Windows, rerun once a running `ntnt db init` or `ntnt db new` has finished: it locks the manifest while it works.",
+                };
+                (message, next_action.to_owned())
+            }
+            Self::Plan(_, flag) => (
+                format!("{flag} file {shown}: {reason}."),
+                match cause {
+                    Missing => format!("Pass {flag} with the path of a plan saved by `ntnt db plan --out <file>`."),
+                    Symlink => format!("Pass {flag} with the path of the saved plan itself, not a link to it."),
+                    NotRegular => format!("Pass {flag} with the path of a saved plan file, not a directory or special file."),
+                    TooLarge => format!("Pass {flag} with a plan saved by `ntnt db plan --out`; saved plans are never larger than 1 MiB."),
+                    Linked => format!("Copy the saved plan to a new name, which has a single link, and pass that to {flag}."),
+                    Changed => "Rerun once nothing is writing the saved plan.".to_owned(),
+                    Io(_) => "Make the saved plan readable by this user, then rerun.".to_owned(),
+                },
+            ),
+            Self::Entry(..) => (
+                format!("{shown}: {reason}."),
+                match cause {
+                    Missing => "Rerun once nothing is changing the migrations directory.",
+                    Symlink => "Replace the link with a copy of the file it points to, or remove it from the migrations directory.",
+                    NotRegular => "Move the named entry out of the migrations directory, which holds only regular files.",
+                    TooLarge => "Split the named migration into migrations of at most 1 MiB each; the migrations directory holds no larger file.",
+                    Linked => "Give the named entry a single link: copy it to a new name outside the migrations directory, then move the copy over it.",
+                    Changed => "Rerun once nothing is writing the migrations directory.",
+                    Io(_) => "Make the named entry in the migrations directory readable by this user, then rerun.",
+                }
+                .to_owned(),
+            ),
+        };
+        let mut d = Diagnostic::new("DB_INPUT_IO", &message);
+        d.source = Some(shown);
+        d.next_action = next_action;
+        d
+    }
+}
 /// Capture one bounded regular file and reject links or detected replacement/mutation.
 /// Callers retain these bytes instead of reopening a validated path during execution.
-pub(super) fn file_bytes(path: &Path) -> Result<Vec<u8>> {
-    Ok(capture(path, super::input_file::open, |_| Ok(()))?.1)
+pub(super) fn file_bytes(input: Input) -> Result<Vec<u8>> {
+    Ok(capture(input, super::input_file::open, |_| Ok(()))?.1)
 }
 /// `file_bytes` through `open`, running `before_read` on the opened handle (`ntnt db
-/// init` locks the manifest there) and returning the handle with the bytes.
+/// init` locks the manifest there) and returning the handle with the bytes. A
+/// refusal names the file and says which rule it broke.
 pub(super) fn capture(
-    path: &Path,
+    input: Input,
     open: fn(&Path) -> std::io::Result<File>,
     before_read: impl FnOnce(&File) -> Result<()>,
 ) -> Result<(File, Vec<u8>)> {
-    let bad = || {
-        Diagnostic::new(
-            "DB_INPUT_IO",
-            "Cannot capture a regular, unlinked input file (maximum 1 MiB).",
-        )
+    use Unreadable::*;
+    let path = input.path();
+    let refuse = |cause| input.refuse(cause);
+    let missing_or = |error: std::io::Error| match error.kind() {
+        std::io::ErrorKind::NotFound => Missing,
+        _ => Io(error),
     };
-    let meta = std::fs::symlink_metadata(path).map_err(|_| bad())?;
-    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_INPUT_BYTES as u64 {
-        return Err(bad());
+    let meta = std::fs::symlink_metadata(path).map_err(|e| refuse(missing_or(e)))?;
+    if meta.file_type().is_symlink() {
+        return Err(refuse(Symlink));
     }
-    let file = open(path).map_err(|_| bad())?;
+    if !meta.is_file() {
+        return Err(refuse(NotRegular));
+    }
+    if meta.len() > MAX_INPUT_BYTES as u64 {
+        return Err(refuse(TooLarge));
+    }
+    let file = open(path).map_err(|e| refuse(missing_or(e)))?;
     before_read(&file)?;
-    let opened = file.metadata().map_err(|_| bad())?;
-    if !opened.is_file()
-        || opened.file_type().is_symlink()
-        || !super::input_file::single_link(&file, &opened)
-    {
-        return Err(bad());
+    let opened = file.metadata().map_err(|e| refuse(Io(e)))?;
+    // A regular file a moment ago: anything else now replaced it.
+    if !opened.is_file() || opened.file_type().is_symlink() {
+        return Err(refuse(Changed));
+    }
+    if !super::input_file::single_link(&file, &opened) {
+        return Err(refuse(Linked));
     }
     let mut bytes = Vec::new();
     (&file)
         .take((MAX_INPUT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|_| bad())?;
-    let after = std::fs::symlink_metadata(path).map_err(|_| bad())?;
-    let finished = file.metadata().map_err(|_| bad())?;
-    if bytes.len() > MAX_INPUT_BYTES
-        || !super::input_file::same(&meta, &opened)
+        .map_err(|e| refuse(Io(e)))?;
+    let after = std::fs::symlink_metadata(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => refuse(Changed),
+        _ => refuse(Io(e)),
+    })?;
+    let finished = file.metadata().map_err(|e| refuse(Io(e)))?;
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(refuse(TooLarge));
+    }
+    if !super::input_file::same(&meta, &opened)
         || !super::input_file::same(&opened, &after)
         || !super::input_file::same(&opened, &finished)
-        || !super::input_file::single_link(&file, &finished)
     {
-        return Err(bad());
+        return Err(refuse(Changed));
+    }
+    if !super::input_file::single_link(&file, &finished) {
+        return Err(refuse(Linked));
     }
     Ok((file, bytes))
 }
+/// The checksum an adopted checkpoint records for the migrations it covers,
+/// given as their `Migration::summary`s in order.
+pub(super) fn baseline_checksum(prefix: &[serde_json::Value]) -> String {
+    json_digest(&serde_json::json!({"format":"ntnt-baseline-v1","prefix":prefix}))
+}
+
 impl CapturedInputs {
     /// Effective execution limits: the declared table or the defaults.
     pub fn limits(&self) -> Limits {
@@ -419,9 +755,7 @@ impl CapturedInputs {
             position: count as i64,
             id: last.id.to_string(),
             name: last.name.clone(),
-            checksum: json_digest(
-                &serde_json::json!({"format":"ntnt-baseline-v1","prefix":prefix}),
-            ),
+            checksum: baseline_checksum(&prefix),
             state: "adopted".into(),
         })
     }
@@ -464,11 +798,36 @@ impl CapturedInputs {
             }
             return Err(invalid(&format!("Invalid database entry databases.{label:?}: names must start with an ASCII letter and contain at most 63 letters, digits, underscores or hyphens; each entry must be a table.")));
         }
+        // The declared names are manifest keys, validated above; never secrets.
+        let declared = declared_names(databases.keys());
+        let choices = databases
+            .keys()
+            .take(NAMES_SHOWN)
+            .map(|name| format!("--database {name}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let database_name = match database {
             Some(name) if databases.contains_key(name) => name.to_owned(),
-            Some(_) => return Err(Diagnostic::new("DB_DATABASE_UNKNOWN", "The selected logical database is not declared; no fallback database was selected.")),
+            Some(name) => {
+                let mut d = Diagnostic::new(
+                    "DB_DATABASE_UNKNOWN",
+                    &format!(
+                        "Database {} is not declared; declared databases: {declared}. No other database was selected.",
+                        shown_key(name)
+                    ),
+                );
+                d.next_action = format!("Pass one of the declared databases ({choices}), or declare the database as a [databases.<name>] table in the manifest.");
+                return Err(d);
+            }
             None if databases.len() == 1 => databases.keys().next().unwrap().clone(),
-            None => return Err(Diagnostic::new("DB_DATABASE_REQUIRED", "Multiple logical databases are declared; select one with --database before choosing its target.")),
+            None => {
+                let mut d = Diagnostic::new(
+                    "DB_DATABASE_REQUIRED",
+                    &format!("Several logical databases are declared ({declared}); select one with --database before choosing its target."),
+                );
+                d.next_action = format!("Pass one of {choices}; --database may be omitted only when one logical database is declared.");
+                return Err(d);
+            }
         };
         // Only the selected definition is interpreted. Other stores may use a
         // future adapter, unavailable credentials, or unprovisioned directories.
@@ -520,25 +879,39 @@ impl CapturedInputs {
                 .is_some();
             limits.validate(&database_name, &config.engine, declares_wait)?;
         }
-        if config.adoption_checks.len() > 64
-            || config.adoption_checks.iter().any(|(name, sql)| {
-                !identifier(name)
-                    || sql.len() > 65536
-                    || !super::analysis::contract_supported(sql, &config.schema)
-            })
-        {
-            return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED", "Adoption checks require bounded names and the supported schema-qualified SELECT expression subset."));
+        let adoption_checks = [("adoption_checks", &config.adoption_checks)];
+        if let Some(problem) = unsupported_checks(&adoption_checks, &config.schema) {
+            return Err(Diagnostic::new(
+                "DB_CHECK_UNSUPPORTED",
+                &format!("[databases.{database_name}.adoption_checks]: {problem}"),
+            ));
         }
         Ok((database_name, config))
     }
     /// Resolve the selected target and validate its endpoint, scratch and approval
     /// references. Secret names are validated here; their values are never read.
-    pub(super) fn endpoint(config: &Database, target: &str) -> Result<Endpoint> {
-        let endpoint = config
-            .targets
-            .get(target)
-            .cloned()
-            .ok_or_else(|| invalid("Select a declared database target."))?;
+    pub(super) fn endpoint(config: &Database, database: &str, target: &str) -> Result<Endpoint> {
+        let endpoint = config.targets.get(target).cloned().ok_or_else(|| {
+            // Target names are manifest keys, shown escaped; never secrets.
+            let declared = declared_names(config.targets.keys());
+            let mut d = invalid(&format!(
+                "Target {} is not declared for database {database}; declared targets: {declared}.",
+                shown_key(target)
+            ));
+            d.next_action = if config.targets.is_empty() {
+                format!("Declare a [databases.{database}.targets.<name>] table with its connection_secret in the manifest, then pass --target <name>.")
+            } else {
+                let choices = config
+                    .targets
+                    .keys()
+                    .take(NAMES_SHOWN)
+                    .map(|name| format!("--target {}", shown_key(name)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("Pass one of the declared targets ({choices}); names are case-sensitive. To add a target, declare [databases.{database}.targets.<name>] with its connection_secret in the manifest.")
+            };
+            d
+        })?;
         for ep in std::iter::once(&endpoint).chain(config.scratch.iter().map(|s| &s.endpoint)) {
             if (config.engine == "postgresql"
                 && (!identifier(&ep.database) || !identifier(&ep.role)))
@@ -607,71 +980,117 @@ impl CapturedInputs {
     /// unselected stores' directories are not visited. Exact bytes and logical selection
     /// participate in plan identity, while secret resolution remains a later operation.
     pub fn load(manifest: &Path, target: &str, database: Option<&str>) -> Result<Self> {
-        let bytes = file_bytes(manifest)?;
+        let bytes = file_bytes(Input::Manifest(manifest))?;
         let document = Self::parse(&bytes)?;
         let (database_name, config) = Self::select(&document, database)?;
-        let endpoint = Self::endpoint(&config, target)?;
+        let endpoint = Self::endpoint(&config, &database_name, target)?;
         let dir = Self::migrations_dir(manifest, &config)?;
+        // Refusals name entries relative to the project, through the
+        // directory as the manifest names it (#422).
+        let shown = config.migrations_dir.as_str();
+        let unlistable = |error: std::io::Error| {
+            refuse_entry(
+                "DB_CONFIG",
+                shown,
+                &format!("cannot list the migrations directory ({error})."),
+                UNLISTABLE,
+            )
+        };
         let mut sources = BTreeMap::new();
         let mut total_bytes = 0usize;
-        for entry in
-            std::fs::read_dir(&dir).map_err(|_| invalid("Cannot enumerate migration directory."))?
-        {
-            let entry = entry.map_err(|_| invalid("Cannot enumerate migration directory."))?;
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| invalid("Migration filenames must be UTF-8."))?;
+        for entry in std::fs::read_dir(&dir).map_err(unlistable)? {
+            let entry = entry.map_err(unlistable)?;
+            let file_name = entry.file_name();
+            if ignored_entry(&file_name) {
+                continue;
+            }
+            let label = entry_label(shown, &file_name);
+            let name = file_name.into_string().map_err(|_| {
+                refuse_entry(
+                    "DB_CONFIG",
+                    &label,
+                    "migration file names must be UTF-8.",
+                    MOVE_OR_RENAME,
+                )
+            })?;
             if !(name.ends_with(".sql") || name.ends_with(".toml")) {
-                return Err(invalid(
-                    "Migration directory accepts only SQL and matching TOML sidecars.",
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    &label,
+                    "the migrations directory holds only <id>_<name>.sql migrations and their matching .toml sidecars.",
+                    MOVE_OR_RENAME,
                 ));
             }
             if sources.len() >= 2048 {
-                return Err(invalid(
-                    "Too many migration files (maximum 1024 SQL/sidecar pairs).",
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    shown,
+                    "more than 2,048 files (at most 1,024 migrations and their sidecars).",
+                    DIRECTORY_LIMITS,
                 ));
             }
-            let bytes = file_bytes(&entry.path())?;
+            let bytes = file_bytes(Input::Entry(&entry.path(), &label))?;
             total_bytes += bytes.len();
             if total_bytes > 16 * 1_048_576 {
-                return Err(invalid("Migration inventory exceeds 16 MiB."));
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    shown,
+                    "the migration files exceed 16 MiB in total.",
+                    DIRECTORY_LIMITS,
+                ));
             }
             sources.insert(name, bytes);
         }
-        let mut ids = BTreeSet::new();
+        let mut ids = BTreeMap::new();
         let mut migrations = Vec::new();
         for (name, sql_bytes) in sources.iter().filter(|(name, _)| name.ends_with(".sql")) {
+            let label = shown_entry(shown, name);
+            let misnamed =
+                |problem: &str| refuse_entry("DB_CONFIG", &label, problem, MOVE_OR_RENAME);
             let stem = name.strip_suffix(".sql").unwrap();
             let (number, description) = stem
                 .split_once('_')
-                .ok_or_else(|| invalid("Use <numeric-id>_<name>.sql filenames."))?;
+                .filter(|(_, description)| !description.is_empty())
+                .ok_or_else(|| misnamed("migration file names are <numeric-id>_<name>.sql."))?;
             let id = number
                 .parse::<u64>()
                 .ok()
                 .filter(|v| *v > 0 && number.bytes().all(|b| b.is_ascii_digit()))
-                .ok_or_else(|| invalid("Migration ID must be a positive decimal integer."))?;
-            if description.is_empty()
-                || !description
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+                .ok_or_else(|| misnamed("the migration ID must be a positive decimal integer."))?;
+            if !description
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
             {
-                return Err(invalid(
-                    "Migration names use ASCII letters, numbers, underscores or hyphens.",
+                return Err(misnamed(
+                    "migration names use ASCII letters, digits, underscores or hyphens.",
                 ));
             }
-            if !ids.insert(id) {
-                return Err(Diagnostic::new(
+            if let Some(first) = ids.insert(id, name) {
+                return Err(refuse_entry(
                     "DB_DUPLICATE_ID",
-                    "Duplicate numeric migration ID.",
+                    &label,
+                    &format!(
+                        "migration ID {id} is also the ID of {}.",
+                        shown_entry(shown, first)
+                    ),
+                    RENUMBER,
                 ));
             }
-            let sql =
-                String::from_utf8(sql_bytes.clone()).map_err(|_| invalid("SQL must be UTF-8."))?;
+            let sql = String::from_utf8(sql_bytes.clone()).map_err(|error| {
+                refuse_entry(
+                    "DB_CONFIG",
+                    &label,
+                    &format!(
+                        "SQL must be UTF-8; the first other byte is at {}.",
+                        invalid_utf8_position(sql_bytes, error.utf8_error())
+                    ),
+                    SAVE_AS_UTF8,
+                )
+            })?;
+            let sidecar = shown_entry(shown, &format!("{stem}.toml"));
             let metadata = sources.get(&format!("{stem}.toml")).cloned();
             let parsed: Metadata = match &metadata {
-                Some(b) => std::str::from_utf8(b).ok().and_then(|s| toml::from_str(s).ok())
-                    .ok_or_else(|| Diagnostic::new("DB_METADATA_UNSUPPORTED", "Supported metadata: intent_ids and named requires/ensures SQL maps; execution modes are not supported."))?,
+                Some(bytes) => parse_metadata(&sidecar, bytes)?,
                 None => Metadata::default(),
             };
             if parsed
@@ -679,29 +1098,32 @@ impl CapturedInputs {
                 .iter()
                 .any(|s| s.len() > 128 || s.is_empty() || s.chars().any(char::is_control))
             {
-                return Err(invalid("Invalid Intent traceability ID."));
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    &sidecar,
+                    "each intent_ids entry needs 1-128 characters and no control characters.",
+                    FIX_INTENT_IDS,
+                ));
             }
-            if parsed.requires.len() + parsed.ensures.len() > 64
-                || parsed
-                    .requires
-                    .iter()
-                    .chain(&parsed.ensures)
-                    .any(|(name, sql)| {
-                        !identifier(name)
-                            || sql.len() > 65536
-                            || !super::analysis::contract_supported(sql, &config.schema)
-                    })
-            {
-                return Err(Diagnostic::new("DB_CHECK_UNSUPPORTED", "Checks require bounded names and the documented closed SELECT expression subset; unsupported SQL is never executed."));
+            let phases = [("requires", &parsed.requires), ("ensures", &parsed.ensures)];
+            if let Some(problem) = unsupported_checks(&phases, &config.schema) {
+                return Err(refuse_entry(
+                    "DB_CHECK_UNSUPPORTED",
+                    &sidecar,
+                    &problem,
+                    FIX_CHECKS,
+                ));
             }
             if parsed.sqlite_rebuild.as_ref().is_some_and(|table| {
                 config.engine != "sqlite"
                     || !identifier(table)
                     || table.to_ascii_lowercase().starts_with("sqlite_")
             }) {
-                return Err(Diagnostic::new(
+                return Err(refuse_entry(
                     "DB_METADATA_UNSUPPORTED",
+                    &sidecar,
                     "sqlite_rebuild requires one ordinary table name and the SQLite adapter.",
+                    FIX_REBUILD,
                 ));
             }
             let checksum = digest(&[
@@ -728,12 +1150,26 @@ impl CapturedInputs {
             });
         }
         for name in sources.keys().filter(|n| n.ends_with(".toml")) {
-            if !sources.contains_key(&format!("{}.sql", name.strip_suffix(".toml").unwrap())) {
-                return Err(invalid("Orphan migration sidecar."));
+            let sql = format!("{}.sql", name.strip_suffix(".toml").unwrap());
+            if !sources.contains_key(&sql) {
+                return Err(refuse_entry(
+                    "DB_CONFIG",
+                    &shown_entry(shown, name),
+                    &format!(
+                        "no migration {} matches this sidecar.",
+                        shown_entry(shown, &sql)
+                    ),
+                    ORPHAN,
+                ));
             }
         }
         if migrations.len() > 1024 {
-            return Err(invalid("Migration inventory exceeds 1024 migrations."));
+            return Err(refuse_entry(
+                "DB_CONFIG",
+                shown,
+                "more than 1,024 migrations.",
+                DIRECTORY_LIMITS,
+            ));
         }
         migrations.sort_by_key(|m| m.id);
         let summaries: Vec<_> = migrations.iter().map(Migration::summary).collect();
@@ -771,6 +1207,7 @@ impl CapturedInputs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     fn project() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("migrations")).unwrap();
@@ -1183,5 +1620,489 @@ role="target_role"
                 .code,
             "DB_INPUT_IO"
         );
+    }
+
+    fn put(root: &Path, entry: &str, bytes: impl AsRef<[u8]>) {
+        std::fs::write(root.join(entry), bytes).unwrap();
+    }
+    fn rename(root: &Path, from: &str, to: &str) {
+        std::fs::rename(root.join(from), root.join(to)).unwrap();
+    }
+    fn remove(root: &Path, entry: &str) {
+        std::fs::remove_file(root.join(entry)).unwrap();
+    }
+    /// A check inside the supported subset, and the one #422 reports (cli-19)
+    /// with an operator outside it.
+    const SUPPORTED_CHECK: &str = "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE id IS NULL)";
+    const UNSUPPORTED_CHECK: &str = "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE kind = 'snmp' GROUP BY tenant_id, options->>'oid' HAVING count(*) > 1)";
+
+    /// An entry of a project's migrations directory, beside a valid
+    /// `0001_initial.sql`, that `load` refuses: how to make it, what the
+    /// refusal is, and how to follow its advice.
+    struct Refused {
+        /// The entry as the diagnostic names it, relative to the project.
+        entry: &'static str,
+        code: &'static str,
+        /// Fragments the message contains besides the entry.
+        says: &'static [&'static str],
+        make: fn(&Path),
+        /// What the next action says to do.
+        fix: fn(&Path),
+    }
+    fn refused_entries() -> Vec<Refused> {
+        #[allow(unused_mut)]
+        let mut cases = vec![
+            Refused {
+                entry: "migrations/notes.txt",
+                code: "DB_CONFIG",
+                says: &["only <id>_<name>.sql migrations"],
+                make: |r| put(r, "migrations/notes.txt", "notes"),
+                fix: |r| rename(r, "migrations/notes.txt", "notes.txt"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.sql~",
+                code: "DB_CONFIG",
+                says: &["only <id>_<name>.sql migrations"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.sql~",
+                        "CREATE TABLE app.t(id INT);",
+                    )
+                },
+                fix: |r| rename(r, "migrations/0001_initial.sql~", "0001_initial.sql~"),
+            },
+            Refused {
+                entry: "migrations/0002_more.SQL",
+                code: "DB_CONFIG",
+                says: &["only <id>_<name>.sql migrations"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0002_more.SQL",
+                        "CREATE TABLE app.more(id INT);",
+                    )
+                },
+                fix: |r| rename(r, "migrations/0002_more.SQL", "migrations/0002_more.sql"),
+            },
+            Refused {
+                entry: "migrations/old",
+                code: "DB_CONFIG",
+                says: &["only <id>_<name>.sql migrations"],
+                make: |r| std::fs::create_dir(r.join("migrations/old")).unwrap(),
+                fix: |r| rename(r, "migrations/old", "old"),
+            },
+            Refused {
+                entry: "migrations/0002_café.sql",
+                code: "DB_CONFIG",
+                says: &["ASCII letters"],
+                make: |r| put(r, "migrations/0002_café.sql", "CREATE TABLE app.u(id INT);"),
+                fix: |r| rename(r, "migrations/0002_café.sql", "migrations/0002_cafe.sql"),
+            },
+            Refused {
+                entry: "migrations/0000_zero.sql",
+                code: "DB_CONFIG",
+                says: &["positive decimal integer"],
+                make: |r| put(r, "migrations/0000_zero.sql", "CREATE TABLE app.z(id INT);"),
+                fix: |r| rename(r, "migrations/0000_zero.sql", "migrations/0002_zero.sql"),
+            },
+            Refused {
+                entry: "migrations/second.sql",
+                code: "DB_CONFIG",
+                says: &["<numeric-id>_<name>.sql"],
+                make: |r| put(r, "migrations/second.sql", "CREATE TABLE app.s(id INT);"),
+                fix: |r| rename(r, "migrations/second.sql", "migrations/0002_second.sql"),
+            },
+            Refused {
+                entry: "migrations/0002_.sql",
+                code: "DB_CONFIG",
+                says: &["<numeric-id>_<name>.sql"],
+                make: |r| put(r, "migrations/0002_.sql", "CREATE TABLE app.e(id INT);"),
+                fix: |r| rename(r, "migrations/0002_.sql", "migrations/0002_e.sql"),
+            },
+            Refused {
+                entry: "migrations/0002_old.sql",
+                code: "DB_INPUT_IO",
+                says: &["not a regular file"],
+                make: |r| std::fs::create_dir(r.join("migrations/0002_old.sql")).unwrap(),
+                fix: |r| rename(r, "migrations/0002_old.sql", "0002_old.sql"),
+            },
+            Refused {
+                entry: "migrations/0002_hard.sql",
+                code: "DB_INPUT_IO",
+                says: &["more than one hard link"],
+                make: |r| {
+                    put(r, "original.sql", "CREATE TABLE app.h(id INT);");
+                    std::fs::hard_link(r.join("original.sql"), r.join("migrations/0002_hard.sql"))
+                        .unwrap();
+                },
+                fix: |r| {
+                    remove(r, "migrations/0002_hard.sql");
+                    put(r, "migrations/0002_hard.sql", "CREATE TABLE app.h(id INT);");
+                },
+            },
+            Refused {
+                entry: "migrations/01_dup.sql",
+                code: "DB_DUPLICATE_ID",
+                says: &["ID 1", "migrations/0001_initial.sql"],
+                make: |r| put(r, "migrations/01_dup.sql", "CREATE TABLE app.d(id INT);"),
+                fix: |r| rename(r, "migrations/01_dup.sql", "migrations/0002_dup.sql"),
+            },
+            Refused {
+                entry: "migrations/0002_bytes.sql",
+                code: "DB_CONFIG",
+                says: &["UTF-8", "line 2, column 4"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0002_bytes.sql",
+                        b"CREATE TABLE app.b(id INT);\n-- \xff\n",
+                    )
+                },
+                fix: |r| {
+                    put(
+                        r,
+                        "migrations/0002_bytes.sql",
+                        "CREATE TABLE app.b(id INT);\n",
+                    )
+                },
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["not valid TOML", "line 1, column 19"],
+                make: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"\n"),
+                fix: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"]\n"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["line 2, column 1", "`force`"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.toml",
+                        "intent_ids = [\"x\"]\nforce = true\n",
+                    )
+                },
+                fix: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"]\n"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["line 2, column 5", "requires"],
+                make: |r| put(r, "migrations/0001_initial.toml", "[requires]\nx = 1\n"),
+                fix: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.toml",
+                        format!("[requires]\nx = {SUPPORTED_CHECK:?}\n"),
+                    )
+                },
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["UTF-8", "line 1, column 16"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.toml",
+                        b"intent_ids = [\"\xff\"]\n",
+                    )
+                },
+                fix: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"]\n"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_CONFIG",
+                says: &["intent_ids"],
+                make: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"\"]\n"),
+                fix: |r| put(r, "migrations/0001_initial.toml", "intent_ids = [\"x\"]\n"),
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_CHECK_UNSUPPORTED",
+                says: &["snmp_oid_unique", "[requires]"],
+                make: |r| {
+                    let sidecar = format!("[requires]\ncheck_types_known = {SUPPORTED_CHECK:?}\nsnmp_oid_unique = {UNSUPPORTED_CHECK:?}\n");
+                    put(r, "migrations/0001_initial.toml", sidecar)
+                },
+                fix: |r| {
+                    let sidecar = format!("[requires]\ncheck_types_known = {SUPPORTED_CHECK:?}\n");
+                    put(r, "migrations/0001_initial.toml", sidecar)
+                },
+            },
+            Refused {
+                entry: "migrations/0001_initial.toml",
+                code: "DB_METADATA_UNSUPPORTED",
+                says: &["sqlite_rebuild"],
+                make: |r| {
+                    put(
+                        r,
+                        "migrations/0001_initial.toml",
+                        "sqlite_rebuild = \"t\"\n",
+                    )
+                },
+                fix: |r| put(r, "migrations/0001_initial.toml", ""),
+            },
+            Refused {
+                entry: "migrations/0009_orphan.toml",
+                code: "DB_CONFIG",
+                says: &["migrations/0009_orphan.sql"],
+                make: |r| put(r, "migrations/0009_orphan.toml", ""),
+                fix: |r| remove(r, "migrations/0009_orphan.toml"),
+            },
+        ];
+        #[cfg(unix)]
+        {
+            cases.extend([
+                Refused {
+                    // A control character is escaped, never written to a terminal.
+                    entry: "migrations/\"0002_a\\nb.sql\"",
+                    code: "DB_CONFIG",
+                    says: &["ASCII letters"],
+                    make: |r| put(r, "migrations/0002_a\nb.sql", "CREATE TABLE app.n(id INT);"),
+                    fix: |r| remove(r, "migrations/0002_a\nb.sql"),
+                },
+                Refused {
+                    entry: "migrations/0002_link.sql",
+                    code: "DB_INPUT_IO",
+                    says: &["a symbolic link"],
+                    make: |r| {
+                        put(r, "original.sql", "CREATE TABLE app.l(id INT);");
+                        std::os::unix::fs::symlink(
+                            r.join("original.sql"),
+                            r.join("migrations/0002_link.sql"),
+                        )
+                        .unwrap();
+                    },
+                    fix: |r| {
+                        remove(r, "migrations/0002_link.sql");
+                        std::fs::copy(r.join("original.sql"), r.join("migrations/0002_link.sql"))
+                            .unwrap();
+                    },
+                },
+            ]);
+        }
+        // macOS file systems store only UTF-8 names, so this name cannot exist
+        // there.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            cases.extend([Refused {
+                // Bytes that are not UTF-8 are shown escaped.
+                entry: "migrations/\"0002_\\xFF.sql\"",
+                code: "DB_CONFIG",
+                says: &["UTF-8"],
+                make: |r| {
+                    let name = std::ffi::OsStr::from_bytes(b"0002_\xff.sql");
+                    std::fs::write(r.join("migrations").join(name), "SELECT 1;").unwrap()
+                },
+                fix: |r| {
+                    let name = std::ffi::OsStr::from_bytes(b"0002_\xff.sql");
+                    std::fs::remove_file(r.join("migrations").join(name)).unwrap()
+                },
+            }]);
+        }
+        cases
+    }
+
+    /// #422: every refusal of a migrations directory entry names it, in the
+    /// message and in `source`, relative to the project and without the
+    /// project's own path. Its next action is about the directory, not the
+    /// manifest, and following it resolves the refusal.
+    #[test]
+    fn inventory_refusals_name_the_entry_and_advise_on_the_directory() {
+        let manifest_advice = Diagnostic::new("DB_CONFIG", "x").next_action;
+        let generic = Diagnostic::new("DB_NOT_A_REAL_CODE", "x").next_action;
+        for case in refused_entries() {
+            let root = project();
+            put(
+                root.path(),
+                "migrations/0001_initial.sql",
+                "CREATE TABLE app.t(id INT);",
+            );
+            (case.make)(root.path());
+            let manifest = root.path().join("ntnt.toml");
+            let Err(d) = CapturedInputs::load(&manifest, "local", None) else {
+                panic!("{} was accepted", case.entry);
+            };
+            let at = format!("{}: {d} ({:?})", case.entry, d.source);
+            assert_eq!(d.code, case.code, "{at}");
+            assert_eq!(d.source.as_deref(), Some(case.entry), "{at}");
+            assert!(d.message.starts_with(&format!("{}: ", case.entry)), "{at}");
+            for fragment in case.says {
+                assert!(d.message.contains(fragment), "{fragment:?} missing: {at}");
+            }
+            assert!(!d.message.contains(root.path().to_str().unwrap()), "{at}");
+            assert_ne!(d.next_action, manifest_advice, "{at}");
+            assert_ne!(d.next_action, generic, "{at}");
+            assert!(
+                d.next_action.contains("migrations directory") || d.next_action.contains("sidecar"),
+                "{at}: {}",
+                d.next_action
+            );
+            (case.fix)(root.path());
+            if let Err(d) = CapturedInputs::load(&manifest, "local", None) {
+                panic!("{} after following its advice: {d}", case.entry);
+            }
+        }
+    }
+
+    /// #422: names starting with `.` (`.gitkeep`, `.DS_Store`, editor swap
+    /// files and lock links, macOS `._` files) and README or README.<ext> in
+    /// any letter case are not part of the history. They are not read and
+    /// do not change the inputs' identity. Every other entry that is not a
+    /// migration or sidecar is still refused, by name.
+    #[test]
+    fn dotfiles_and_readmes_are_ignored() {
+        let root = project();
+        let manifest = root.path().join("ntnt.toml");
+        put(
+            root.path(),
+            "migrations/0001_initial.sql",
+            "CREATE TABLE app.t(id INT);",
+        );
+        let bare = CapturedInputs::load(&manifest, "local", None).unwrap();
+        for entry in [
+            ".gitkeep",
+            ".DS_Store",
+            ".0001_initial.sql.swp",
+            "._0001_initial.sql",
+            ".0002_hidden.sql",
+            "README",
+            "README.md",
+            "readme.txt",
+            "ReadMe.rst",
+        ] {
+            put(
+                root.path(),
+                &format!("migrations/{entry}"),
+                "not a migration",
+            );
+        }
+        std::fs::create_dir(root.path().join("migrations/.hidden")).unwrap();
+        std::fs::create_dir(root.path().join("migrations/README.d")).unwrap();
+        #[cfg(unix)]
+        {
+            // An Emacs lock link points nowhere; it is never followed.
+            std::os::unix::fs::symlink(
+                "user@host.1:1",
+                root.path().join("migrations/.#0001_initial.sql"),
+            )
+            .unwrap();
+        }
+        // macOS file systems store only UTF-8 names.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let name = std::ffi::OsStr::from_bytes(b".\xff");
+            std::fs::write(root.path().join("migrations").join(name), "x").unwrap();
+        }
+        let ignoring = CapturedInputs::load(&manifest, "local", None).unwrap();
+        assert_eq!(ignoring.input_digest, bare.input_digest);
+        assert_eq!(ignoring.migrations.len(), 1);
+        for entry in [
+            "README.md.bak",
+            "README_.md",
+            "READMEFILE",
+            "readme.",
+            "notes.txt",
+            "0002_more.SQL",
+            "0001_initial.sql~",
+        ] {
+            // Windows drops a trailing dot, so `readme.` would be created as
+            // the README `readme`.
+            if cfg!(windows) && entry.ends_with('.') {
+                continue;
+            }
+            put(root.path(), &format!("migrations/{entry}"), "x");
+            let d = CapturedInputs::load(&manifest, "local", None)
+                .err()
+                .unwrap_or_else(|| panic!("{entry} was accepted"));
+            assert_eq!(d.source, Some(format!("migrations/{entry}")), "{d}");
+            remove(root.path(), &format!("migrations/{entry}"));
+        }
+    }
+
+    /// #422: a file that changes between the checks before and after it is
+    /// read is reported as changed, naming it as the user gave it.
+    #[test]
+    fn a_file_that_changes_while_it_is_captured_is_named() {
+        fn grow_then_open(path: &Path) -> std::io::Result<File> {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)?
+                .write_all(b"\n# appended while ntnt db read the file\n")?;
+            super::super::input_file::open(path)
+        }
+        let root = project();
+        let manifest = root.path().join("ntnt.toml");
+        let d = capture(Input::Manifest(&manifest), grow_then_open, |_| Ok(()))
+            .err()
+            .unwrap();
+        assert_eq!(d.code, "DB_INPUT_IO", "{d}");
+        assert!(
+            d.message.contains("ntnt.toml")
+                && d.message.contains("changed while it was being read"),
+            "{d}"
+        );
+        assert!(d.next_action.contains("Rerun"), "{d}");
+    }
+
+    /// Sidecar refusals give a syntax error's position as toml's own message
+    /// does, at the end of the input too.
+    #[test]
+    fn sidecar_positions_are_the_ones_toml_reports() {
+        for text in [
+            "intent_ids = [\"x\"\n",
+            "intent_ids = [\"x\"",
+            "a = 1\nb = \n",
+            "[requires\nx = 'y'",
+            "é = [\n",
+            "x = \"é\nz\"",
+            "\n\n[requires]\nok = 'x'\n[requires]\n",
+        ] {
+            let error = text.parse::<toml::Table>().unwrap_err();
+            let position = toml_position(text, error.span().unwrap().start);
+            assert!(
+                error
+                    .to_string()
+                    .starts_with(&format!("TOML parse error at {position}\n")),
+                "{text:?}: {position} / {error}"
+            );
+        }
+    }
+
+    /// #422: an unsupported check is named with its phase, and only the
+    /// checks outside the subset are named.
+    #[test]
+    fn unsupported_checks_are_named_with_their_phase() {
+        let root = project();
+        put(
+            root.path(),
+            "migrations/0001_initial.sql",
+            "CREATE TABLE app.t(id INT);",
+        );
+        put(
+            root.path(),
+            "migrations/0001_initial.toml",
+            format!("[requires]\nok = {SUPPORTED_CHECK:?}\nfirst = {UNSUPPORTED_CHECK:?}\n[ensures]\nsecond = \"SELECT 1 FROM app.t; DELETE FROM app.t\"\n\"bad name\" = {SUPPORTED_CHECK:?}\n"),
+        );
+        let d = CapturedInputs::load(&root.path().join("ntnt.toml"), "local", None)
+            .err()
+            .unwrap();
+        assert_eq!(d.code, "DB_CHECK_UNSUPPORTED", "{d}");
+        for fragment in [
+            "first ([requires])",
+            "second ([ensures])",
+            "\"bad name\" ([ensures])",
+        ] {
+            assert!(d.message.contains(fragment), "{fragment:?} missing: {d}");
+        }
+        assert!(!d.message.contains("ok ("), "{d}");
+        assert!(!d.message.contains("DELETE"), "{d}");
     }
 }

@@ -42,10 +42,12 @@ PostgreSQL schema, role and database names derive from it. If `ntnt.toml` exists
 `init` appends the section and keeps every existing byte. It refuses, changing
 nothing, when the manifest already declares that database or one of those secrets,
 or when another declared database already uses `migrations/`. `new` numbers the
-file after the highest existing ID, zero-padded to four digits (or wider, to match
-existing files). Migration names use lowercase ASCII letters, digits and
-underscores, and `new` never overwrites a file. Writing the same files by hand
-works just as well.
+file after the highest existing ID, zero-padded to the width of the widest existing
+ID, or to four digits in an empty directory: a history numbered `001_` to `034_`
+gets `035_`, which `ls` and shell globs list after it. `ntnt db` itself orders
+migrations by numeric ID, not by file name. Migration names use lowercase ASCII
+letters, digits and underscores, and `new` never overwrites a file. Writing the
+same files by hand works just as well.
 
 `init` and `new` take turns through an exclusive lock on `ntnt.toml`. `init` holds
 it from reading the manifest until it has written it, and `new` from reading the
@@ -64,8 +66,14 @@ that lock: `init` also refuses when it sees that the manifest changed, but an ed
 saved just before `init` replaces the file can be lost, so do not run `init` while
 `ntnt.toml` is being edited. No local lock helps across branches: two branches
 that each add the next migration still produce two files with the same ID.
-`status` and `plan` reject that history with `DB_DUPLICATE_ID`; renumbering the
-migration that has not been applied anywhere fixes it.
+`status` and `plan` reject that history with `DB_DUPLICATE_ID`, naming both files;
+renumbering the migration that has not been applied anywhere, with its `.toml`
+sidecar renamed to the same new stem, fixes it. A merged
+migration numbered below one a target already applied is refused for that target
+with `DB_HISTORY_DIVERGENT`, which names it and the ID to renumber it above. An
+applied migration renamed with its ID kept is refused the same way, but named by
+the name it was applied under, with advice to rename it back, with its `.toml`
+sidecar when it has one; an applied migration is never renumbered.
 
 `new` never changes `ntnt.toml`, but like `init` it opens the file for writing to
 lock it, because NFS grants the lock only through such a handle. A `ntnt.toml` that
@@ -73,8 +81,8 @@ lock it, because NFS grants the lock only through such a handle. A `ntnt.toml` t
 local filesystems, and on NFS `new` fails with `DB_SCAFFOLD_IO`. Both commands fail
 that way on a filesystem without file locks. On Windows, file locks are mandatory,
 so while `init` or `new` holds the lock no other program can read `ntnt.toml`: an
-`ntnt db status` or `plan` that reads it at that moment fails with `DB_INPUT_IO`
-and must be rerun.
+`ntnt db status` or `plan` that reads it at that moment fails with `DB_INPUT_IO`,
+naming the manifest and the operating system's error, and must be rerun.
 
 For a ready-made local setup, [`examples/database-dev`](../examples/database-dev/README.md)
 starts PostgreSQL with matching target and scratch databases in one
@@ -118,30 +126,39 @@ CREATE TABLE accounts (
 
 `ntnt db` never creates database files. Create an empty target file and a separate
 empty scratch file (an empty file is a valid SQLite database). Then point the secrets
-at their **absolute** paths:
+at their **absolute** paths. `pwd -P` prints the physical directory: `ntnt db`
+refuses a path through a symbolic link, and `$PWD` keeps one when the project was
+entered through a link (on macOS, `/var` is a link to `/private/var`):
 
 ```sh
 mkdir -p data && touch data/app.sqlite data/replay.sqlite
 export NTNT_ENV=development NTNT_SECRETS_PROVIDER=env
-export APP_DATABASE_FILE="$PWD/data/app.sqlite"
-export APP_REPLAY_FILE="$PWD/data/replay.sqlite"
+export APP_DATABASE_FILE="$(pwd -P)/data/app.sqlite"
+export APP_REPLAY_FILE="$(pwd -P)/data/replay.sqlite"
 
 ntnt db status --target development
-ntnt db plan --target development --out review.json
-# Review review.json and the SQL. Then approve exactly this plan:
-export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review.json)"
-ntnt db migrate --target development --plan review.json
+ntnt db plan --target development --out review-0001.json
+# Review review-0001.json and the SQL. Then approve exactly this plan:
+export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review-0001.json)"
+ntnt db migrate --target development --plan review-0001.json
 ntnt db verify --target development
 ```
 
 The scratch can stay a `touch`ed empty file after your application has opened
 the target: `std/db/sqlite` `connect()` switches a database to WAL mode, and
-`ntnt db` gives an empty scratch the target's journal mode before replaying.
+`ntnt db` gives an empty scratch the target's journal mode before replaying
+(and a 0-byte one its encoding, page size and auto-vacuum too). A
+plan binds the target's journal mode, so a plan made before the application first
+opened the file fails `migrate` with `DB_PLAN_STALE` naming `target setting
+journal_mode: plan delete, now wal`; plan and approve again.
 
 `migrate` without `APP_MIGRATION_APPROVAL` fails with `DB_APPROVAL_REQUIRED` and
-writes nothing. Rerunning the same plan reports `already_applied`. For the next
-change, run `ntnt db new <name>` (it creates `migrations/0002_<name>.sql`), write
-its SQL, and plan, approve and migrate again. Each new plan has a new digest.
+writes nothing; its `next_action` names `APP_MIGRATION_APPROVAL` and the plan's
+digest to set it to, then rerun `migrate` with the same plan. Rerunning the same plan reports `already_applied`. For the next
+change, run `ntnt db new <name>`: it creates `migrations/0002_<name>.sql` and prints
+`ntnt db plan --target <target> --out review-0002.json`. Write its SQL, then plan
+into that new file, approve its digest and migrate it, as above. `--out` never
+replaces a file, so each plan gets its own; each new plan has a new digest.
 
 ### PostgreSQL
 
@@ -218,25 +235,34 @@ export APP_DATABASE="host=127.0.0.1 user=app_owner dbname=app_development passwo
 export APP_REPLAY_DATABASE="host=127.0.0.1 user=app_replay_owner dbname=app_replay password=dev-only-replay sslmode=disable"
 
 ntnt db status --target development
-ntnt db plan --target development --out review.json
-export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review.json)"
-ntnt db migrate --target development --plan review.json
+ntnt db plan --target development --out review-0001.json
+export APP_MIGRATION_APPROVAL="$(jq -r .plan_digest review-0001.json)"
+ntnt db migrate --target development --plan review-0001.json
 ntnt db verify --target development
 ```
 
 A secret without an explicit `sslmode` (or with `sslmode=prefer`, a different user or
-database, or several hosts) fails with `DB_CONNECTION_CONFIG`. An unset or undeclared secret fails with
-`DB_SECRET`. A refused login fails with `DB_POSTGRES` and SQLSTATE `28P01` (wrong
+database, or several hosts) fails with `DB_CONNECTION_CONFIG`. A secret that cannot be resolved fails with
+`DB_SECRET`, which names the secret and whether it is the target's or the scratch's,
+never its value, and says which cause applies, each with its own `next_action`: unset
+or empty in the environment, not declared under `[secrets]`, the env provider disabled
+because `NTNT_ENV` is `production`, an unsupported `NTNT_SECRETS_PROVIDER`, or a
+unix-socket provider that is misconfigured, unavailable or refuses it. A refused login fails with `DB_POSTGRES` and SQLSTATE `28P01` (wrong
 password) or `28000` (for example `peer`): check `pg_hba.conf` and the secret.
 Add `--json` to any command for the machine-readable report. If the
 manifest declares only one database, `--database` is optional; `--target` is
-required by every command except `init` and `new`.
+required by every command except `init` and `new`. Target and database names are
+case-sensitive manifest keys. A name that is not declared fails, echoing it and
+listing the declared ones: `DB_CONFIG` "Target dev is not declared for database
+app; declared targets: development." or `DB_DATABASE_UNKNOWN` "Database ap is not
+declared; declared databases: app.", and `DB_DATABASE_REQUIRED` lists the
+databases to choose from.
 
 ## Explicit configuration and secrets
 
 The example below selects PostgreSQL. See [SQLite](#sqlite-native-files-and-rebuilds) for its file-backed configuration and distinct guarantees.
 
-`--manifest` defaults to `ntnt.toml` in the current directory; there is no implicit ancestor/target selection. The migration directory is relative to that manifest, not the caller's working directory.
+`--manifest` defaults to `ntnt.toml` in the current directory; there is no implicit ancestor/target selection. The migration directory is relative to that manifest, not the caller's working directory. Run `ntnt db` from the project directory or pass `--manifest <path>`: from a subdirectory it fails with `DB_INPUT_IO` "Manifest ntnt.toml: not found in the current directory". Every input file (the manifest, a `--plan` or `--against` file, each migration and sidecar) must be a regular file of at most 1 MiB with a single hard link; a refusal names the file as you gave it and the rule it broke: not found, a symbolic link, not a regular file, larger than 1 MiB, more than one hard link, changed while it was being read, or the operating system's read error.
 
 ```toml
 [databases.app]
@@ -333,7 +359,7 @@ unresolved can still be resolved after upgrading.
 
 ## Exact-plan authority and execution
 
-`approval_secret` is optional for inspection but **required for every execution**, including additive changes and reruns. It names a separate top-level secret, never a connection secret. Its resolved value must be exactly the reviewed `plan_digest` (no whitespace trimming). The deployment/operator publishes that value through a separately protected existing `std/secrets` provider after reviewing the plan and migration SQL. The digest binds SQL/metadata, policy, logical store/target and physical identity; **knowing the digest does not authorize execution**. Obtaining its exact value through the protected provider does. There is no `--approve`, `--force`, self-authorizing manifest Boolean, signing server or new approval service.
+`approval_secret` is optional for inspection but **required for every execution**, including additive changes and reruns. It names a separate top-level secret, never a connection secret. Its resolved value must be exactly the reviewed `plan_digest` (no whitespace trimming). Otherwise `migrate` and `reconcile` fail with `DB_APPROVAL_REQUIRED`, which names the database and its approval secret, never the secret's value: its `next_action` says to set that secret to this plan's `plan_digest` through the secrets provider and rerun with the same plan. For local development with the env provider it adds the command: `export <NAME>=<digest>`, or, for a name a shell cannot export because it holds `.` or `-` (`deploy.approval`, `app-approval`), `env '<name>=<digest>' ntnt db migrate ...` with the same manifest, database, target and plan. A secret the provider cannot read (its configuration is invalid, it is unavailable or denies access, or the value is not Unicode) is refused for that cause instead, with the same advice as a connection secret's. A database that declares no `approval_secret`, or whose secret has no `[secrets.<NAME>]` table, is told to declare it, with the table to add (a dotted name is quoted, as in `[secrets."deploy.approval"]`, since TOML reads `[secrets.deploy.approval]` as nested tables); as the manifest is part of the plan, plan and approve again after that. The deployment/operator publishes that value through a separately protected existing `std/secrets` provider after reviewing the plan and migration SQL. The digest binds SQL/metadata, policy, logical store/target and physical identity; **knowing the digest does not authorize execution**. Obtaining its exact value through the protected provider does. There is no `--approve`, `--force`, self-authorizing manifest Boolean, signing server or new approval service.
 
 For PostgreSQL, use separate application and migrator credentials, and restrict schema DDL/ledger ownership to the migrator. SQLite has no database roles: restrict file/directory access and approval delivery through the operating system and provider, as described below. Development fixtures may use the environment provider; protected deployments use the existing Unix-socket provider and separately controlled approval delivery. NTNT cannot protect against someone who already controls that provider or direct database-owner credentials. Never publish resolved connection strings or provider values. Backup/PITR, restore testing, old-client compatibility and maintenance authorization remain separately operated responsibilities; a committed destructive change is not made reversible by transactional rollback.
 
@@ -347,7 +373,7 @@ For each PostgreSQL migration, the runner:
 4. Verifies the resulting catalog against that exact prefix fingerprint, records the relation locks the transaction holds in `progress[].locks`, and inserts the success ledger entry in the same transaction.
 5. Commits that migration before starting the next. Failure never rolls back an earlier committed migration.
 
-If a lock is not granted within one second, or the session is chosen as a deadlock victim, the whole migration transaction rolls back and is retried after a backoff (250 ms doubling, with jitter), up to 4 attempts; `progress[].lock_retries` counts them. A short lock timeout keeps application queries from queueing behind a migration that is waiting for a lock. Statements that need strong locks (most `ALTER TABLE`, `DROP`, `CREATE INDEX` without `CONCURRENTLY`) still block other access to their table while the migration transaction is open; this is **not online migration tooling** for long rewrites. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the [managed scope](#managed-scope) and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
+If a lock is not granted within one second, or the session is chosen as a deadlock victim, the whole migration transaction rolls back and is retried after a backoff (250 ms doubling, with jitter), up to 4 attempts; `progress[].lock_retries` counts them. A short lock timeout keeps application queries from queueing behind a migration that is waiting for a lock. Statements that need strong locks (most `ALTER TABLE`, `DROP`, `CREATE INDEX` without `CONCURRENTLY`) still block other access to their table while the migration transaction is open; this is **not online migration tooling** for long rewrites. Advisory locks alone only coordinate cooperating migrators. No lock protocol promises to stop administrators or actors with direct DDL privileges. Incoming foreign keys from outside the [managed scope](#managed-scope), into its tables or into the [tables the history creates in other schemas](#objects-the-history-creates-in-other-schemas), and all explicit cascading DDL are refused rather than claiming complete dependency/effect mediation.
 
 Every source/plan is captured before I/O; no validated filename is reopened during execution. A new invocation recaptures it. Same-plan reruns after partial/all commits recognize matching immutable history and the expected catalog at each ordered prefix, without reapplying SQL or rerunning already-applied transition checks. Edited SQL/checks, missing/reordered history, catalog drift, other stores/targets, changed policy/authority or extra unsupported extensions fail closed.
 
@@ -364,6 +390,7 @@ For example, add this alongside the `app` definition above:
 engine = "postgresql"
 schema = "analytics"
 migrations_dir = "migrations/analytics"
+approval_secret = "ANALYTICS_MIGRATION_APPROVAL"
 
 [databases.analytics.targets.development]
 connection_secret = "ANALYTICS_INSPECTION_DATABASE"
@@ -380,7 +407,13 @@ disposable = true
 required = true
 [secrets.ANALYTICS_REPLAY_DATABASE]
 required = true
+[secrets.ANALYTICS_MIGRATION_APPROVAL]
+required = true
 ```
+
+Each database has its own `approval_secret`, so approving a plan for one never
+approves a plan for another. `migrate` refuses a database that declares none with
+`DB_APPROVAL_REQUIRED`, naming the database and saying to declare one.
 
 ```sh
 ntnt db plan --database app --target development --json
@@ -435,13 +468,23 @@ filled_timezone = "SELECT NOT EXISTS (SELECT 1 FROM app.accounts WHERE timezone 
 
 Checks run in name order within each phase. Each must return **exactly one row, one Boolean column, and true** (SQLite represents this as integer `1`, not text or a floating-point value). False, NULL, no rows, multiple rows/columns, wrong type, SQL error and timeout fail the transaction. Reports include check name, phase, source and outcome, never returned values. Only actually attempted target/rehearsal checks count as executed assertions; zero checks remains `not_run`. A check pass before later rollback is not a committed schema guarantee.
 
-The closed PostgreSQL AST subset supports Boolean expressions, identifiers/literals, comparisons and arithmetic, `IS NULL`/`IS NOT NULL`, `EXISTS`/`NOT EXISTS`, scalar subqueries, one managed heap table per SELECT, ordinary column GROUP BY/HAVING and builtin `count(*)`. Each query must have only these recognized clauses. Every table reference in a check must be explicitly qualified with the managed schema (for example, `app.accounts`), including nested queries. Unqualified names are rejected rather than resolved through `search_path`, so a managed table named `pg_class` cannot accidentally become a system-catalog read. Checks use `search_path=pg_catalog` for builtin function/operator lookup; this does not change unqualified migration-script names. The adapter verifies live catalog coverage and builtin base types/indexes, and conservatively rejects database-wide custom implicit/assignment casts before DDL or checks. A check may read a managed view, and a view reads the views it names, so every view in the inspected schemas (the managed schema, each schema the history creates, and each view the history creates in another schema) may use only builtin non-volatile functions. Otherwise, for example when a managed view reads `audit.v`, which calls a routine that writes, a migration's checks fail with `DB_CHECK_UNSUPPORTED` before they run. Builtin operators/functions resolve through the trusted PostgreSQL installation, not a `provolatile` assertion on a user routine.
+The closed PostgreSQL AST subset supports Boolean expressions, identifiers/literals, comparisons and arithmetic, `IS NULL`/`IS NOT NULL`, `EXISTS`/`NOT EXISTS`, scalar subqueries, one managed heap table per SELECT, ordinary column GROUP BY/HAVING and builtin `count(*)`. Each query must have only these recognized clauses. Every table reference in a check must be explicitly qualified with the managed schema (for example, `app.accounts`), including nested queries. Unqualified names are rejected rather than resolved through `search_path`, so a managed table named `pg_class` cannot accidentally become a system-catalog read. Checks use `search_path=pg_catalog` for builtin function/operator lookup; this does not change unqualified migration-script names. The adapter verifies live catalog coverage and builtin base types/indexes, and conservatively rejects database-wide custom implicit/assignment casts before DDL or checks. A check may read a managed view, and a view reads what its query names, so these rules hold for everything a check can reach: every relation in the managed schema and, through the views among them, every relation those views read, transitively and in any schema, including objects the history did not create. Tables there must have builtin column types, relations must be tables, indexes, sequences or plain views, and views may use only builtin non-volatile functions. One disallowed object in that set fails every check of the phase with `DB_CHECK_UNSUPPORTED` before any of them runs: for example, when a managed view reads `audit.v`, which calls a routine that writes. Objects no check can reach, such as a view in `audit` that no managed view reads, do not affect checks. Builtin operators/functions resolve through the trusted PostgreSQL installation, not a `provolatile` assertion on a user routine.
 
 Not supported: arbitrary functions/routines, casts, aliases/joins, SELECT INTO, CTEs, locking clauses, table functions/sampling, windows, wildcard projections, custom types/operators/access methods, session/transaction changes or arbitrary SQL. A SELECT keyword or READ ONLY transaction is **not a purity proof**. Unsupported syntax is rejected before target I/O, never approved by regex. There are at most 64 named checks per migration, each at most 64 KiB; names use simple ASCII identifiers.
 
 `ensures` are transition checks, not permanent invariants: `verify` does not re-execute historical postconditions. Use database constraints for lasting concurrency/future-write enforcement and ordinary native/Intent tests for business behavior. Intent IDs remain traceability, not proof. The SQLite-only `sqlite_rebuild` field below is the sole supported adapter-mode metadata. Other execution/transaction modes remain rejected.
 
-Files use `<positive-decimal-u64>_<ASCII-name>.sql`; names contain letters, digits, `_` or `-`. Ordering is numeric; `01` and `0001` are the same ID and cannot coexist. Gaps are allowed. Sidecars must have the exact SQL stem. The directory contains only SQL and matching TOML files. Orphan sidecars, duplicate IDs, invalid UTF-8, unsafe paths, symlinks, hard links, directories in place of files and nonregular inputs are rejected.
+Files use `<positive-decimal-u64>_<ASCII-name>.sql`; names contain letters, digits, `_` or `-`. Ordering is numeric; `01` and `0001` are the same ID and cannot coexist. Gaps are allowed. Sidecars must have the exact SQL stem. The directory contains only SQL and matching TOML files, apart from entries it ignores: names that start with `.` (`.gitkeep`, `.DS_Store`, editor swap files and lock links, macOS `._` files) and `README` or `README.<ext>` with one extension (`README.md`, `readme.txt`) in any letter case. Ignored entries are never read and are not part of a plan's identity. Every other entry, `*.SQL` files and editor backups such as `0001_initial.sql~` included, is refused by name. Orphan sidecars, duplicate IDs, invalid UTF-8, unsafe paths, symlinks, hard links, directories in place of files and nonregular inputs are rejected.
+
+Each refusal names the entry relative to the project, in its message and `source`
+(`migrations/0002_more.SQL: the migrations directory holds only <id>_<name>.sql
+migrations and their matching .toml sidecars.`), and its `next_action` says what
+to do about the directory. A file that is not UTF-8 gives the line and column of
+its first other byte. A sidecar that is not valid TOML, or holds an unknown key or
+a value of the wrong type, fails with `DB_METADATA_UNSUPPORTED` giving the line
+and column, never the file's contents. `DB_CHECK_UNSUPPORTED` names each check
+outside the supported subset with its phase (`snmp_oid_unique ([requires])`), and
+`DB_DUPLICATE_ID` names both files that share an ID.
 
 Checksum v1 is lowercase SHA-256 over length-framed byte parts. Each part is prefixed by its unsigned 64-bit big-endian byte length. The parts are:
 
@@ -452,6 +495,31 @@ Checksum v1 is lowercase SHA-256 over length-framed byte parts. Each part is pre
 5. exact metadata bytes, or empty bytes when absent
 
 Whitespace, comments, filenames, metadata comments, and even absent versus empty metadata matter. No newline or SQL normalization occurs. Applied ledger entries must be the exact ordered inventory prefix: missing/edited files, inserted historical migrations, reordered IDs and dirty attempts fail before any replay can be mistaken for valid history.
+
+Each of these refusals names the migration in its message and `source`, and its
+`next_action` says how to restore a valid history. `DB_HISTORY_EDITED` names the
+applied migration whose bytes changed, with the checksum the ledger records and the
+checksum its file and sidecar have now (an editor or git `core.autocrlf` that
+changes line endings is a common cause); restore the applied bytes and put the
+change in a new migration. `DB_HISTORY_MISSING` names the applied migration that is
+missing from the migrations directory. `DB_HISTORY_DIVERGENT` names the first
+ledger position whose ID or name differs, with both names. A migration this target
+has not applied that is numbered below the last ID in its ledger, such as one merged
+from another branch, is named with advice to rename it to an unused ID above that
+ID, as for `DB_DUPLICATE_ID`, only if no target has applied or adopted it:
+adoption records migrations without running them, and a migration is never
+renumbered once any target has applied or adopted it. When it has a
+sidecar, the advice names both files and one new stem for them. An adopted
+checkpoint records one checksum for the whole prefix it covers, so its
+`DB_HISTORY_EDITED` names that range of migrations rather than one file. That
+checksum also tells a migration added below the checkpoint's last one from the ones
+it covers: one added migration is named with the same advice, never a covered one.
+When more were added, the advice is to compare the migrations directory with the
+adopted release, keep the covered migrations under the names and bytes they were
+adopted with, and rename each added one to an unused ID above the last. Checksums
+are shown, file contents never; a value read from the ledger is shown only when it
+has the shape NTNT writes there (a migration file name, a decimal ID, a SHA-256
+digest).
 
 Capture is bounded to 1 MiB per input (including a saved review artifact), 16 MiB of migration files, and 1,024 migrations. On PostgreSQL, each replayed step still inspects the whole scratch catalog (#421), so a history that adds a table per migration stays within `plan`'s 120-second deadline up to about 900 migrations, and its first `migrate` from an empty database within the work deadline up to about 600. A history that changes a stable set of tables goes further. For PostgreSQL, a script may have up to 262,144 tokens; each statement is parsed separately, up to 4,096 tokens and recursion depth 64. A larger statement is reported as `SQL_NOT_PARSED` but still replays. SQLite scripts are parsed whole, up to 4,096 tokens (including whitespace tokens) and recursion depth 64; oversized SQLite SQL is unknown, not automatically safe. Source files and manifest policy are captured once, then replay consumes those captured bytes even if their paths are subsequently replaced. A new command recaptures current inputs and invalidates an old binding if they changed.
 
@@ -604,9 +672,11 @@ name, its contents are compared with the replayed history (an unexpected schema 
 drift; with no ledger, objects there need [adoption](#explicit-adoption-of-existing-databases)).
 Schemas the history creates are owned by the migration role on the target and by
 the scratch role in replay; both map to the managed-role marker. `requires`,
-`ensures` and `adoption_checks` still read only managed-schema tables and views;
-the views in these schemas are held to the same check-purity rules as the managed
-schema's ([Immutable SQL inventory](#immutable-sql-inventory)). Lock
+`ensures` and `adoption_checks` still name only managed-schema tables and views.
+The check-purity rules ([Immutable SQL inventory](#immutable-sql-inventory)) cover
+what they can read: the managed schema's relations and, through views, whatever
+those read, in these schemas or any other. One disallowed object there fails
+every check of the phase; an object no check can reach does not. Lock
 predictions, `progress[].locks` and `CREATE INDEX CONCURRENTLY` cover managed-schema
 tables only.
 
@@ -641,7 +711,11 @@ policies and rules follow it, so an index added to `public.audit_log` out of ban
 drift, like an out-of-band `DROP TABLE public.audit_log`, `ALTER TABLE ... ADD COLUMN`
 or `GRANT` on it. The managed schema's coverage rules apply, and managed objects may
 refer to these (a view over `public.audit_log`, foreign keys between them) as they may
-to a created schema. A schema the history creates without a top-level `CREATE SCHEMA`
+to a created schema. A foreign key into one of them from a table the history does not
+create, such as another application's table in `public`, blocks every migration with
+`DB_EXTERNAL_DEPENDENCY`, as one into the managed scope does: a `DELETE` from
+`public.audit_log` could otherwise cascade into rows that nothing inspects. A schema
+the history creates without a top-level `CREATE SCHEMA`
 (in a `DO` block, say) is one of these objects, `schema:<name>`, with whatever the
 history creates in it. Members of an extension follow the extension, which stays
 uncovered when it is installed outside the managed scope.
@@ -719,13 +793,26 @@ ntnt db verify --database app --target development --json
 ```
 
 `--adopt-through` is a positive **migration ID**, not a file count. It is accepted
-only on `plan`, not status, verify, migrate or alongside `--against`. The selected
+only on `plan`, not status, verify, migrate or alongside `--against`. Each
+subcommand's `--help` lists only the flags it takes; one it does not take (such as
+`--adopt-through` on `status`, or `--against` on `migrate` and `reconcile`, which run
+only the plan given with `--plan`) fails with `DB_CONFIG` naming that flag. The selected
 ID must exist in captured source. Gaps in IDs remain valid. Supply the expected SQL
 history/baseline yourself and review it; the tool does not dump the live target and
 then declare that target to be its own reference. The whole selected prefix must
 replay within the adapter's supported grammar in the same isolated scratch used
 for ordinary planning. Only that prefix is replayed; future pending SQL is not
 included in this adoption action. No old migration SQL executes on the target.
+
+A refusal (`DB_ADOPTION_INPUT`) says which requirement failed, with advice for it:
+no `[databases.<name>.adoption_checks]` declared; an `--adopt-through` ID that is
+not in the migrations directory (`Migration ID 7 is not in migrations; the highest
+ID there is 1.`); a target that already has an ntnt ledger, whose history needs
+ordinary `plan` and `migrate`; or a legacy v1 ledger that is empty, records
+migrations that are not applied, or ends at a different ID than the one requested.
+A target that holds tables the selected migrations do not create, such as the
+application's own migration ledger, is refused with `DB_DRIFT` instead; see
+[Retiring an application's previous migration ledger](#retiring-an-applications-previous-migration-ledger).
 
 Declare **at least one named adoption check** in the selected database's manifest:
 
@@ -764,6 +851,84 @@ against current data, then commits only the validated ledger change in that same
 transaction. SQL errors, false checks, drift, wrong targets, unknown ledgers and
 failed cleanup cannot become a successful adoption. An adoption plan never also
 applies pending migrations; plan those separately afterward.
+
+### Retiring an application's previous migration ledger
+
+An application that ran its own migrations usually recorded them in a ledger table
+of its own in the managed schema, such as `public.schema_migrations` (PostgreSQL)
+or `main.schema_migrations` (SQLite). No migration creates that table, so
+`plan --adopt-through <last-id>` refuses the adoption with `DB_DRIFT`: the target
+holds an object the history does not create, and such an object is never adopted.
+The refusal's `next_action` names each table the history does not create and, in
+case one is the old ledger, the steps below for the engine. `ntnt db` never moves
+or drops the table itself. Retire the ledger by hand, outside `ntnt db`, then plan
+the adoption again:
+
+1. Stop the old migration runner, and remove it from deploy scripts, so it cannot
+   recreate the table or apply a file that `ntnt db` now applies. This is the
+   "retire old migration writers" step that
+   [Recognized legacy PostgreSQL history](#recognized-legacy-postgresql-history)
+   asks for.
+2. PostgreSQL: move the table out of the managed schema, to a schema that `ntnt db`
+   does not inspect. Its indexes, constraints and owned sequences move with it, and
+   its rows are kept:
+
+   ```sql
+   CREATE SCHEMA IF NOT EXISTS app_legacy;
+   ALTER TABLE public.schema_migrations SET SCHEMA app_legacy;
+   ```
+
+   `next_action` names `app_legacy`, or, when the managed schema or a schema the
+   history creates has that name, the first of `app_legacy_2`, `app_legacy_3` and so
+   on that none has: a table moved into the scope would still be found when the
+   adoption is planned again. Or archive its rows elsewhere, then
+   `DROP TABLE public.schema_migrations;`.
+3. SQLite: a database file has no other schema that `ntnt db` leaves alone, so copy
+   the table to another file, compare the copy with it, and only then drop it. Open
+   the target with `sqlite3 -bail`, followed by its path, in the directory where the
+   copy, `legacy-ledger.sqlite`, should be written. `-bail` stops the shell at the
+   first error; without it, the shell runs the next statement anyway (in a shell
+   that is already open, run `.bail on`). Then, in turn:
+
+   1. List the other tables whose foreign keys refer to the ledger:
+
+      ```sql
+      SELECT s.name FROM main.sqlite_schema AS s, pragma_foreign_key_list(s.name) AS f
+      WHERE s.type = 'table' AND s.name <> 'schema_migrations' COLLATE NOCASE
+        AND f."table" = 'schema_migrations' COLLATE NOCASE;
+      ```
+
+      It must list no table. If it lists any, stop: with foreign-key enforcement
+      on, dropping the ledger first deletes its rows, and that deletes or changes
+      the rows that refer to them (`ON DELETE CASCADE`, `SET NULL`, `SET DEFAULT`)
+      or makes the drop fail. Remove those foreign keys into the ledger with a
+      reviewed migration first (SQLite removes a foreign key only by rebuilding
+      its table), then list again. Never turn foreign-key enforcement off to drop
+      the ledger: that leaves their references dangling.
+
+   2. Copy the table, and compare the copy with it:
+
+      ```sql
+      ATTACH DATABASE 'legacy-ledger.sqlite' AS legacy;
+      CREATE TABLE legacy.schema_migrations AS SELECT * FROM main.schema_migrations;
+      SELECT (SELECT count(*) FROM legacy.schema_migrations) = (SELECT count(*) FROM main.schema_migrations)
+        AND NOT EXISTS (SELECT * FROM main.schema_migrations EXCEPT SELECT * FROM legacy.schema_migrations);
+      ```
+
+      The last query must print `1`: the copy holds as many rows as the ledger,
+      and each of its rows. If a statement fails, for example because
+      `legacy-ledger.sqlite` already holds a `schema_migrations` table from an
+      earlier copy, the shell stops there and the ledger is untouched: move that
+      file aside and start again.
+
+   3. Only then drop the ledger:
+
+      ```sql
+      DROP TABLE main.schema_migrations;
+      ```
+
+Use the managed schema and table names that `next_action` gives. A table that is
+not an old ledger is ordinary drift: reconcile it deliberately before adopting.
 
 ### Checkpoint and history truth
 
@@ -821,7 +986,10 @@ ownership/physical definitions are refused, not reconstructed, acknowledged or
 repaired. There is no arbitrary Flyway/application-ledger importer and no SQLite
 legacy-ledger import. Do not change checksums or seed a recognized-looking table to
 bypass this boundary. Older NTNT versions do not understand the new states and
-fail closed; retire old migration writers before adopting/importing a deployment.
+fail closed; retire old migration writers before adopting/importing a deployment,
+and retire an application's own ledger as
+[Retiring an application's previous migration ledger](#retiring-an-applications-previous-migration-ledger)
+describes.
 
 ### Rehearsal and operational boundary
 
@@ -864,15 +1032,15 @@ disposable = true
 
 Resolve the connection secrets to **absolute native paths of existing regular files**, not URLs, SQLite URIs, `:memory:`, or connection strings. Provision the empty deployment and scratch files yourself with SQLite first. Do not declare `database`/`role` for SQLite; its managed scope is exactly `main`, the entire file except the reserved ledger. There is no ATTACH, temp namespace, multi-store file, implicit creation or reset. Existing-file adoption is explicit and subject to the same scope/coverage checks.
 
-Files must have one hard link and no symlink path components. Filename components cannot contain `:` on any platform (a Windows drive prefix is allowed); NTFS alternate streams have independent contents but share file-level identity and are not supported. Use the native canonical path on macOS (for example `/private/...`, not its `/var` alias). Identity binds native device/inode or Windows volume/file-index plus available creation time, not merely path spelling. Plans also bind the bundled SQLite version, encoding, page size, auto-vacuum and journal mode, with Unix owner/group/mode or Windows readonly metadata. File paths themselves are not disclosed. Replacement/copying changes identity and requires a new plan. The Unix adapter checks SQLite's open-file movement status without opening and closing a second descriptor that could drop SQLite's POSIX locks; Windows retains a non-delete-sharing guard. Filesystem administrators, local directories and OS ACL administration remain trusted. These checks are **not a filesystem sandbox or full ACL attestation**; use local storage with reliable SQLite locking, not network/shared filesystems.
+Files must have one hard link and no symlink path components. Filename components cannot contain `:` on any platform (a Windows drive prefix is allowed); NTFS alternate streams have independent contents but share file-level identity and are not supported. Use the native canonical path on macOS (for example `/private/...`, not its `/var` alias). Identity binds native device/inode or Windows volume/file-index plus available creation time, not merely path spelling. Plans also bind the bundled SQLite version, encoding, page size, auto-vacuum and journal mode, with Unix owner/group/mode or Windows readonly metadata. File paths themselves are not disclosed: `DB_FILE_IDENTITY` names the role and the secret, as the manifest names it, and the rule the path broke (`Scratch connection secret APP_REPLAY_FILE names a relative path; ...`): a relative path, a file that does not exist, a symbolic link in the path, not a regular file, more than one hard link, `:` in a file name, or a file replaced or moved while `ntnt db` used it. Its `next_action` says how to fix that rule. Replacement/copying changes identity and requires a new plan. The Unix adapter checks SQLite's open-file movement status without opening and closing a second descriptor that could drop SQLite's POSIX locks; Windows retains a non-delete-sharing guard. Filesystem administrators, local directories and OS ACL administration remain trusted. These checks are **not a filesystem sandbox or full ACL attestation**; use local storage with reliable SQLite locking, not network/shared filesystems. A target or scratch file SQLite cannot write (`SQLITE_READONLY` and its extended codes: a read-only file or directory, or a WAL shared-memory file it cannot write) fails with `DB_SQLITE`, which names the file's role and secret and why, never a statement: `The SQLite scratch file (secret APP_REPLAY_FILE) is not writable (SQLITE_READONLY): ...`. Its `next_action` says to make the file and its directory writable; for a target, plan and approve again afterwards, since the plan binds the file's permissions.
 
 ### Transactions, replay and contracts
 
-Support is for the bundled **SQLite 3.54 series**, not an arbitrary separately installed `sqlite3` executable. `status`/`plan`/`verify` open the target readonly and use a deferred snapshot, releasing it before scratch replay. Catalog inspection reads metadata and compiles, but never steps, application programs with a native authorizer to validate their supported effect paths. It does not scan application rows. Replay inspects the scratch catalog after every migration. Each inspection reads every `sqlite_schema` row again, but reads metadata again only for objects whose definitions changed, and compiles a table's or view's programs again only when something they compile may have changed: their own definition, the objects their stored SQL names, the tables their triggers write, or the foreign-key children their actions reach. A change below a table in its foreign-key tree does not compile the table again when the children there check the same thing in their own programs and still compile, and the nesting stays within SQLite's limit, so a history that adds one table per migration to chains, DAGs or hubs of foreign keys compiles each table's programs once. Every inspection reports exactly what a full inspection would. SQLite does not compile a program whose triggers and foreign-key actions nest more than 1,000 levels deep (`SQLITE_LIMIT_TRIGGER_DEPTH`), so a table whose `DELETE` cascades through more than 1,000 `ON DELETE CASCADE` keys, or whose triggers nest that deep, is outside coverage (`DB_COVERAGE_INCOMPLETE` names it). A full inspection, which `status` and `verify` make of the target, compiles every table's programs, and SQLite's work for a chain of cascades grows with the square of its length: a chain of 1,000 tables takes about four seconds of the five-second operation deadline on a release build. Scratch uses a distinct physical file, separate secret and matching settings; `BEGIN IMMEDIATE` owns its rollback-only replay. An empty scratch takes the target's journal mode, because `std/db/sqlite` `connect()` puts application databases in WAL mode and a scratch made with `touch` is not. Any other setting that differs (encoding, page size, auto-vacuum) fails with `DB_SCRATCH_MISMATCH`, which names each setting with both values, for example `page_size: target 4096, scratch 1024`. A nonempty scratch file is rejected, never cleared.
+Support is for the bundled **SQLite 3.54 series**, not an arbitrary separately installed `sqlite3` executable. `status`/`plan`/`verify` open the target readonly and use a deferred snapshot, releasing it before scratch replay. Catalog inspection reads metadata and compiles, but never steps, application programs with a native authorizer to validate their supported effect paths. It does not scan application rows. Replay inspects the scratch catalog after every migration. Each inspection reads every `sqlite_schema` row again, but reads metadata again only for objects whose definitions changed, and compiles a table's or view's programs again only when something they compile may have changed: their own definition, the objects their stored SQL names, the tables their triggers write, or the foreign-key children their actions reach. A change below a table in its foreign-key tree does not compile the table again when the children there check the same thing in their own programs and still compile, and the nesting stays within SQLite's limit, so a history that adds one table per migration to chains, DAGs or hubs of foreign keys compiles each table's programs once. Every inspection reports exactly what a full inspection would. SQLite does not compile a program whose triggers and foreign-key actions nest more than 1,000 levels deep (`SQLITE_LIMIT_TRIGGER_DEPTH`), so a table whose `DELETE` cascades through more than 1,000 `ON DELETE CASCADE` keys, or whose triggers nest that deep, is outside coverage (`DB_COVERAGE_INCOMPLETE` names it). A full inspection, which `status` and `verify` make of the target, compiles every table's programs, and SQLite's work for a chain of cascades grows with the square of its length: a chain of 1,000 tables takes about four seconds of the five-second operation deadline on a release build. Scratch uses a distinct physical file, separate secret and matching settings; `BEGIN IMMEDIATE` owns its rollback-only replay. An empty scratch takes the target's journal mode, because `std/db/sqlite` `connect()` puts application databases in WAL mode and a scratch made with `touch` is not. A scratch with no pages yet (0 bytes, as `touch` makes it) first takes the target's encoding, page size and auto-vacuum too. SQLite fixes the page size and auto-vacuum once the file has a page, and the encoding once it has held a table, so a difference SQLite can no longer change fails with `DB_SCRATCH_MISMATCH`, which names each setting with both values, for example `page_size: target 4096, scratch 1024`; its `next_action` says to replace the scratch with a new empty file. A nonempty scratch file is rejected, never cleared.
 
 Execution opens an existing file only after approval and file-identity checks. It acquires **`BEGIN IMMEDIATE` before inspecting history/catalog for each migration**, revalidating on every acquisition; the writer reservation is not retained between commits. Competing migrators recognize each other's matching committed prefixes instead of applying SQL twice. SQLite's writer lock covers ordinary application writers; it is not an online-DDL guarantee. Dedicated connections enable foreign keys, recursive triggers and CHECK enforcement, `trusted_schema=OFF`, defensive mode, strict quoting, and `synchronous=FULL`. Durable rollback-journal modes and WAL are accepted; journal-off/memory modes are not. The runner does not change the selected persistent journal mode.
 
-The two-second busy timeout, five-second worker/progress deadline, and shared orchestration/reconciliation deadlines bound operations. A migration script on the target runs under `statement_seconds` instead (90 seconds by default, see [time limits](#time-limits)); scratch replay keeps the five-second bound. SQLite interrupts an operation at its deadline, and a statement interrupted there fails with `DB_STATEMENT_LIMIT`, naming the statement and the limit. An operation that has not returned five seconds after its deadline is cancelled: its connection is discarded and never returned to a pool. Native I/O still depends on the OS/filesystem. A busy or interrupted COMMIT is reconciled using a fresh connection and writer reservation, without retrying SQL; if the fresh observation cannot establish the prefix, the result stays unknown. Process termination cannot return acknowledgement: rerun the same approved plan to inspect committed truth first. A hot rollback journal may prevent readonly inspection (`DB_SQLITE_RECOVERY_REQUIRED`); wait for an active writer to finish, or rerun `migrate` with that same approved plan so native recovery and locked reconciliation occur through the authorized path. Do not delete the journal or silently make inspection writable.
+The two-second busy timeout, five-second worker/progress deadline, and shared orchestration/reconciliation deadlines bound operations. A target or scratch file that another connection keeps locked (an open write transaction, a reader that a rollback-journal commit must wait for, or `PRAGMA locking_mode=EXCLUSIVE`, whose connection keeps the lock until it closes) fails with `DB_BUSY` once the busy timeout runs out, or at once where SQLite does not wait (where waiting could deadlock, for example). `DB_BUSY` names the file's role and secret and says that nothing was committed; retry once the writer finishes. A lock conflict within ntnt's own connection (`SQLITE_LOCKED`) is also `DB_BUSY`, but names no other connection, since waiting for one cannot clear it. A migration script on the target runs under `statement_seconds` instead (90 seconds by default, see [time limits](#time-limits)); scratch replay keeps the five-second bound. SQLite interrupts an operation at its deadline, and a statement interrupted there fails with `DB_STATEMENT_LIMIT`, naming the statement and the limit. An operation that has not returned five seconds after its deadline is cancelled: its connection is discarded and never returned to a pool. Native I/O still depends on the OS/filesystem. A busy or interrupted COMMIT is reconciled using a fresh connection and writer reservation, without retrying SQL; if the fresh observation cannot establish the prefix, the result stays unknown. Process termination cannot return acknowledgement: rerun the same approved plan to inspect committed truth first. A hot rollback journal may prevent readonly inspection (`DB_SQLITE_RECOVERY_REQUIRED`); wait for an active writer to finish, or rerun `migrate` with that same approved plan so native recovery and locked reconciliation occur through the authorized path. Do not delete the journal or silently make inspection writable.
 
 SQL, named transition checks, the resulting catalog and the success ledger row are one transaction. SQLite contracts use the same closed SELECT expression grammar described above, with every relation qualified as `main.<table>`; the native authorizer additionally denies side-effecting calls and nonmanaged relations. Only **one integer `1`**, in one row/column, passes. Numeric values other than `1`, floating-point `1.0`, text, NULL, incorrect shape, errors and timeouts fail. Historical checks remain `not_run` on verify/rerun.
 
@@ -882,7 +1050,7 @@ The SQLite dialect parser accepts ordinary table/index/view/trigger DDL and INSE
 
 An index's expressions and partial-index `WHERE` predicate are part of its definition hash, so changing one out of band, for example dropping and recreating the index with another predicate, is drift on that index. SQLite resolves these expressions, like CHECK constraints, when it loads the schema, without consulting the authorizer, so inspection cannot re-check the functions they call. The function allowlist below applies when a migration's `CREATE INDEX` is compiled, in scratch replay and on the target; inspection then requires the target's index to match the replayed definition. SQLite itself allows only deterministic functions of the indexed table's own columns there, with no subqueries. Inspection still compiles the table's INSERT/UPDATE/DELETE programs, which evaluate them.
 
-Only concrete managed relations are eligible. `CREATE TABLE ... AS SELECT` is rejected: native authorization of a pending table name must not authorize a same-named virtual-table source. Express copies as ordinary `CREATE TABLE` followed by `INSERT ... SELECT`, with resolved relations refreshed between native statements. Eponymous virtual/table functions such as `json_each` or `pragma_*` cannot masquerade as ordinary `main` tables. Builtin `count` is available to checks; migration/definition programs additionally allow the native rename helpers and the small builtin set `like`, `substr`, `length`, `printf`, `quote`, `coalesce`, `ifnull`, `lower`, `upper`, `trim`, `abs`, `typeof`, plus the date and time functions `date`, `time`, `datetime`, `julianday`, `unixepoch`, `strftime`, `timediff`, `CURRENT_DATE`, `CURRENT_TIME` and `CURRENT_TIMESTAMP`, so defaults such as `DEFAULT CURRENT_TIMESTAMP` and `DEFAULT (datetime('now'))` work. SQLite itself still refuses non-deterministic calls where determinism is required (CHECK constraints, generated columns, index expressions and predicates). SQLite checks a call when it compiles the statement that makes it, including the body of a trigger that statement fires or a view it reads. A migration statement that calls anything else that way fails with `DB_SQL_UNSUPPORTED`, naming the statement number and what SQLite refused, such as a function (``Statement 3 uses SQLite function `hex` ``) or a table. A trigger or view body that no statement in the migration uses is compiled only during inspection, so a call in it is reported as `DB_COVERAGE_INCOMPLETE`, with the trigger's table or the view in `objects`. Authored PRAGMAs are refused before replay with `DB_REPLAY_UNSUPPORTED`. Any other failing statement is numbered too. A known function name is not permission to load extensions or register application functions.
+Only concrete managed relations are eligible. `CREATE TABLE ... AS SELECT` is rejected: native authorization of a pending table name must not authorize a same-named virtual-table source. Express copies as ordinary `CREATE TABLE` followed by `INSERT ... SELECT`, with resolved relations refreshed between native statements. Eponymous virtual/table functions such as `json_each` or `pragma_*` cannot masquerade as ordinary `main` tables. Builtin `count` is available to checks; migration/definition programs additionally allow the native rename helpers and the small builtin set `like`, `substr`, `length`, `printf`, `quote`, `coalesce`, `ifnull`, `lower`, `upper`, `trim`, `abs`, `typeof`, plus the date and time functions `date`, `time`, `datetime`, `julianday`, `unixepoch`, `strftime`, `timediff`, `CURRENT_DATE`, `CURRENT_TIME` and `CURRENT_TIMESTAMP`, so defaults such as `DEFAULT CURRENT_TIMESTAMP` and `DEFAULT (datetime('now'))` work. SQLite itself still refuses non-deterministic calls where determinism is required (CHECK constraints, generated columns, index expressions and predicates). SQLite checks a call when it compiles the statement that makes it, including the body of a trigger that statement fires or a view it reads. A migration statement that calls anything else that way fails with `DB_SQL_UNSUPPORTED`, naming the statement number and what SQLite refused, such as a function (``Statement 3 uses SQLite function `hex` ``), a table or a recursive common table expression (`WITH RECURSIVE`). A trigger or view body that no statement in the migration uses is compiled only during inspection, so a call in it is reported as `DB_COVERAGE_INCOMPLETE`, with the trigger's table or the view in `objects`. Before replay, a parser gate reads each statement, numbered by SQLite's own statement boundaries. A statement it refuses fails with `DB_REPLAY_UNSUPPORTED`, which names the statement and why: a syntax error, with the keyword, identifier or symbol it stopped near (never a literal), as in ``Statement 2 has a syntax error near `CREAT`.``; the 4,096-token limit for one migration file, whitespace and comments included; an authored PRAGMA, by name (migrations cannot run PRAGMAs); or a statement outside the supported subset, by its leading keywords (``Statement 2 (`CREATE VIRTUAL TABLE`) is outside the supported SQLite subset.``). Its `next_action` says how to fix that cause. Any other failing statement is numbered too, with SQLite's error and the name of its extended result code, such as `Statement 3: UNIQUE constraint failed: accounts.email (SQLITE_CONSTRAINT_UNIQUE).` SQLite's own message is shown only where it holds names alone: a missing or duplicate table, column or other object, which UNIQUE, NOT NULL, FOREIGN KEY or named CHECK constraint failed, or a RAISE message that the trigger's SQL spells out as a literal, with ABORT, FAIL or ROLLBACK (including a ROLLBACK that undoes the migration that created the trigger). Any other message, which could hold a value from the failing row, is reduced to the code's name. In replay the `next_action` says to fix that statement; in `migrate` it says that nothing from the migration was committed, and how to continue. A known function name is not permission to load extensions or register application functions.
 
 Virtual/shadow tables, generated columns, AUTOINCREMENT/`sqlite_sequence`, custom collations/functions, unsafe/unsupported view or trigger programs, statistics/internal objects, bind parameters, ATTACH/DETACH, authored PRAGMAs, transaction/savepoint/session control and extension loading are unsupported. Unsupported catalog coverage blocks a clean result. DML and trigger effects remain review-required (`SQLITE_EFFECTS_NOT_INFERRED`); metadata never turns an unknown effect into automatic safety. Large transformations belong in separately operated application jobs.
 
@@ -911,7 +1079,7 @@ The name must be a simple ordinary table identifier. In the already-owned transa
 
 Explicitly recreate the selected table's named indexes/triggers and any views dropped to allow the rebuild. The selected table's columns/constraints and autoindexes may change. Definition comparisons are conservative: equivalent SQL written differently may still be rejected. Deliberate dependent-object retirement belongs in a separate reviewed migration, not an accidental omission inside this mode. The mode scans row counts **during authorized execution**, not during production planning.
 
-Without this sidecar, a migration that drops a table which other tables reference with `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT` is refused with `DB_REBUILD_REQUIRED` before the drop runs, naming each child table and its action. SQLite deletes every row of a dropped table first. On a target with data, the drop would run those actions, and scratch replay, which starts empty, could not show it. A drop that runs no such action stays allowed: one whose children were dropped first, one whose child foreign keys have no `ON DELETE` action, and a table's reference to itself.
+Without this sidecar, a migration that drops a table which other tables reference with `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT` is refused with `DB_REBUILD_REQUIRED` before the drop runs, naming each child table and its action. Statements before the drop may already have run; the migration is rolled back, so none of their changes are committed. SQLite deletes every row of a dropped table first. On a target with data, the drop would run those actions, and scratch replay, which starts empty, could not show it. A drop that runs no such action stays allowed: one whose children were dropped first, one whose child foreign keys have no `ON DELETE` action, and a table's reference to itself.
 
 The sidecar is for a migration that rebuilds the table: it creates the replacement and copies the rows. A migration that retires the table cannot use it, because the guard requires the same set of tables. To retire a table, first remove the foreign keys that reference it from the tables the refusal names, or drop those tables, earlier in the migration or in an earlier one. SQLite removes a foreign key only by rebuilding its table: create the table again without the key, copy its rows, drop the old table and rename the new one. For example, to retire `accounts` while keeping `posts` and dropping `comments`:
 
@@ -939,7 +1107,37 @@ Plans bind:
 - explicit `execution.format = "postgresql-transactional-v1"` or `"sqlite-transactional-v1"` and ordered engine-specific catalog fingerprints for every migration prefix, including the empty prefix. Old/incomplete artifacts cannot authorize execution;
 - the [time limits](#time-limits) `migrate` will use (`execution.limits`): PostgreSQL's effective limits, and SQLite's `statement_seconds` when the manifest declares a limits table.
 
-`plan_digest` hashes that descriptor. Observation time and display filters are not authority inputs. `--against` checks the saved descriptor's digest, pending descriptors and fresh source/target/base binding. It neither executes nor approves the plan. For `plan --out`, the file contains the compact plan descriptor and result metadata, not duplicate catalog/source display fields; stdout still contains the full report. `status`/`verify --out` save their report. All saved artifacts share the reader's 1 MiB bound: oversized output fails before creating a file rather than producing an unreadable plan. Files are new-only (`--out` cannot replace a source, existing plan or symlink); on Unix, new reports are mode 0600.
+`plan_digest` hashes that descriptor. Observation time and display filters are not authority inputs. `--against` checks the saved descriptor's digest, pending descriptors and fresh source/target/base binding. It neither executes nor approves the plan.
+
+A plan that no longer matches fails with `DB_PLAN_STALE`, for `migrate`, `reconcile`
+and `--against` alike, and the message names the binding that changed:
+
+- the selection, checked before any I/O: `review.json was planned for database app,
+  target development; this run selected database app, target staging.`;
+- an input: the pending migration that changed (with both checksums), was added or
+  was removed; a migration added below the ones the plan treats as applied (named
+  when the plan's ledger tells it from them, with how to run the plan without it or
+  renumber it, also when the plan has nothing pending) or an applied one removed
+  (`status` names it and how to restore it); other changes below them, such as one
+  added and one removed, which `status` names one at a time before you plan again;
+  or the manifest itself, also on an adopted target;
+- the policy: the engine, checked first because limits differ by engine; the
+  limits, as in `[databases.app.limits] in ntnt.toml changed after the plan was
+  made: statement_seconds: plan 90, now 600.`; the schema; or another part of the
+  database's configuration;
+- the target: each identity field that differs, such as `target setting journal_mode:
+  plan delete, now wal` when the application opened a new SQLite file between `plan`
+  and `migrate`, or a PostgreSQL session setting or transport;
+- its history (the ledger covers other migrations than when the plan was made) or its
+  catalog (the schema changed outside migrations).
+
+Its `next_action` says how to get a plan that runs. A saved file that is not an
+intact plan (edited by hand, a forged digest) is refused as invalid instead, without
+naming a target, and a blocked plan says its outcome was not `pass`. An unreadable
+`--against` file is reported as `DB_INPUT_IO` naming the file and the cause, and one
+that is not JSON as `DB_PLAN_INVALID`.
+
+For `plan --out`, the file contains the compact plan descriptor and result metadata, not duplicate catalog/source display fields; stdout still contains the full report. `status`/`verify --out` save their report. All saved artifacts share the reader's 1 MiB bound: oversized output fails before creating a file rather than producing an unreadable plan. Files are new-only (`--out` cannot replace a source, existing plan or symlink); on Unix, new reports are mode 0600. `--out` is checked before any work runs: a file that already exists, a directory that does not, or a path through a file that is not a directory (`review.json/sub/report.json`), fails with `DB_OUTPUT` naming the path and the cause (`Cannot save the plan to review.json: it already exists, and --out never replaces a file.`), and its `next_action` suggests a free name such as `review-0002.json`. A save that fails later names the operating system's error and removes the incomplete file it created, so a rerun can use the same path; the human report then shows no plan digest.
 
 Every saved plan has `authorized = false`, `executable = false`, `automatic_safe = false` (the artifact alone grants no capability), and a `requires_review` or `blocked` classification. Known drop/constraint-removal/cast/CASCADE/DML/authorization hazards are reported conservatively. Lock/scan labels are qualitative, not production duration estimates. Missing data checks and still-deployed application compatibility remain explicit. `migrate` validates the execution format and all prefix evidence under its own lock and requires independent provider authority; the digest alone is not an approval token.
 

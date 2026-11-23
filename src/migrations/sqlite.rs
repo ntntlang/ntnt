@@ -24,6 +24,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long SQLite waits for a lock another connection holds.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 /// How much longer than an operation's own deadline the session waits before
 /// it discards the session: an operation SQLite can interrupt always returns
 /// first, and only one stuck outside SQLite is discarded.
@@ -47,14 +49,17 @@ pub(super) struct Identity {
     pub authority: Value,
 }
 
+/// How a diagnostic about the session's file itself begins; the session
+/// names the file's role and secret in its place (`attribute`).
+const FILE_SUBJECT: &str = "The SQLite file ";
+
 fn sql_error(error: rusqlite::Error) -> Diagnostic {
     // An error that points at a token of the input SQL carries its SQLite code
     // separately from an ordinary failure; classify both by that code.
-    let sqlite = match &error {
-        rusqlite::Error::SqliteFailure(error, _) | rusqlite::Error::SqlInputError { error, .. } => {
-            Some(*error)
-        }
-        _ => None,
+    let (sqlite, text) = match &error {
+        rusqlite::Error::SqliteFailure(error, text) => (Some(*error), text.as_deref()),
+        rusqlite::Error::SqlInputError { error, msg, .. } => (Some(*error), Some(msg.as_str())),
+        _ => (None, None),
     };
     if sqlite.is_some_and(|e| e.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK) {
         return Diagnostic::new("DB_SQLITE_RECOVERY_REQUIRED", "SQLite requires rollback-journal recovery that read-only inspection cannot perform. A writer may still be active; details suppressed.");
@@ -65,13 +70,47 @@ fn sql_error(error: rusqlite::Error) -> Diagnostic {
         Some(rusqlite::ErrorCode::AuthorizationForStatementDenied) => "DB_SQL_UNSUPPORTED",
         _ => "DB_SQLITE",
     };
-    Diagnostic::new(
-        code,
-        &format!(
-            "SQLite operation failed (code {}). Details suppressed.",
-            sqlite.map(|e| e.extended_code).unwrap_or(-1)
+    // SQLite's own message only in shapes that hold identifiers alone, and
+    // always the extended result code's name (#424).
+    let message = match sqlite {
+        // A locked file is not a statement's fault (#425). SQLITE_BUSY is
+        // another connection's lock. The busy timeout bounds the wait for it,
+        // but SQLite returns at once where waiting could deadlock, so the
+        // message gives the limit and never claims the wait happened.
+        Some(e) if e.code == rusqlite::ErrorCode::DatabaseBusy => format!(
+            "{FILE_SUBJECT}is locked ({}): another connection holds its write lock or keeps it in EXCLUSIVE locking mode, or, in rollback-journal mode, is reading it while ntnt commits. ntnt waits up to its {}-second busy timeout for such a lock, and SQLite reports some conflicts at once, without waiting.",
+            super::sqlite_errors::name(e.extended_code),
+            BUSY_TIMEOUT.as_secs()
         ),
-    )
+        // SQLITE_LOCKED is a conflict within one connection (ntnt opens no
+        // shared cache), so no other writer is named.
+        Some(e) if e.code == rusqlite::ErrorCode::DatabaseLocked => format!(
+            "{FILE_SUBJECT}reported a lock conflict within ntnt's own connection to it ({}), not a lock held by another connection.",
+            super::sqlite_errors::name(e.extended_code)
+        ),
+        // A file SQLite cannot write is not a statement's fault.
+        Some(e) if e.code == rusqlite::ErrorCode::ReadOnly => format!(
+            "{FILE_SUBJECT}is not writable ({}): {}.",
+            super::sqlite_errors::name(e.extended_code),
+            super::sqlite_errors::read_only_cause(e.extended_code)
+        ),
+        Some(e) => {
+            let name = super::sqlite_errors::name(e.extended_code);
+            match text.and_then(|text| super::sqlite_errors::detail(e.extended_code, text)) {
+                Some(detail) => format!("{detail} ({name})."),
+                None => format!(
+                    "SQLite operation failed ({name}, code {}). Details suppressed.",
+                    e.extended_code
+                ),
+            }
+        }
+        None => "SQLite operation failed (code -1). Details suppressed.".to_owned(),
+    };
+    let mut d = Diagnostic::new(code, &message);
+    if sqlite.is_some_and(|e| e.code == rusqlite::ErrorCode::DatabaseLocked) {
+        d.next_action = "SQLITE_LOCKED is a conflict inside ntnt's own connection, so waiting for another connection does not clear it. Rerun the same command (migrate, rerun with the same plan, skips any migration already committed); if it fails the same way again, report it as an ntnt bug at https://github.com/ntntlang/ntnt/issues with this message.".to_owned();
+    }
+    d
 }
 fn reserved(name: &str) -> bool {
     name.to_ascii_lowercase().starts_with("_ntnt")
@@ -262,6 +301,8 @@ fn denial(action: &AuthAction<'_>) -> String {
         | DropTempTrigger { .. }
         | DropTempView { .. } => "a temporary object".into(),
         Analyze { .. } => "ANALYZE".into(),
+        Recursive => "a recursive common table expression (WITH RECURSIVE)".into(),
+        Unknown { code, .. } => format!("SQLite authorizer action {code}"),
         _ => "an operation".into(),
     }
 }
@@ -394,14 +435,19 @@ fn known_tables(conn: &Connection) -> Result<std::collections::HashSet<String>> 
 /// a dropped name cannot fall through to an eponymous virtual table later.
 fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Result<()> {
     let conn = &state.conn;
+    // A RAISE(ROLLBACK) undoes the transaction, and with it any trigger it
+    // created, so the triggers a RAISE may come from are read before any
+    // statement runs (review r1).
+    let triggers = trigger_sql(conn);
     let mut batch = rusqlite::Batch::new(conn, sql);
     let mut statement = 0usize;
     loop {
         let active = state.auth.activate(conn, Policy::Migration)?;
         statement += 1;
         let number = statement;
+        let mut failure = Failure::default();
         let result = (|| {
-            let Some(mut statement) = batch.next().map_err(sql_error)? else {
+            let Some(mut statement) = batch.next().map_err(|e| failure.record(e))? else {
                 return Ok(false);
             };
             if statement.parameter_count() != 0 {
@@ -415,7 +461,7 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                 refuse_on_delete_drops(state, number, &dropped)?;
             }
             let mut output = statement.raw_query();
-            while output.next().map_err(sql_error)?.is_some() {}
+            while output.next().map_err(|e| failure.record(e))?.is_some() {}
             Ok(true)
         })();
         drop(active);
@@ -434,16 +480,157 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                     ),
                     // This refusal already names its statement.
                     None if error.code == "DB_REBUILD_REQUIRED" => error,
+                    // The session's file, not this statement, failed (#424).
+                    None if error.message.starts_with(FILE_SUBJECT) => error,
                     // SQLite interrupted the statement at its deadline.
                     None if error.code == "DB_TIMEOUT" => statement_limit(statement, limit, replay),
                     None => {
+                        if let Some(text) = failure.raised.take() {
+                            let created = (sql, statement);
+                            error.message = if raised_literal(conn, &triggers, created, &text) {
+                                format!("a trigger raised: {text} (SQLITE_CONSTRAINT_TRIGGER).")
+                            } else {
+                                "a trigger raised an error whose message is computed, so it is suppressed (SQLITE_CONSTRAINT_TRIGGER).".to_owned()
+                            };
+                        }
                         error.message = format!("Statement {statement}: {}", error.message);
+                        if failure.authoring() {
+                            error.next_action = statement_advice(statement, replay);
+                        }
                         error
                     }
                 });
             }
         }
     }
+}
+
+/// The SQLite result code an authored statement failed with and, for a
+/// RAISE, its raw message, kept out of the diagnostic until it is shown to
+/// be a literal the migration wrote (#424).
+#[derive(Default)]
+struct Failure {
+    code: Option<i32>,
+    raised: Option<String>,
+}
+impl Failure {
+    fn record(&mut self, error: rusqlite::Error) -> Diagnostic {
+        match &error {
+            rusqlite::Error::SqliteFailure(e, text) => {
+                self.code = Some(e.extended_code);
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER {
+                    self.raised = text.clone();
+                }
+            }
+            rusqlite::Error::SqlInputError { error: e, .. } => self.code = Some(e.extended_code),
+            _ => {}
+        }
+        sql_error(error)
+    }
+    /// An error in the statement's own SQL, or in the rows it writes, that a
+    /// change to the migration (or to those rows) fixes.
+    fn authoring(&self) -> bool {
+        use rusqlite::ffi;
+        self.code.is_some_and(|code| {
+            matches!(
+                code & 0xff,
+                ffi::SQLITE_ERROR
+                    | ffi::SQLITE_CONSTRAINT
+                    | ffi::SQLITE_MISMATCH
+                    | ffi::SQLITE_TOOBIG
+                    | ffi::SQLITE_RANGE
+            )
+        })
+    }
+}
+
+/// Whether `text` is the message of a `RAISE(..., '<literal>')` in a trigger
+/// a migration wrote: one the catalog held before the migration ran
+/// (`before`) or holds now, or one that a CREATE TRIGGER before statement
+/// `number` of the migration `sql` created (`created`). Then no row value is
+/// in it. The catalog alone cannot say once a RAISE(ROLLBACK) has undone
+/// the triggers its transaction created (review r1).
+fn raised_literal(
+    conn: &Connection,
+    before: &[String],
+    (sql, number): (&str, usize),
+    text: &str,
+) -> bool {
+    let literal = |trigger: &String| {
+        super::analysis::sqlite_raise_messages(trigger)
+            .iter()
+            .any(|m| m == text)
+    };
+    before.iter().chain(&trigger_sql(conn)).any(literal)
+        || super::analysis::sqlite_created_raise_messages(sql, number.saturating_sub(1))
+            .iter()
+            .any(|m| m == text)
+}
+/// The SQL of every trigger the catalog holds; none if it cannot be read.
+fn trigger_sql(conn: &Connection) -> Vec<String> {
+    rows(
+        conn,
+        "SELECT sql FROM main.sqlite_schema WHERE type='trigger'",
+        &[],
+    )
+    .map(|triggers| {
+        triggers
+            .iter()
+            .filter_map(|row| row[0].as_str().map(str::to_owned))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// What to do about statement `number` of a migration that failed in its
+/// own SQL (#424): in replay, fix it; on a target, nothing from the
+/// migration was committed.
+fn statement_advice(number: usize, replay: bool) -> String {
+    if replay {
+        format!("Fix statement {number} of the migration named in source so that it succeeds when the history replays in order on an empty database, then rerun plan. Replay changed nothing on the target.")
+    } else {
+        format!("Nothing from this migration was committed: its transaction rolled back when statement {number} failed on the target, and progress shows what this run committed before it. If the target's data conflicts with the statement, correct that data and rerun migrate with the same plan; if the migration is wrong, change it, then plan, review and approve again.")
+    }
+}
+
+/// DB_REPLAY_UNSUPPORTED for a migration the SQLite parser gate refuses
+/// (#424): the statement and the cause, with advice for that cause.
+fn replay_unsupported(sql: &str) -> Diagnostic {
+    use super::analysis::SqliteRefusal::*;
+    let Some(refusal) = super::analysis::sqlite_refusal(sql) else {
+        return Diagnostic::new(
+            "DB_REPLAY_UNSUPPORTED",
+            "Migration is outside the supported SQLite subset.",
+        );
+    };
+    let (message, next_action) = match refusal {
+        Syntax { statement, near } => (
+            match near {
+                Some(near) => format!("Statement {statement} has a syntax error near {near}."),
+                None => format!("Statement {statement} has a syntax error."),
+            },
+            format!("Correct statement {statement} in the migration named in source, then rerun plan. Nothing in this migration ran."),
+        ),
+        TokenLimit { statement, limit } => (
+            format!("Statement {statement} passes the {limit}-token limit for one SQLite migration file (whitespace and comments count), so the file is not read further."),
+            format!("Split the migration into smaller migration files that keep its statements in order, each within {limit} tokens, then rerun plan. Nothing in this migration ran."),
+        ),
+        Pragma { statement, name } => (
+            format!("Statement {statement} is PRAGMA {name}; migrations cannot run PRAGMAs."),
+            "Remove the PRAGMA from the migration, then rerun plan. ntnt db sets foreign_keys and recursive_triggers on its own connections, and file settings such as journal_mode belong to the application's connection, not to a migration. Nothing in this migration ran.".to_owned(),
+        ),
+        Unsupported { statement, construct } => (
+            if construct.is_empty() {
+                format!("Statement {statement} is outside the supported SQLite subset.")
+            } else {
+                format!("Statement {statement} (`{construct}`) is outside the supported SQLite subset.")
+            },
+            format!("Rewrite statement {statement} with the statements SQLite migrations support: CREATE, ALTER and DROP TABLE; CREATE and DROP INDEX, VIEW and TRIGGER; and INSERT, UPDATE and DELETE (write CREATE TABLE ... AS SELECT as CREATE TABLE, then INSERT ... SELECT), as docs/DATABASE_MIGRATIONS.md describes under Supported SQL and catalog coverage. Then rerun plan. Nothing in this migration ran."),
+        ),
+    };
+    let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", &message);
+    d.next_action = next_action;
+    d
 }
 
 /// A statement SQLite interrupted at the migration's deadline (#429).
@@ -664,6 +851,39 @@ fn index_metadata(
         properties,
         properties_supported,
     })
+}
+
+/// Name this session's file, by its role and secret and never its path,
+/// in a diagnostic about the file itself: SQLite cannot write it (#424),
+/// or another connection holds it locked (#425). `execute` is a session
+/// that migrates the target.
+fn attribute(owner: &super::sqlite_file::Owner, mut d: Diagnostic, execute: bool) -> Diagnostic {
+    let Some(rest) = d.message.strip_prefix(FILE_SUBJECT) else {
+        return d;
+    };
+    let (role, secret) = (owner.role, &owner.secret);
+    d.message = format!("The SQLite {role} file (secret {secret}) {rest}");
+    // What the operation that hit the lock had committed: nothing. Inspection
+    // never writes and replay never commits. On a target, BEGIN
+    // IMMEDIATE never began, a statement or the ledger insert rolls
+    // back with its migration, and a busy COMMIT leaves the transaction
+    // open until the session is discarded.
+    if d.code == "DB_BUSY" {
+        d.message.push(' ');
+        d.message.push_str(match (role, execute) {
+            ("scratch", _) => "Replay never commits: nothing was committed, and the target was not changed.",
+            (_, true) => "Nothing was committed by the transaction that hit the lock; progress shows any migration this run committed before it.",
+            _ => "Inspection writes nothing, so nothing was committed.",
+        });
+    }
+    if d.code == "DB_SQLITE" {
+        d.next_action = if role == "scratch" {
+            format!("Make the scratch file that {secret} names, and its directory, writable by the user running ntnt (SQLite writes its journal or WAL beside the file), or set {secret} to another empty, writable file; then rerun.")
+        } else {
+            format!("Make the target file that {secret} names, and its directory, writable by the user running ntnt (SQLite writes its journal or WAL beside the file). A plan binds the file's permissions, so then plan, review and approve again, and run migrate with the new plan.")
+        };
+    }
+    d
 }
 
 struct State {
@@ -1066,6 +1286,35 @@ fn differences(target: &Identity, scratch: &Identity) -> String {
     differences.join("; ")
 }
 
+/// Give an empty scratch the target's encoding, page size and auto-vacuum
+/// where they differ (#425), and say whether any did. Only values SQLite
+/// itself can report are set; SQLite ignores one it can no longer change.
+fn adopt_layout(conn: &Connection, scratch: &Value, target: &Value) -> Result<bool> {
+    let mut pragmas = Vec::new();
+    if scratch["encoding"] != target["encoding"] {
+        if let Some(encoding @ ("UTF-8" | "UTF-16le" | "UTF-16be")) = target["encoding"].as_str() {
+            pragmas.push(format!("PRAGMA encoding='{encoding}'"));
+        }
+    }
+    if scratch["page_size"] != target["page_size"] {
+        if let Some(size) = target["page_size"]
+            .as_u64()
+            .filter(|size| (512..=65536).contains(size) && size.is_power_of_two())
+        {
+            pragmas.push(format!("PRAGMA main.page_size={size}"));
+        }
+    }
+    if scratch["auto_vacuum"] != target["auto_vacuum"] {
+        if let Some(mode) = target["auto_vacuum"].as_u64().filter(|mode| *mode <= 2) {
+            pragmas.push(format!("PRAGMA main.auto_vacuum={mode}"));
+        }
+    }
+    for pragma in &pragmas {
+        conn.execute_batch(pragma).map_err(sql_error)?;
+    }
+    Ok(!pragmas.is_empty())
+}
+
 /// A narrow, explicit mode for rebuilding one existing table. It may change that
 /// table's column/constraint definition, but not silently retire other tables or
 /// named dependent objects. Row counts are a guard, not proof of business meaning.
@@ -1160,9 +1409,23 @@ impl Sqlite {
     pub async fn connect(secret: &crate::interpreter::SecretValue, access: Access) -> Result<Self> {
         let path = std::path::PathBuf::from(secret.expose());
         let execute = matches!(access, Access::Execute(_));
+        // File identity refusals name the role and its secret, never the path.
+        let owner = super::sqlite_file::Owner {
+            role: if matches!(access, Access::Scratch(_)) {
+                "scratch"
+            } else {
+                "target"
+            },
+            secret: secret.name().to_owned(),
+        };
+        // Opening reads the schema, so it can find the file locked too.
+        let faults = super::sqlite_file::Owner {
+            role: owner.role,
+            secret: owner.secret.clone(),
+        };
         let state=tokio::time::timeout(IO_TIMEOUT,tokio::task::spawn_blocking(move || {
             if rusqlite::version_number()/1000!=3054 {return Err(Diagnostic::new("DB_ENGINE_VERSION","SQLite adapter supports the bundled SQLite 3.54 series."));}
-            let file=FileBinding::capture(&path)?;
+            let file=FileBinding::capture(&path,owner)?;
             let writable=!matches!(access,Access::Inspect);
             match &access {
                 Access::Execute(expected) if expected["file_id"]!=file.id()=>return Err(Diagnostic::new("DB_WRONG_TARGET","SQLite file identity differs from the reviewed target; no writable connection opened.")),
@@ -1172,7 +1435,7 @@ impl Sqlite {
             let flags=if writable {OpenFlags::SQLITE_OPEN_READ_WRITE} else {OpenFlags::SQLITE_OPEN_READ_ONLY};
             let mut conn=Connection::open_with_flags(file.path(),flags|OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(sql_error)?;
             file.check_connection(&conn)?;
-            conn.busy_timeout(Duration::from_secs(2)).map_err(sql_error)?;
+            conn.busy_timeout(BUSY_TIMEOUT).map_err(sql_error)?;
             conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_SQL_LENGTH,1_048_576).map_err(sql_error)?;
             conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,16*1_048_576).map_err(sql_error)?;
             conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_EXPR_DEPTH,64).map_err(sql_error)?;
@@ -1183,7 +1446,8 @@ impl Sqlite {
             let auth=Authorizer::install(&mut conn)?;
             Ok::<_,Diagnostic>(State{conn,file,writable,auth,cache:Cache::default()})
         })).await.map_err(|_|Diagnostic::new("DB_TIMEOUT","SQLite connection deadline exceeded."))?
-            .map_err(|_|Diagnostic::new("DB_RUNTIME","SQLite connection worker failed."))??;
+            .map_err(|_|Diagnostic::new("DB_RUNTIME","SQLite connection worker failed."))?
+            .map_err(|d| attribute(&faults, d, execute))?;
         let interrupt = state.conn.get_interrupt_handle();
         Ok(Self {
             state: Arc::new(Mutex::new(state)),
@@ -1207,6 +1471,7 @@ impl Sqlite {
     ) -> Result<T> {
         let state = self.state.clone();
         let cancelled = self.interrupted.clone();
+        let execute = self.execute;
         let work = tokio::task::spawn_blocking(move || {
             let mut state = state.lock().map_err(|_| {
                 Diagnostic::new(
@@ -1228,7 +1493,7 @@ impl Sqlite {
                     Some(move || cancelled.load(Ordering::Acquire) || Instant::now() >= deadline),
                 )
                 .map_err(sql_error)?;
-            operation(&mut state)
+            operation(&mut state).map_err(|d| attribute(state.file.owner(), d, execute))
         });
         match tokio::time::timeout(limit + DISCARD_GRACE, work).await {
             Ok(result) => result
@@ -1357,6 +1622,16 @@ impl Sqlite {
             if !empty(s)? {
                 return Err(not_empty());
             }
+            // The empty scratch takes the target's encoding, page size and
+            // auto-vacuum where SQLite can still set them (#425), and then,
+            // below, its journal mode: a file made with `touch` takes all
+            // three. SQLite fixes the page size and auto-vacuum when the file
+            // gets its first page, and the encoding when it first holds a
+            // table (replay's tables roll back), and it ignores a setting it
+            // can no longer change, so the settings are compared again below.
+            if adopt_layout(&s.conn, &identity.settings, &target.settings)? {
+                identity = s.identity()?;
+            }
             // `std/db/sqlite` connect() puts every application database in WAL
             // mode, and a scratch made with `touch` is not. The scratch is
             // disposable and empty, so it takes the target's journal mode.
@@ -1370,13 +1645,15 @@ impl Sqlite {
                 }
             }
             if identity.version != target.version || identity.settings != target.settings {
-                return Err(Diagnostic::new(
+                let mut d = Diagnostic::new(
                     "DB_SCRATCH_MISMATCH",
                     &format!(
                         "SQLite scratch settings differ from the deployment file: {}.",
                         differences(&target, &identity)
                     ),
-                ));
+                );
+                d.next_action = format!("Replace the scratch file that {} names with a new empty file: delete it, then create an empty file at the same path, for example with `touch` (a 0-byte file is a valid SQLite database). ntnt gives an empty scratch the target's encoding, page size, auto-vacuum and journal mode before its first write. Do not reset the target.", s.file.owner().secret);
+                return Err(d);
             }
             s.conn.execute_batch("BEGIN IMMEDIATE").map_err(sql_error)?;
             if !empty(s)? {
@@ -1403,10 +1680,7 @@ impl Sqlite {
                 return Err(super::empty_migration());
             }
             if !super::analysis::analyze_for("sqlite", &migration.sql, "main").replay_supported {
-                return Err(Diagnostic::new(
-                    "DB_REPLAY_UNSUPPORTED",
-                    "Migration is outside the supported SQLite subset.",
-                ));
+                return Err(replay_unsupported(&migration.sql));
             }
             let guard = migration
                 .sqlite_rebuild
@@ -1523,5 +1797,54 @@ impl Sqlite {
         json!({"adapter":"sqlite-catalog-v1","canonicalization_version":1,"sqlite_version_number":version,
             "operations":{"catalog_inspection":"supported_subset","target_ddl":"exact_plan_transactional_subset","sql_contracts":"integer_boolean_native_authorizer","baseline_adoption":"reviewed_prefix_checkpoint","concurrent_indexes":"unsupported"},
             "guarantees":{"execution_transaction":"begin_immediate_before_inspection","atomic_target_ddl_checks_ledger":true,"checks":"native_authorizer_and_closed_expression_grammar","authority":"external_filesystem_and_secret_provider"}})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// CodeRabbit on #445 (sqlite.rs): DB_BUSY says only what is known.
+    /// SQLITE_BUSY is another connection's lock, and the busy timeout is a
+    /// limit, not a wait that happened. SQLITE_LOCKED is a conflict within
+    /// ntnt's own connection, so its advice is not to wait for a writer.
+    #[test]
+    fn lock_errors_say_only_what_is_known() {
+        let error = |code| {
+            super::sql_error(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        let busy = error(rusqlite::ffi::SQLITE_BUSY);
+        assert_eq!(busy.code, "DB_BUSY");
+        assert!(
+            busy.message.starts_with(
+                "The SQLite file is locked (SQLITE_BUSY): another connection holds its write lock"
+            ),
+            "{}",
+            busy.message
+        );
+        assert!(
+            busy.message.ends_with("ntnt waits up to its 2-second busy timeout for such a lock, and SQLite reports some conflicts at once, without waiting."),
+            "{}",
+            busy.message
+        );
+        assert!(busy
+            .next_action
+            .starts_with("Retry once the writer finishes"));
+        assert!(!busy.next_action.contains("waited"), "{}", busy.next_action);
+        let locked = error(rusqlite::ffi::SQLITE_LOCKED);
+        assert_eq!(locked.code, "DB_BUSY");
+        assert_eq!(
+            locked.message,
+            "The SQLite file reported a lock conflict within ntnt's own connection to it (SQLITE_LOCKED), not a lock held by another connection."
+        );
+        assert!(
+            locked
+                .next_action
+                .starts_with("SQLITE_LOCKED is a conflict inside ntnt's own connection"),
+            "{}",
+            locked.next_action
+        );
+        assert!(!locked.next_action.contains("writer finishes"));
     }
 }

@@ -5,6 +5,8 @@ use std::process::Command;
 
 pub struct Fixture {
     pub admin: Client,
+    /// The managed schema.
+    pub schema: String,
     pub root: tempfile::TempDir,
     pub target: String,
     pub scratch: String,
@@ -67,11 +69,15 @@ disposable = true
         .unwrap();
         let mut conn = Client::connect(&target_url, NoTls).unwrap();
         if schema != "public" {
-            conn.batch_execute(&format!("CREATE SCHEMA {schema}"))
-                .unwrap();
+            conn.batch_execute(&format!(
+                "CREATE SCHEMA \"{}\"",
+                schema.replace('"', "\"\"")
+            ))
+            .unwrap();
         }
         Self {
             admin,
+            schema: schema.to_owned(),
             root,
             target,
             scratch,

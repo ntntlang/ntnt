@@ -588,6 +588,31 @@ fn new_numbers_after_the_highest_existing_id_and_keeps_its_padding() {
     assert_eq!(r["migration"]["source"], "000121_wider.sql");
 }
 
+/// A history numbered with three digits, as larrimon's `001_` to `034_` is,
+/// gets three-digit IDs: `035_` lists after `034_` in `ls` and shell-glob
+/// order, which a runner applying `migrations/*.sql` in turn relies on (#431).
+#[test]
+fn new_keeps_a_three_digit_history_in_glob_order() {
+    let root = tempfile::tempdir().unwrap();
+    pass(root.path(), &["init", "--engine", "postgresql"]);
+    let migrations = root.path().join("migrations");
+    for id in 1..=34 {
+        std::fs::write(migrations.join(format!("{id:03}_step.sql")), "SELECT 1;\n").unwrap();
+    }
+    let r = pass(root.path(), &["new", "add_widget"]);
+    assert_eq!(r["migration"]["id"], "35");
+    assert_eq!(r["migration"]["source"], "035_add_widget.sql");
+    let names: Vec<String> = snapshot(&migrations).into_keys().collect();
+    assert_eq!(names.len(), 35);
+    assert_eq!(names.last().unwrap(), "035_add_widget.sql", "{names:?}");
+
+    let output = db(root.path()).args(["new", "add_gadget"]).bounded_output();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("036_add_gadget.sql"), "{text}");
+    assert!(text.contains("--out review-036.json`"), "{text}");
+}
+
 #[test]
 fn new_rejects_invalid_names_without_creating_files() {
     let root = tempfile::tempdir().unwrap();
@@ -968,6 +993,115 @@ fn sqlite_scaffold_runs_the_documented_plan_approve_migrate_loop() {
     assert_eq!(next["migration"]["source"], "0002_add_timezone.sql");
 }
 
+/// #425 (cli-01): the plan command `new` prints names a review file after the
+/// new migration, so the quick start's next-change loop works as printed the
+/// second time too. An --out that exists is refused before any replay,
+/// naming the file and a free name, and the human report shows no digest.
+#[test]
+fn the_printed_next_change_loop_works_every_time() {
+    let root = tempfile::tempdir().unwrap();
+    let init = pass(root.path(), &["init", "--engine", "sqlite"]);
+    let native = root.path().canonicalize().unwrap();
+    let (target, replay) = (native.join("app.sqlite"), native.join("replay.sqlite"));
+    std::fs::File::create(&target).unwrap();
+    std::fs::File::create(&replay).unwrap();
+    let run = |command: &str, approval: Option<&str>| {
+        let words: Vec<&str> = command.split_whitespace().collect();
+        assert_eq!(words[..2], ["ntnt", "db"], "{command}");
+        let mut db = db(root.path());
+        db.args(&words[2..])
+            .env("APP_DATABASE_FILE", &target)
+            .env("APP_REPLAY_FILE", &replay);
+        if let Some(digest) = approval {
+            db.env("APP_MIGRATION_APPROVAL", digest);
+        }
+        db
+    };
+    // init's steps name the same review file as the plan command new prints.
+    let steps = init["next_steps"].to_string();
+    assert!(steps.contains("--out review-0001.json"), "{steps}");
+    for (name, sql, review) in [
+        (
+            "initial",
+            "CREATE TABLE accounts (id INTEGER PRIMARY KEY);\n",
+            "review-0001.json",
+        ),
+        (
+            "add_timezone",
+            "ALTER TABLE accounts ADD COLUMN timezone TEXT;\n",
+            "review-0002.json",
+        ),
+    ] {
+        let output = db(root.path()).args(["new", name]).bounded_output();
+        assert!(output.status.success());
+        let printed = commands(&String::from_utf8_lossy(&output.stdout));
+        let plan = printed[0].replace("<target>", "development");
+        assert!(plan.ends_with(&format!("--out {review}")), "{plan}");
+        // By file name: the temporary directory's own name could hold `name`.
+        let file = format!("_{name}.sql");
+        let migration = std::fs::read_dir(root.path().join("migrations"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|f| f.to_string_lossy().ends_with(&file))
+            })
+            .unwrap();
+        let mut text = std::fs::read_to_string(&migration).unwrap();
+        text.push_str(sql);
+        std::fs::write(&migration, text).unwrap();
+        let reviewed = report(&run(&plan, None).arg("--json").bounded_output());
+        assert_eq!(reviewed["outcome"], "pass", "{reviewed}");
+        let digest = reviewed["plan_digest"].as_str().unwrap();
+        let migrate = format!("ntnt db migrate --target development --plan {review} --json");
+        let applied = report(&run(&migrate, Some(digest)).bounded_output());
+        assert_eq!(applied["outcome"], "pass", "{applied}");
+    }
+    // Planning into an existing file again is refused before any replay,
+    // naming the file and a name that is free.
+    let plan = "ntnt db plan --target development --out review-0002.json";
+    let refused = report(&run(plan, None).arg("--json").bounded_output());
+    assert_eq!(refused["outcome"], "fail", "{refused}");
+    assert!(
+        refused.get("catalog").is_none() && refused.get("plan").is_none(),
+        "{refused}"
+    );
+    let d = &refused["diagnostics"][0];
+    assert_eq!(d["code"], "DB_OUTPUT", "{refused}");
+    assert_eq!(
+        d["message"],
+        "Cannot save the plan to review-0002.json: it already exists, and --out never replaces a file.",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("such as review-0003.json"),
+        "{d}"
+    );
+    assert!(!root.path().join("review-0003.json").exists());
+    let human = run(plan, None).bounded_output();
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(!human.status.success(), "{stdout}");
+    assert!(stdout.contains("DB_OUTPUT"), "{stdout}");
+    assert!(!stdout.contains("Plan digest"), "{stdout}");
+    // A directory that does not exist is named too.
+    let r = report(
+        &run(
+            "ntnt db status --target development --out plans/status.json",
+            None,
+        )
+        .arg("--json")
+        .bounded_output(),
+    );
+    assert_eq!(
+        r["diagnostics"][0]["message"],
+        "Cannot save the report to plans/status.json: its directory plans does not exist.",
+        "{r}"
+    );
+}
+
 /// init and new run outside the db commands' runtime deadline, so every child in
 /// this file is bounded: a stalled `ntnt` process fails its test at the deadline
 /// (killed and reaped) instead of hanging the suite.
@@ -1013,4 +1147,71 @@ fn a_stalled_cli_child_is_stopped_at_its_deadline() {
         "{stalled}"
     );
     assert!(!stalled.status.success(), "{stalled}");
+}
+
+/// #422 (cli-14): the SQLite quick start's commands work in a project entered
+/// through a symlinked directory, where the shell's PWD keeps the link and
+/// `ntnt db` refuses a path through it.
+#[cfg(unix)]
+#[test]
+fn the_sqlite_quick_start_runs_from_a_symlinked_directory() {
+    let guide = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/DATABASE_MIGRATIONS.md"),
+    )
+    .unwrap()
+    .replace("\r\n", "\n");
+    let sqlite = guide
+        .split("\n## Quick start\n")
+        .nth(1)
+        .unwrap()
+        .split("\n### SQLite\n")
+        .nth(1)
+        .unwrap()
+        .split("\n### PostgreSQL\n")
+        .next()
+        .unwrap();
+    let block = sqlite
+        .split("```sh\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    // The lines before the first `ntnt db` command create the files and set
+    // the secrets.
+    let setup: Vec<&str> = block
+        .lines()
+        .take_while(|line| !line.starts_with("ntnt "))
+        .collect();
+    assert!(
+        setup.iter().any(|line| line.contains("APP_DATABASE_FILE")),
+        "{block}"
+    );
+    let real = tempfile::tempdir().unwrap();
+    let links = tempfile::tempdir().unwrap();
+    let project = links.path().join("project");
+    std::os::unix::fs::symlink(real.path(), &project).unwrap();
+    pass(&project, &["init", "--engine", "sqlite"]);
+    pass(&project, &["new", "initial"]);
+    let migration = project.join("migrations/0001_initial.sql");
+    let mut sql = std::fs::read_to_string(&migration).unwrap();
+    sql.push_str("CREATE TABLE accounts (id INTEGER PRIMARY KEY);\n");
+    std::fs::write(&migration, sql).unwrap();
+    let mut shell = Command::new("sh");
+    shell
+        .arg("-c")
+        .arg(format!(
+            "{}\n\"$NTNT\" db status --target development --json",
+            setup.join("\n")
+        ))
+        .env("NTNT", env!("CARGO_BIN_EXE_ntnt"))
+        // As in an interactive shell that entered the project through the link.
+        .env("PWD", &project)
+        .current_dir(&project);
+    for name in SQLITE_SECRETS {
+        shell.env_remove(name);
+    }
+    let output = shell.bounded_output();
+    let r = report(&output);
+    assert_eq!(r["outcome"], "pass", "{r}");
 }

@@ -131,7 +131,7 @@ fn shown(path: &Path) -> String {
 
 /// `value` as one POSIX shell word: unchanged when no character is special to a
 /// shell, otherwise single-quoted with each `'` written as `'\''`.
-fn shell_word(value: &str) -> String {
+pub(super) fn shell_word(value: &str) -> String {
     let plain = |b: u8| b.is_ascii_alphanumeric() || b"_./:@%+=,-".contains(&b);
     if !value.is_empty() && value.bytes().all(plain) {
         value.to_owned()
@@ -142,7 +142,7 @@ fn shell_word(value: &str) -> String {
 
 /// The arguments that keep a printed `ntnt db` command on the same manifest and
 /// logical database, as shell words.
-fn selection_flags(manifest: &Path, database: Option<&str>) -> String {
+pub(super) fn selection_flags(manifest: &Path, database: Option<&str>) -> String {
     let mut flags = String::new();
     if manifest != Path::new("ntnt.toml") {
         flags += &format!(" --manifest {}", shell_word(&manifest.to_string_lossy()));
@@ -154,7 +154,15 @@ fn selection_flags(manifest: &Path, database: Option<&str>) -> String {
 }
 
 /// Local-development steps after init, consistent with the documented quick start.
-fn next_steps(engine: Engine, name: &str, secrets: &[String; 3], flags: &str) -> Vec<String> {
+/// `review` names the plan file for the first migration, which `ntnt db new`
+/// prints too.
+fn next_steps(
+    engine: Engine,
+    name: &str,
+    secrets: &[String; 3],
+    flags: &str,
+    review: &str,
+) -> Vec<String> {
     let [target, replay, approval] = secrets;
     let (provision, values) = match engine {
         Engine::Sqlite => (
@@ -177,8 +185,8 @@ fn next_steps(engine: Engine, name: &str, secrets: &[String; 3], flags: &str) ->
         provision,
         format!("For local development, export NTNT_ENV=development NTNT_SECRETS_PROVIDER=env and set {target} and {replay} to {values}."),
         format!("Create the first migration with `ntnt db new initial{flags}`, then write its SQL."),
-        format!("Run `ntnt db status --target development{flags}`, then `ntnt db plan --target development{flags} --out review.json`."),
-        format!("Review review.json and the SQL, set {approval} to its plan_digest, then run `ntnt db migrate --target development{flags} --plan review.json`."),
+        format!("Run `ntnt db status --target development{flags}`, then `ntnt db plan --target development{flags} --out {review}`."),
+        format!("Review {review} and the SQL, set {approval} to its plan_digest, then run `ntnt db migrate --target development{flags} --plan {review}`."),
     ]
 }
 
@@ -558,7 +566,7 @@ fn initialize_with(
     let held = match std::fs::symlink_metadata(manifest) {
         Err(error) if error.kind() == ErrorKind::NotFound => None,
         _ => Some(inventory::capture(
-            manifest,
+            inventory::Input::Manifest(manifest),
             input_file::open_replaceable,
             |file| lock(manifest, file, try_lock),
         )?),
@@ -589,7 +597,7 @@ fn initialize_with(
             conflict("The manifest cannot be extended with [databases] and [secrets] tables; it may define them inline.")
         })?;
     let (_, config) = CapturedInputs::select(&document, Some(name))?;
-    CapturedInputs::endpoint(&config, "development")?;
+    CapturedInputs::endpoint(&config, name, "development")?;
     let migrations = project_dir(manifest).map_or_else(
         || PathBuf::from(MIGRATIONS_DIR),
         |dir| dir.join(MIGRATIONS_DIR),
@@ -639,7 +647,12 @@ fn initialize_with(
         .and_then(toml::Value::as_table)
         .map_or(0, |databases| databases.len());
     let flags = selection_flags(manifest, (declared > 1).then_some(name));
-    let steps = next_steps(args.engine, name, &secrets, &flags);
+    // The plan file the first migration's plan command names (#425).
+    let review = next_id(&migrations).map_or_else(
+        |_| "review-0001.json".to_owned(),
+        |(id, width)| review_file(id, width),
+    );
+    let steps = next_steps(args.engine, name, &secrets, &flags, &review);
     let mut lines = vec![
         if appended {
             format!(
@@ -699,8 +712,10 @@ pub(super) fn new(args: &NewArgs) -> anyhow::Result<()> {
     finish("new", args.json, create_migration(args))
 }
 
-/// The ID after the highest `<digits>_<name>.sql|.toml` entry, and the widest existing
-/// ID (at least four digits) so a new file keeps the directory's zero padding.
+/// The ID after the highest `<digits>_<name>.sql|.toml` entry, and the width of the
+/// widest existing ID, so a new file keeps the directory's zero padding: a history
+/// numbered `001_` to `034_` gets `035_`, which `ls` and shell globs list after it
+/// (#431). An empty directory starts at four digits.
 fn next_id(dir: &Path) -> Result<(u64, usize)> {
     let unreadable = |error: std::io::Error| {
         Diagnostic::new(
@@ -711,7 +726,7 @@ fn next_id(dir: &Path) -> Result<(u64, usize)> {
             ),
         )
     };
-    let (mut highest, mut width) = (0u64, 4usize);
+    let (mut highest, mut width) = (0u64, 0usize);
     for entry in std::fs::read_dir(dir).map_err(unreadable)? {
         let name = entry.map_err(unreadable)?.file_name();
         let Some((digits, _)) = name
@@ -737,7 +752,14 @@ fn next_id(dir: &Path) -> Result<(u64, usize)> {
             "No migration ID follows the highest existing ID.",
         )
     })?;
-    Ok((next, width))
+    Ok((next, if width == 0 { 4 } else { width }))
+}
+
+/// The plan file for migration `id`, written `width` digits wide as its file
+/// name is: a new file for each migration, since `--out` never replaces one
+/// (#425).
+fn review_file(id: u64, width: usize) -> String {
+    format!("review-{id:0width$}.json")
 }
 
 fn create_migration(args: &NewArgs) -> Result<(Value, Vec<String>)> {
@@ -774,7 +796,8 @@ fn create_migration_with(
     // manifest new may not write is opened read-only, which local filesystems lock
     // as well and NFS refuses.
     let manifest = args.manifest.as_path();
-    let (held, bytes) = inventory::capture(manifest, input_file::open_replaceable, |file| {
+    let input = inventory::Input::Manifest(manifest);
+    let (held, bytes) = inventory::capture(input, input_file::open_replaceable, |file| {
         lock_numbering(manifest, file, try_lock)
     })?;
     let document = CapturedInputs::parse(&bytes)?;
@@ -821,7 +844,8 @@ fn create_migration_with(
             config.engine
         ),
         format!(
-            "Write its SQL, then review it with `ntnt db plan --target <target>{flags} --out review.json`."
+            "Write its SQL, then review it with `ntnt db plan --target <target>{flags} --out {}`.",
+            review_file(id, width)
         ),
     ];
     let report = json!({
@@ -1084,9 +1108,11 @@ mod tests {
 
     /// The manifest locked and captured as init does it.
     fn capture_locked(path: &Path) -> (File, Vec<u8>) {
-        inventory::capture(path, input_file::open_replaceable, |file| {
-            lock(path, file, File::try_lock)
-        })
+        inventory::capture(
+            inventory::Input::Manifest(path),
+            input_file::open_replaceable,
+            |file| lock(path, file, File::try_lock),
+        )
         .unwrap()
     }
 
@@ -1396,6 +1422,54 @@ mod tests {
         assert_new_conflict(&second.unwrap_err(), &manifest);
     }
 
+    /// `new` pads the next ID to the widest existing ID, so a history numbered
+    /// with three digits keeps three; an empty directory starts at four. The
+    /// plan file it names has the same width (#431).
+    #[test]
+    fn new_keeps_the_width_of_the_widest_existing_id() {
+        let cases: [(&[&str], &str, &str); 5] = [
+            (
+                &["001_first.sql", "034_last.sql"],
+                "035_next.sql",
+                "review-035.json",
+            ),
+            (
+                &["0001_first.sql", "0034_last.sql"],
+                "0035_next.sql",
+                "review-0035.json",
+            ),
+            (&[], "0001_next.sql", "review-0001.json"),
+            (
+                &["001_first.sql", "0002_second.sql"],
+                "0003_next.sql",
+                "review-0003.json",
+            ),
+            (
+                &["998_first.sql", "999_last.sql"],
+                "1000_next.sql",
+                "review-1000.json",
+            ),
+        ];
+        for (existing, created, review) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let manifest = dir.path().join("ntnt.toml");
+            initialize(&sqlite_init(&manifest, "app")).unwrap();
+            let migrations = dir.path().join(MIGRATIONS_DIR);
+            for name in existing {
+                std::fs::write(migrations.join(name), "SELECT 1;\n").unwrap();
+            }
+            let (report, lines) = create_migration(&new_migration(&manifest, "next"))
+                .unwrap_or_else(|error| panic!("{existing:?}: {error}"));
+            assert_eq!(report["migration"]["source"], created, "{existing:?}");
+            assert!(migrations.join(created).is_file(), "{existing:?}");
+            assert_eq!(file_names(&migrations).len(), existing.len() + 1);
+            assert!(
+                lines[1].contains(&format!("--out {review}`")),
+                "{existing:?}: {lines:?}"
+            );
+        }
+    }
+
     /// A manifest declaring `app` with its own migrations directory, so that init
     /// can add a database that uses `migrations/`.
     fn manifest_with_app(dir: &Path) -> PathBuf {
@@ -1592,7 +1666,7 @@ mod tests {
             let document = CapturedInputs::parse(text.as_bytes()).unwrap();
             let (name, config) = CapturedInputs::select(&document, None).unwrap();
             assert_eq!(name, "app");
-            let endpoint = CapturedInputs::endpoint(&config, "development").unwrap();
+            let endpoint = CapturedInputs::endpoint(&config, &name, "development").unwrap();
             assert_eq!(endpoint.connection_secret, secrets[0]);
             assert_eq!(config.approval_secret.as_deref(), Some(secrets[2].as_str()));
             for secret in &secrets {

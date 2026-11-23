@@ -4,6 +4,7 @@ use super::adapter::{self, Access, Adapter, Identity};
 use super::adoption::{self, Adoption};
 use super::inventory::{json_digest, CapturedInputs, CatalogDigests};
 use super::model::History;
+use super::plan_state;
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
@@ -39,6 +40,23 @@ fn reconcile_target_matches(observed: &Value, bound: &Value) -> bool {
 /// Validate the descriptor, ordered prefix evidence and exact captured source.
 /// This is pure: no I/O or approval lookup. Old inspection-only artifacts fail closed.
 pub(super) fn validate(inputs: &CapturedInputs, saved: &Value) -> Result<usize> {
+    validate_named(inputs, saved, plan_state::Files::default())
+}
+
+/// `validate`, naming the user's `files` in a refusal. An artifact that is not
+/// an intact saved plan is refused as invalid; then a plan for another
+/// database or target, under another policy or with changed inputs is
+/// refused naming what changed (#423). Each of those checks is also one of
+/// the conditions below, so the same plans are accepted and refused.
+pub(super) fn validate_named(
+    inputs: &CapturedInputs,
+    saved: &Value,
+    files: plan_state::Files,
+) -> Result<usize> {
+    plan_state::intact(saved)?;
+    plan_state::selection(inputs, saved, files)?;
+    plan_state::policy(inputs, saved, files)?;
+    plan_state::inputs(inputs, saved, files)?;
     let plan = &saved["plan"];
     let action = Adoption::from_plan(inputs, saved).map_err(|_| stale())?;
     let end = action.as_ref().map_or(inputs.migrations.len(), |a| a.count);
@@ -158,19 +176,69 @@ fn limits_match(inputs: &CapturedInputs, plan: &Value) -> bool {
     }
 }
 
+/// Whether a POSIX shell takes `name` as a variable name,
+/// `[A-Za-z_][A-Za-z0-9_]*`. `export` refuses the `.` and `-` that a secret
+/// name may hold (CodeRabbit 4656381389).
+fn shell_variable_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// Resolve exact approval through the existing secret provider. The protected
 /// provider and DB owner are trusted boundaries, not adversaries this can sandbox.
-fn authorize(inputs: &CapturedInputs, saved: &Value) -> Result<()> {
-    let reject = || {
-        Diagnostic::new("DB_APPROVAL_REQUIRED", "A separately declared approval_secret must resolve to this exact reviewed plan digest. No target or ledger writes were attempted; provider details suppressed.")
+/// A refusal names the database and its approval secret, never the secret's
+/// value, and says how to approve this plan (#425). `command` (`migrate` or
+/// `reconcile`) with `rerun`, its flags as shell words, runs this plan again.
+fn authorize(inputs: &CapturedInputs, saved: &Value, command: &str, rerun: &str) -> Result<()> {
+    use crate::stdlib::secrets::ManifestSecretError::*;
+    let database = &inputs.database_name;
+    let refuse = |message: String, next_action: String| {
+        let mut d = Diagnostic::new("DB_APPROVAL_REQUIRED", &message);
+        d.next_action = next_action;
+        d
     };
-    let name = inputs.config.approval_secret.as_ref().ok_or_else(reject)?;
-    let approval = crate::stdlib::secrets::require_from_manifest(name, &inputs.document)
-        .map_err(|_| reject())?;
-    if saved["plan_digest"].as_str() != Some(approval.expose()) {
-        return Err(reject());
+    let Some(name) = inputs.config.approval_secret.as_ref() else {
+        let suggested = format!(
+            "{}_MIGRATION_APPROVAL",
+            database.to_ascii_uppercase().replace('-', "_")
+        );
+        return Err(refuse(
+            format!("Database {database} declares no approval_secret, so migrate cannot run any plan for it. No target or ledger writes were attempted."),
+            format!("Declare one: add approval_secret = \"{suggested}\" to [databases.{database}] and a {} table to the manifest. The manifest is part of the plan, so then plan, review and approve again: set {suggested} to the new plan's plan_digest through the secrets provider and run migrate with that plan.", super::secrets_table(&suggested)),
+        ));
+    };
+    // The digest of an intact saved plan: validate ran first.
+    let digest = saved["plan_digest"].as_str().unwrap_or_default();
+    match crate::stdlib::secrets::require_from_manifest(name, &inputs.document) {
+        Ok(approval) if saved["plan_digest"].as_str() == Some(approval.expose()) => Ok(()),
+        Err(Undeclared) => Err(refuse(
+            format!("Approval secret {name} is not declared under [secrets] in the manifest, so database {database}'s approval_secret cannot be resolved. No target or ledger writes were attempted."),
+            format!("Add a {} table to the manifest (the name only, never its value). The manifest is part of the plan, so then plan, review and approve again: set {name} to the new plan's plan_digest through the secrets provider and run migrate with that plan.", super::secrets_table(name)),
+        )),
+        // Unset, or a value that is not this plan's digest: say how to
+        // approve this plan. A name a shell cannot export is passed with
+        // `env`; neither the name nor the hex digest holds a quote.
+        Ok(_) | Err(UnsetInEnvironment | UnsetInProvider) => Err(refuse(
+            format!("Approval secret {name} (database {database}'s approval_secret) does not hold this plan's plan_digest; migrate runs a plan only when it does. No target or ledger writes were attempted; provider details suppressed."),
+            if shell_variable_name(name) {
+                format!("Set {name} to this plan's plan_digest, {digest}, through the secrets provider (for local development with the env provider: export {name}={digest}), then rerun {command} with the same plan.")
+            } else {
+                format!("Set {name} to this plan's plan_digest, {digest}, through the secrets provider, then rerun {command} with the same plan. For local development with the env provider, run `env '{name}={digest}' ntnt db {command}{rerun}`: a shell cannot export {name}, which is not a shell variable name.")
+            },
+        )),
+        // The secret could not be read, so setting it again would not help:
+        // say why, as for a connection secret (the provider's configuration,
+        // availability or access, or a value that is not Unicode).
+        Err(error) => {
+            let mut d = super::report::unresolved_secret("approval", name, &inputs.config.engine, error);
+            d.code = "DB_APPROVAL_REQUIRED".into();
+            d.message.push_str(" No target or ledger writes were attempted.");
+            Err(d)
+        }
     }
-    Ok(())
 }
 
 /// Validate a fresh snapshot under session ownership and native relation locks.
@@ -204,8 +272,13 @@ async fn locked_prefix(
     let action = Adoption::from_plan(inputs, saved)?;
     db.begin_migration(&inputs.config.schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
-    if json!(&identity) != saved["plan"]["binding"]["target"] {
-        return Err(stale());
+    let planned = &saved["plan"]["binding"]["target"];
+    if json!(&identity) != *planned {
+        return Err(plan_state::target(
+            planned,
+            &json!(&identity),
+            &inputs.config.engine,
+        ));
     }
     let history = if action.is_some() {
         let history = db.history().await?;
@@ -230,30 +303,29 @@ async fn locked_prefix(
             digests,
         )
         .await?;
+    let fingerprints = &saved["plan"]["execution"]["prefix_fingerprints"];
+    let base_history = &saved["plan"]["binding"]["base_history_digest"];
     let adopted = if let Some(action) = &action {
-        if !uncovered.is_empty()
-            || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][action.count]
-        {
-            return Err(stale());
+        if !uncovered.is_empty() || fingerprint != fingerprints[action.count] {
+            return Err(plan_state::catalog(inputs, action.count, &uncovered));
         }
         if history == action.after(inputs)? {
             true
         } else {
             action.before(inputs, &history)?;
-            if json_digest(&history) != saved["plan"]["binding"]["base_history_digest"] {
-                return Err(stale());
+            if json_digest(&history) != *base_history {
+                return Err(plan_state::history(inputs, action.base_count(), applied));
             }
             false
         }
     } else {
-        // An index nobody recorded an attempt for is drift, not progress.
-        if !uncovered.is_empty()
-            || applied < base
-            || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][applied]
-            || (applied == base
-                && json_digest(&history) != saved["plan"]["binding"]["base_history_digest"])
-        {
-            return Err(stale());
+        // Name the binding that changed (#423). An index nobody recorded an
+        // attempt for is drift, not progress.
+        if applied < base || (applied == base && json_digest(&history) != *base_history) {
+            return Err(plan_state::history(inputs, base, applied));
+        }
+        if !uncovered.is_empty() || fingerprint != fingerprints[applied] {
+            return Err(plan_state::catalog(inputs, applied, &uncovered));
         }
         false
     };
@@ -331,16 +403,11 @@ async fn reconcile(
 }
 
 async fn connect(inputs: &CapturedInputs, saved: &Value) -> Result<Adapter> {
-    let secret = crate::stdlib::secrets::require_from_manifest(
-        &inputs.endpoint.connection_secret,
-        &inputs.document,
-    )
-    .map_err(|_| {
-        Diagnostic::new(
-            "DB_SECRET",
-            "Cannot resolve target connection secret; provider details suppressed.",
-        )
-    })?;
+    let name = &inputs.endpoint.connection_secret;
+    let secret =
+        crate::stdlib::secrets::require_from_manifest(name, &inputs.document).map_err(|error| {
+            super::report::unresolved_secret("target", name, &inputs.config.engine, error)
+        })?;
     Adapter::connect(
         &secret,
         &inputs.endpoint,
@@ -426,11 +493,12 @@ fn uncertain_commit(report: &Value) -> Option<usize> {
 pub(super) async fn migrate(
     inputs: &CapturedInputs,
     saved: &Value,
+    rerun: &str,
     report: &mut Value,
 ) -> Result<()> {
     validate(inputs, saved)?;
     let action = Adoption::from_plan(inputs, saved)?;
-    authorize(inputs, saved)?;
+    authorize(inputs, saved, "migrate", rerun)?;
     report["database"] = json!(inputs.database_name);
     report["target"] = json!({"name":inputs.target_name,"schema":inputs.config.schema});
     report["plan_digest"] = saved["plan_digest"].clone();
@@ -593,7 +661,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
             if !uncovered.is_empty()
                 || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][reference]
             {
-                return Err(stale());
+                return Err(plan_state::catalog(inputs, reference, &uncovered));
             }
             if let Some(action) = &action {
                 if action.kind == "import_legacy_v1" {
@@ -747,11 +815,21 @@ async fn build_concurrent(
     }
     progress["phase"] = json!("record");
     let (position, catalog) = locked_attempt(db, inputs, saved).await?;
-    if position != applied + 1
-        || !catalog.uncovered.is_empty()
+    if position != applied + 1 {
+        // `history` takes covered counts, not ledger positions: the plan
+        // was made with `base` covered, and the ledger now covers the
+        // migrations before the attempt.
+        let base = validate(inputs, saved)?;
+        return Err(plan_state::history(
+            inputs,
+            base,
+            position.saturating_sub(1),
+        ));
+    }
+    if !catalog.uncovered.is_empty()
         || json_digest(&catalog) != saved["plan"]["execution"]["prefix_fingerprints"][applied + 1]
     {
-        return Err(stale());
+        return Err(plan_state::catalog(inputs, applied + 1, &catalog.uncovered));
     }
     db.resolve_attempt(position, true).await?;
     progress["phase"] = json!("commit");
@@ -773,8 +851,13 @@ async fn locked_attempt(
     let identity = db.identity(&inputs.endpoint).await?;
     // Reconcile accepts a 0.6.1 binding here too. Migrate gets here only after
     // locked_prefix compared the binding exactly on this same session.
-    if !reconcile_target_matches(&json!(&identity), &saved["plan"]["binding"]["target"]) {
-        return Err(stale());
+    let planned = &saved["plan"]["binding"]["target"];
+    if !reconcile_target_matches(&json!(&identity), planned) {
+        return Err(plan_state::target(
+            planned,
+            &json!(&identity),
+            &inputs.config.engine,
+        ));
     }
     let history = db
         .writable_history(&inputs.database_name, &inputs.config.schema)
@@ -787,7 +870,7 @@ async fn locked_attempt(
         )
     })?;
     if applied < base || applied + 1 != position {
-        return Err(stale());
+        return Err(plan_state::history(inputs, base, applied));
     }
     let catalog = db
         .catalog(
@@ -808,6 +891,7 @@ async fn locked_attempt(
 pub(super) async fn reconcile_attempt(
     inputs: &CapturedInputs,
     saved: &Value,
+    rerun: &str,
     report: &mut Value,
 ) -> Result<()> {
     validate(inputs, saved)?;
@@ -817,7 +901,7 @@ pub(super) async fn reconcile_attempt(
             "Adoption plans have no non-transactional attempts to reconcile.",
         ));
     }
-    authorize(inputs, saved)?;
+    authorize(inputs, saved, "reconcile", rerun)?;
     report["database"] = json!(inputs.database_name);
     report["target"] = json!({"name":inputs.target_name,"schema":inputs.config.schema});
     report["plan_digest"] = saved["plan_digest"].clone();
@@ -836,8 +920,13 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
     db.own_migrations(inputs.limits().migrator_wait()).await?;
     db.begin_migration(schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
-    if !reconcile_target_matches(&json!(&identity), &saved["plan"]["binding"]["target"]) {
-        return Err(stale());
+    let planned = &saved["plan"]["binding"]["target"];
+    if !reconcile_target_matches(&json!(&identity), planned) {
+        return Err(plan_state::target(
+            planned,
+            &json!(&identity),
+            &inputs.config.engine,
+        ));
     }
     report["target"]["identity"] = json!(identity);
     let history = db.writable_history(&inputs.database_name, schema).await?;
@@ -953,8 +1042,9 @@ fn pending_write(report: &mut Value, write: &str) {
 
 /// The attempt must lie inside the plan's pending range.
 fn locked_attempt_scope(applied: usize, inputs: &CapturedInputs, saved: &Value) -> Result<()> {
-    if applied < validate(inputs, saved)? {
-        return Err(stale());
+    let base = validate(inputs, saved)?;
+    if applied < base {
+        return Err(plan_state::history(inputs, base, applied));
     }
     Ok(())
 }
@@ -1052,6 +1142,82 @@ role = "owner"
                 assert_eq!(result.unwrap_err().code, "DB_PLAN_STALE");
             }
         }
+    }
+
+    /// #423: a stale plan names the binding that changed, and an edited plan
+    /// is invalid rather than a plan for another target.
+    #[test]
+    fn stale_plans_name_the_binding_that_changed() {
+        let (_project, inputs) = captured("");
+        let plan = descriptor(&inputs);
+        let refusal = |inputs: &CapturedInputs, saved: &Value| validate(inputs, saved).unwrap_err();
+        // Limits are named field by field.
+        let mut limited = plan.clone();
+        limited["execution"]["limits"] = json!({"statement_seconds":91,"migrator_wait_seconds":5});
+        let d = refusal(&inputs, &saved(&limited));
+        assert_eq!(d.code, "DB_PLAN_STALE");
+        assert!(
+            d.message.contains("[databases.app.limits]")
+                && d.message.contains("statement_seconds: plan 91, now 90"),
+            "{}",
+            d.message
+        );
+        // Another target, named with the one selected.
+        let mut other = plan.clone();
+        other["binding"]["target_name"] = json!("staging");
+        let d = refusal(&inputs, &saved(&other));
+        assert_eq!(
+            d.message,
+            "The saved plan was planned for database app, target staging; this run selected database app, target test."
+        );
+        assert!(
+            d.next_action.contains("--database app --target staging"),
+            "{}",
+            d.next_action
+        );
+        // The same field changed by hand keeps the old digest: invalid.
+        let mut edited = saved(&plan);
+        edited["plan"]["binding"]["target_name"] = json!("staging");
+        let d = refusal(&inputs, &edited);
+        assert!(
+            d.message.starts_with("Saved plan is invalid"),
+            "{}",
+            d.message
+        );
+        assert!(!d.message.contains("staging"), "{}", d.message);
+        // A blocked plan says so.
+        let mut blocked = saved(&plan);
+        blocked["outcome"] = json!("unknown");
+        let d = refusal(&inputs, &blocked);
+        assert!(
+            d.message
+                .starts_with("Saved plan is blocked: its outcome is unknown"),
+            "{}",
+            d.message
+        );
+        // Another configuration for the database.
+        let (_changed, changed) =
+            captured("[databases.app.adoption_checks]\nok = \"SELECT true\"\n");
+        let d = refusal(&changed, &saved(&plan));
+        assert!(
+            d.message
+                .starts_with("[databases.app] in the manifest changed after the plan was made"),
+            "{}",
+            d.message
+        );
+        // A migration added after the plan.
+        let (project, _) = captured("");
+        std::fs::write(
+            project.path().join("migrations/0001_initial.sql"),
+            "CREATE TABLE app.t(id int);",
+        )
+        .unwrap();
+        let added = CapturedInputs::load(&project.path().join("ntnt.toml"), "test", None).unwrap();
+        let d = refusal(&added, &saved(&descriptor(&inputs)));
+        assert_eq!(
+            d.message,
+            "0001_initial.sql was added to migrations/ after the plan was made."
+        );
     }
 
     #[test]

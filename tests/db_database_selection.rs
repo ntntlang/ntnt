@@ -166,3 +166,94 @@ role = "analytics_role"
     let report = invoke(root.path(), &[]);
     assert_eq!(report["diagnostics"][0]["code"], "DB_DATABASE_REQUIRED");
 }
+
+/// `ntnt db status <args> --json` without secrets; it never passes here.
+fn status(root: &std::path::Path, args: &[&str]) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["db", "status", "--json"])
+        .args(args)
+        .env("NTNT_ENV", "development")
+        .env("NTNT_SECRETS_PROVIDER", "env")
+        .env_remove("SELECTION_APP")
+        .env_remove("SELECTION_ANALYTICS")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "expected a structured result: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    report["diagnostics"][0].clone()
+}
+
+/// #422 (cli-18): a mistyped --target or --database echoes the value and
+/// lists the declared names (manifest keys, never secrets); the advice names
+/// them too, and following it selects a declared one.
+#[test]
+fn unknown_selections_list_the_declared_names() {
+    let root = project();
+    let manifest_advice = "declare [databases.<name>] with engine, schema";
+    for target in ["dev", "Local"] {
+        let d = status(root.path(), &["--target", target]);
+        assert_eq!(d["code"], "DB_CONFIG", "{d}");
+        assert_eq!(
+            d["message"],
+            format!("Target {target} is not declared for database app; declared targets: local."),
+            "{d}"
+        );
+        let next_action = d["next_action"].as_str().unwrap();
+        assert!(next_action.contains("--target local"), "{d}");
+        assert!(!next_action.contains(manifest_advice), "{d}");
+        assert!(!d.to_string().contains("SELECTION_APP"), "{d}");
+    }
+    // A value a terminal could interpret is escaped.
+    let d = status(root.path(), &["--target", "de\u{1b}[2Jv"]);
+    let message = d["message"].as_str().unwrap();
+    assert!(message.contains("\"de\\u{1b}[2Jv\""), "{d}");
+    assert!(!message.contains('\u{1b}'), "{d}");
+    // Following the advice: the declared target gets as far as its secret.
+    assert_eq!(
+        status(root.path(), &["--target", "local"])["code"],
+        "DB_SECRET"
+    );
+
+    let d = status(root.path(), &["--target", "local", "--database", "ap"]);
+    assert_eq!(d["code"], "DB_DATABASE_UNKNOWN", "{d}");
+    assert_eq!(
+        d["message"],
+        "Database ap is not declared; declared databases: app. No other database was selected.",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("--database app"),
+        "{d}"
+    );
+
+    // With two databases, --database is required and the choices are listed.
+    let manifest = root.path().join("ntnt.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str(
+        "\n[databases.analytics]\nengine = \"postgresql\"\nschema = \"analytics\"\nmigrations_dir = \"not-provisioned\"\n[databases.analytics.targets.local]\nconnection_secret = \"SELECTION_ANALYTICS\"\ndatabase = \"analytics_db\"\nrole = \"analytics_role\"\n[secrets.SELECTION_ANALYTICS]\n",
+    );
+    std::fs::write(&manifest, text).unwrap();
+    let d = status(root.path(), &["--target", "local"]);
+    assert_eq!(d["code"], "DB_DATABASE_REQUIRED", "{d}");
+    assert_eq!(
+        d["message"],
+        "Several logical databases are declared (analytics, app); select one with --database before choosing its target.",
+        "{d}"
+    );
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.contains("--database analytics") && next_action.contains("--database app"),
+        "{d}"
+    );
+    let d = status(root.path(), &["--target", "local", "--database", "app"]);
+    assert_eq!(d["code"], "DB_SECRET", "{d}");
+}

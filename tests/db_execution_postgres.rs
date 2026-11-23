@@ -2373,6 +2373,52 @@ fn drift_names(r: &Value, object: &str, change: &str) -> bool {
         .any(|d| d["object"] == object && d["change"] == change)
 }
 
+/// CodeRabbit on #445 (adoption.rs:34): a managed schema named `user` needs
+/// quotes in SQL. An adoption with no adoption_checks is refused with an
+/// example check; added to the manifest as the advice gives it, the check is
+/// accepted: the adoption plans, and migrates with the check run and passed.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn the_example_adoption_check_quotes_a_schema_named_user() {
+    let f = Fixture::with_schema("user");
+    let accounts = "CREATE TABLE \"user\".accounts (id int PRIMARY KEY, email text NOT NULL);";
+    f.sql("0001_accounts.sql", accounts);
+    f.target()
+        .batch_execute(&format!(
+            "{accounts} INSERT INTO \"user\".accounts VALUES (1, 'a@example.com');"
+        ))
+        .unwrap();
+    let refused = f.command_args("plan", &["--adopt-through", "1"]);
+    assert!(code(&refused, "DB_ADOPTION_INPUT"), "{refused}");
+    let advice = refused["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_ADOPTION_INPUT")
+        .unwrap()["next_action"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let example = advice
+        .split_once("such as ")
+        .and_then(|(_, rest)| rest.split_once(", then plan again"))
+        .map(|(example, _)| example)
+        .unwrap_or_else(|| panic!("no example check in {advice:?}"));
+    let manifest = f.root.path().join("ntnt.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str(&format!("\n[databases.app.adoption_checks]\n{example}\n"));
+    std::fs::write(&manifest, text).unwrap();
+    let plan = f.command_args("plan", &["--adopt-through", "1", "--out", "adoption.json"]);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let adopted = f.apply("adoption.json", plan["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{example}: {adopted}");
+    assert_eq!(adopted["assertions"]["executed"], 1, "{adopted}");
+    assert_eq!(
+        example,
+        r#"no_null_email = "SELECT NOT EXISTS (SELECT 1 FROM \"user\".accounts WHERE email IS NULL)""#
+    );
+}
+
 /// #420: a schema the history creates is managed through its whole life: a
 /// foreign key from it into the managed schema is not an external dependency,
 /// a later rename or DROP SCHEMA replays like any other change, and drift is
@@ -2786,6 +2832,95 @@ CREATE VIEW app.recent AS SELECT id, msg FROM public.audit_log;",
     }
 }
 
+/// CodeRabbit 4656058134 on #445: a table the history does not create, with
+/// a foreign key into a table the history creates outside the managed scope,
+/// blocks execution as one into the managed scope does, with the same
+/// refusal, so an approved DELETE cannot cascade into its rows. Foreign keys
+/// between tables the history creates, managed and outside, in either
+/// direction, still migrate, and the DELETE's cascade reaches them.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn foreign_keys_into_tables_the_history_creates_outside_block_execution() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);
+CREATE TABLE public.audit_log (id int PRIMARY KEY, account int REFERENCES app.accounts (id));
+CREATE TABLE public.audit_detail (id int PRIMARY KEY, log int REFERENCES public.audit_log (id) ON DELETE CASCADE);
+CREATE TABLE app.entries (id int PRIMARY KEY, log int REFERENCES public.audit_log (id) ON DELETE CASCADE);",
+    );
+    migrate_all(&f, "first.json");
+    f.sql(
+        "0002_seed.sql",
+        "INSERT INTO app.accounts VALUES (1);
+INSERT INTO public.audit_log VALUES (1, 1), (2, 1);
+INSERT INTO public.audit_detail VALUES (1, 1), (2, 2);
+INSERT INTO app.entries VALUES (1, 1), (2, 2);",
+    );
+    migrate_all(&f, "second.json");
+    let rows = || -> Vec<i64> {
+        let row = f
+            .target()
+            .query_one(
+                "SELECT (SELECT count(*) FROM public.notes), (SELECT count(*) FROM public.audit_log), (SELECT count(*) FROM public.audit_detail), (SELECT count(*) FROM app.entries)",
+                &[],
+            )
+            .unwrap();
+        (0..4).map(|i| row.get(i)).collect()
+    };
+    let dependency = |r: &Value| {
+        r["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["code"] == "DB_EXTERNAL_DEPENDENCY")
+            .unwrap_or_else(|| panic!("{r}"))
+            .clone()
+    };
+
+    // Another application's table, which the history does not create, refers
+    // to public.audit_log.
+    f.target()
+        .batch_execute(
+            "CREATE TABLE public.notes (id int PRIMARY KEY, log int REFERENCES public.audit_log (id) ON DELETE CASCADE);
+INSERT INTO public.notes VALUES (1, 1), (2, 2);",
+        )
+        .unwrap();
+    f.sql(
+        "0003_prune.sql",
+        "DELETE FROM public.audit_log WHERE id = 2;",
+    );
+    let plan = f.plan("third.json");
+    let outside = f.apply("third.json", plan["plan_digest"].as_str());
+    assert_eq!(outside["outcome"], "fail", "{outside}");
+    assert_eq!(
+        dependency(&outside)["message"],
+        "Incoming foreign keys from outside the managed scope block execution."
+    );
+    assert_eq!(rows(), [2, 2, 2, 2]);
+
+    // A foreign key into the managed schema gets the same refusal.
+    f.target()
+        .batch_execute(
+            "ALTER TABLE public.notes DROP CONSTRAINT notes_log_fkey;
+CREATE TABLE public.notes_accounts (id int PRIMARY KEY, account int REFERENCES app.accounts (id));",
+        )
+        .unwrap();
+    let plan = f.plan("third-managed.json");
+    let managed = f.apply("third-managed.json", plan["plan_digest"].as_str());
+    assert_eq!(managed["outcome"], "fail", "{managed}");
+    assert_eq!(dependency(&managed), dependency(&outside));
+    assert_eq!(rows(), [2, 2, 2, 2]);
+
+    // With neither, the DELETE runs, and cascades only into tables the
+    // history creates.
+    f.target()
+        .batch_execute("DROP TABLE public.notes_accounts")
+        .unwrap();
+    migrate_all(&f, "third-clear.json");
+    assert_eq!(rows(), [2, 1, 1, 1]);
+}
+
 /// Objects a migration creates outside the managed scope without naming the
 /// schema in a statement NTNT reads, through search_path, a DO block or SQL
 /// sqlparser does not parse, are found by replay and inspected alike.
@@ -2979,4 +3114,113 @@ CREATE VIEW app.writes AS SELECT ok FROM {s}.writes;"
             "{s}: the function ran"
         );
     }
+}
+
+/// Check purity gates what a check can reach, not every inspected schema. A
+/// check names only managed-schema relations and reaches others only through
+/// the views among them. Views that call user routines in a schema the
+/// history creates and in `public`, which no managed view reads, leave the
+/// managed schema's checks to run.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_run_beside_views_no_check_can_reach() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE SCHEMA audit;
+CREATE FUNCTION audit.label() RETURNS text IMMUTABLE LANGUAGE sql AS $$ SELECT 'audit' $$;
+CREATE VIEW audit.labelled AS SELECT audit.label() AS label;
+CREATE FUNCTION public.stamp() RETURNS text IMMUTABLE LANGUAGE sql AS $$ SELECT 'public' $$;
+CREATE VIEW public.stamped AS SELECT public.stamp() AS stamp;
+CREATE TABLE app.accounts (id int PRIMARY KEY);",
+    );
+    f.sql("0002_seed.sql", "INSERT INTO app.accounts VALUES (1);");
+    std::fs::write(
+        f.root.path().join("migrations/0002_seed.toml"),
+        "[ensures]\nseeded = 'SELECT EXISTS (SELECT 1 FROM app.accounts)'\n",
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let outside = names_in(&plan["plan"]["execution"]["outside_objects"]);
+    for key in ["public.relation:stamped", "public.routine:stamp()"] {
+        assert!(outside.contains(&key), "{key}: {outside:?}");
+    }
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+}
+
+/// What a check reaches through views is gated in any schema, not only in
+/// the inspected ones. The fixture, not the history, puts a view chain that
+/// ends in a writing function into `pg_catalog` of both databases: a covered
+/// managed view may read there although no plan inspects it. A managed view
+/// over the chain is refused before its check runs, so the function never
+/// writes (a sequence advance would survive the rollback).
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_refuse_views_that_reach_a_writing_function_outside_the_inspected_scope() {
+    let f = Fixture::new();
+    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Checks lock what they read in SHARE mode, which a view grants with
+    // UPDATE. Only a superuser writes a system catalog, so the function
+    // runs as its owner.
+    for database in [&f.target, &f.scratch] {
+        config.dbname(database);
+        let mut admin = config.connect(postgres::NoTls).unwrap();
+        admin
+            .batch_execute(
+                "SET allow_system_table_mods = on;
+CREATE TABLE pg_catalog.ntnt_test_calls (n bigint);
+CREATE SEQUENCE pg_catalog.ntnt_test_call_count;
+CREATE FUNCTION pg_catalog.ntnt_test_touch() RETURNS boolean VOLATILE SECURITY DEFINER LANGUAGE sql
+  AS $$ INSERT INTO pg_catalog.ntnt_test_calls VALUES (nextval('pg_catalog.ntnt_test_call_count')) RETURNING true $$;
+CREATE VIEW pg_catalog.ntnt_test_writes AS SELECT pg_catalog.ntnt_test_touch() AS ok;
+CREATE VIEW pg_catalog.ntnt_test_relay AS SELECT ok FROM pg_catalog.ntnt_test_writes;
+GRANT SELECT, UPDATE ON pg_catalog.ntnt_test_relay, pg_catalog.ntnt_test_writes TO PUBLIC;",
+            )
+            .unwrap();
+    }
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.accounts (id int PRIMARY KEY);",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0001_initial.toml"),
+        "[ensures]\nempty = 'SELECT NOT EXISTS (SELECT 1 FROM app.accounts)'\n",
+    )
+    .unwrap();
+    f.sql(
+        "0002_writes.sql",
+        "CREATE VIEW app.writes AS SELECT ok FROM pg_catalog.ntnt_test_relay;",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_writes.toml"),
+        "[ensures]\nwrites = 'SELECT EXISTS (SELECT 1 FROM app.writes WHERE ok)'\n",
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert!(code(&r, "DB_CHECK_UNSUPPORTED"), "{r}");
+    // The first migration's check ran and committed; the check that reads
+    // the chain never ran.
+    assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+    config.dbname(&f.target);
+    let row = config
+        .connect(postgres::NoTls)
+        .unwrap()
+        .query_one(
+            "SELECT (SELECT count(*) FROM pg_catalog.ntnt_test_calls), (SELECT is_called FROM pg_catalog.ntnt_test_call_count)",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        (row.get::<_, i64>(0), row.get::<_, bool>(1)),
+        (0, false),
+        "the function ran"
+    );
 }

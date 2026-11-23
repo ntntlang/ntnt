@@ -20,9 +20,15 @@ role = "target_role"
     .unwrap();
     root
 }
+/// `ntnt db status` in `root` with the development env provider and no
+/// DB_TARGET, whatever the developer's shell sets: a test that reaches the
+/// secret gets DB_SECRET, never a connection (#382).
 fn inspect(root: &std::path::Path) -> serde_json::Value {
     let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
         .args(["db", "status", "--target", "local", "--json"])
+        .env("NTNT_ENV", "development")
+        .env("NTNT_SECRETS_PROVIDER", "env")
+        .env_remove("DB_TARGET")
         .current_dir(root)
         .output()
         .unwrap();
@@ -43,6 +49,198 @@ fn duplicate_numeric_ids_are_rejected_before_connecting() {
         inspect(root.path())["diagnostics"][0]["code"],
         "DB_DUPLICATE_ID"
     );
+}
+
+/// #422: a refused migrations entry is named relative to the project in the
+/// report's message and `source`, and the next action is about the
+/// migrations directory, not the manifest (cli-07, cli-19).
+#[test]
+fn inventory_refusals_name_the_entry_in_the_report() {
+    let supported = "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE id IS NULL)";
+    let unsupported = "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE kind = 'snmp' GROUP BY tenant_id, options->>'oid' HAVING count(*) > 1)";
+    for (entry, contents, code, says) in [
+        (
+            "migrations/0001_one.sql~".to_owned(),
+            "x".to_owned(),
+            "DB_CONFIG",
+            "only <id>_<name>.sql migrations",
+        ),
+        (
+            "migrations/0001_one.toml".to_owned(),
+            "intent_ids = [\"x\"\n".to_owned(),
+            "DB_METADATA_UNSUPPORTED",
+            "line 1, column 19",
+        ),
+        (
+            "migrations/0001_one.toml".to_owned(),
+            format!("[requires]\ncheck_types_known = {supported:?}\nsnmp_oid_unique = {unsupported:?}\n"),
+            "DB_CHECK_UNSUPPORTED",
+            "snmp_oid_unique ([requires])",
+        ),
+    ] {
+        let root = project();
+        std::fs::write(
+            root.path().join("migrations/0001_one.sql"),
+            "CREATE TABLE app.t (id int);",
+        )
+        .unwrap();
+        std::fs::write(root.path().join(&entry), contents).unwrap();
+        let report = inspect(root.path());
+        let d = &report["diagnostics"][0];
+        assert_eq!(d["code"], code, "{d}");
+        assert_eq!(d["source"], entry.as_str(), "{d}");
+        let message = d["message"].as_str().unwrap();
+        assert!(message.starts_with(&format!("{entry}: ")), "{d}");
+        assert!(message.contains(says), "{d}");
+        assert!(!message.contains("check_types_known"), "{d}");
+        let next_action = d["next_action"].as_str().unwrap();
+        assert!(!next_action.contains("[databases.<name>]"), "{d}");
+    }
+}
+
+/// #422: a `.gitkeep` or README in migrations/ no longer stops every
+/// command: inspection gets past the inventory to the unset secret.
+#[test]
+fn dotfiles_and_readmes_in_migrations_are_ignored() {
+    let root = project();
+    std::fs::write(
+        root.path().join("migrations/0001_one.sql"),
+        "CREATE TABLE app.t (id int);",
+    )
+    .unwrap();
+    for entry in [".gitkeep", "README.md"] {
+        std::fs::write(root.path().join("migrations").join(entry), "").unwrap();
+    }
+    let report = inspect(root.path());
+    assert_eq!(report["diagnostics"][0]["code"], "DB_SECRET", "{report}");
+}
+
+/// `ntnt db <args> --json` in `dir` without secrets: its first diagnostic.
+fn first_diagnostic(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .arg("db")
+        .args(args)
+        .arg("--json")
+        .env_remove("DB_TARGET")
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{args:?} passed");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&output.stderr)));
+    report["diagnostics"][0].clone()
+}
+fn says(d: &serde_json::Value, fragments: &[&str]) {
+    let message = d["message"].as_str().unwrap();
+    for fragment in fragments {
+        assert!(message.contains(fragment), "{fragment:?} missing: {d}");
+    }
+}
+
+/// #422 (cli-11): a manifest that cannot be captured is named as the user
+/// gave it, with the cause, and following the advice resolves it.
+#[test]
+fn an_unreadable_manifest_is_named_with_its_cause() {
+    let root = project();
+    let routes = root.path().join("routes");
+    std::fs::create_dir(&routes).unwrap();
+    let status = ["status", "--target", "local"];
+    fn manifest(name: &str) -> Vec<&str> {
+        vec!["status", "--target", "local", "--manifest", name]
+    }
+    // From a project subdirectory, ntnt.toml is not in the current directory.
+    let d = first_diagnostic(&routes, &status);
+    assert_eq!(d["code"], "DB_INPUT_IO", "{d}");
+    assert_eq!(d["source"], "ntnt.toml", "{d}");
+    says(&d, &["ntnt.toml", "not found", "--manifest"]);
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(next_action.contains("--manifest"), "{d}");
+    // ntnt db new reads the manifest the same way.
+    let d = first_diagnostic(&routes, &["new", "second"]);
+    assert_eq!(d["code"], "DB_INPUT_IO", "{d}");
+    says(&d, &["ntnt.toml", "not found", "--manifest"]);
+    // Following the advice: the manifest is captured; the unset secret stops.
+    let d = first_diagnostic(&routes, &manifest("../ntnt.toml"));
+    assert_eq!(d["code"], "DB_SECRET", "{d}");
+    let d = first_diagnostic(root.path(), &manifest("nope.toml"));
+    assert_eq!(d["source"], "nope.toml", "{d}");
+    says(&d, &["nope.toml", "not found"]);
+    std::fs::create_dir(root.path().join("dir.toml")).unwrap();
+    says(
+        &first_diagnostic(root.path(), &manifest("dir.toml")),
+        &["dir.toml", "not a regular file"],
+    );
+    std::fs::write(root.path().join("big.toml"), vec![b'#'; (1 << 20) + 1]).unwrap();
+    says(
+        &first_diagnostic(root.path(), &manifest("big.toml")),
+        &["big.toml", "larger than 1 MiB"],
+    );
+    std::fs::hard_link(
+        root.path().join("ntnt.toml"),
+        root.path().join("linked.toml"),
+    )
+    .unwrap();
+    let d = first_diagnostic(root.path(), &manifest("linked.toml"));
+    assert_eq!(d["code"], "DB_INPUT_IO", "{d}");
+    says(&d, &["linked.toml", "more than one hard link"]);
+    std::fs::remove_file(root.path().join("linked.toml")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("ntnt.toml", root.path().join("link.toml")).unwrap();
+        let d = first_diagnostic(root.path(), &manifest("link.toml"));
+        says(&d, &["link.toml", "a symbolic link"]);
+        assert!(
+            d["next_action"].as_str().unwrap().contains("--manifest"),
+            "{d}"
+        );
+        // Following the advice: the file the link points to.
+        let d = first_diagnostic(root.path(), &manifest("ntnt.toml"));
+        assert_eq!(d["code"], "DB_SECRET", "{d}");
+        use std::os::unix::fs::PermissionsExt;
+        let locked = root.path().join("locked.toml");
+        std::fs::copy(root.path().join("ntnt.toml"), &locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A user who can read it anyway (root) cannot see this refusal.
+        if std::fs::read(&locked).is_err() {
+            says(
+                &first_diagnostic(root.path(), &manifest("locked.toml")),
+                &["locked.toml", "cannot be read", "denied"],
+            );
+        }
+    }
+}
+
+/// #422 (cli-11): a missing or unreadable --plan file is named the same way.
+#[test]
+fn an_unreadable_plan_file_is_named_with_its_cause() {
+    let root = project();
+    let migrate = |plan: &str| {
+        first_diagnostic(
+            root.path(),
+            &["migrate", "--target", "local", "--plan", plan],
+        )
+    };
+    let d = migrate("missing.json");
+    assert_eq!(d["code"], "DB_INPUT_IO", "{d}");
+    assert_eq!(d["source"], "missing.json", "{d}");
+    says(&d, &["--plan", "missing.json", "not found"]);
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("ntnt db plan --out"),
+        "{d}"
+    );
+    std::fs::create_dir(root.path().join("plans")).unwrap();
+    says(
+        &migrate("plans"),
+        &["--plan", "plans", "not a regular file"],
+    );
+    let d = first_diagnostic(
+        root.path(),
+        &["reconcile", "--target", "local", "--plan", "missing.json"],
+    );
+    says(&d, &["--plan", "missing.json", "not found"]);
 }
 
 #[test]
@@ -241,6 +439,141 @@ fn time_limits_are_validated_before_connecting() {
             "{d}"
         );
     }
+}
+
+/// #432 (cli-08): each subcommand's --help lists only the flags it accepts.
+#[test]
+fn each_subcommand_help_lists_only_the_flags_it_accepts() {
+    let help = |command: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["db", command, "--help"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let common = [
+        "--manifest",
+        "--database",
+        "--target",
+        "--json",
+        "--out",
+        "--object",
+    ];
+    for (command, accepted, refused) in [
+        (
+            "status",
+            &["--against"][..],
+            &["--adopt-through", "--plan", "--fail-on-pending"][..],
+        ),
+        (
+            "plan",
+            &["--against", "--adopt-through"],
+            &["--plan", "--fail-on-pending"],
+        ),
+        ("verify", &["--against"], &["--adopt-through", "--plan"]),
+        (
+            "migrate",
+            &["--plan"],
+            &["--against", "--adopt-through", "--fail-on-pending"],
+        ),
+        (
+            "reconcile",
+            &["--plan"],
+            &["--against", "--adopt-through", "--fail-on-pending"],
+        ),
+    ] {
+        let text = help(command);
+        for flag in common.iter().chain(accepted) {
+            assert!(
+                text.contains(&format!("{flag} ")) || text.contains(&format!("{flag}\n")),
+                "{command} --help lacks {flag}:\n{text}"
+            );
+        }
+        for flag in refused {
+            assert!(
+                !text.contains(flag),
+                "{command} --help lists {flag}:\n{text}"
+            );
+        }
+    }
+}
+
+/// #432 (cli-08): a flag a command does not take is refused naming that flag,
+/// and such command lines still parse, so the refusal stays a JSON report.
+#[test]
+fn a_refused_flag_is_named() {
+    let root = project();
+    std::fs::write(root.path().join("plan.json"), "{}").unwrap();
+    for (args, named, not_named) in [
+        (
+            &["migrate", "--plan", "plan.json", "--against", "plan.json"][..],
+            "--against",
+            "--adopt-through",
+        ),
+        (
+            &["reconcile", "--plan", "plan.json", "--against", "plan.json"],
+            "--against",
+            "--adopt-through",
+        ),
+        (
+            &["migrate", "--plan", "plan.json", "--adopt-through", "1"],
+            "--adopt-through",
+            "--against",
+        ),
+        (
+            &["status", "--adopt-through", "1"],
+            "--adopt-through",
+            "--against",
+        ),
+        (
+            &["verify", "--adopt-through", "1"],
+            "--adopt-through",
+            "--against",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .arg("db")
+            .args(args)
+            .args(["--target", "local", "--json"])
+            .env_remove("DB_TARGET")
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{args:?}: {}", String::from_utf8_lossy(&output.stderr)));
+        let diagnostics = report["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), 1, "{args:?}: {report}");
+        let d = &diagnostics[0];
+        assert_eq!(d["code"], "DB_CONFIG", "{args:?}: {d}");
+        let message = d["message"].as_str().unwrap();
+        assert!(
+            message.contains(named) && message.contains(args[0]),
+            "{args:?}: {d}"
+        );
+        assert!(!message.contains(not_named), "{args:?}: {d}");
+    }
+    // plan takes either, not both.
+    let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args([
+            "db",
+            "plan",
+            "--adopt-through",
+            "1",
+            "--against",
+            "plan.json",
+        ])
+        .args(["--target", "local", "--json"])
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let message = report["diagnostics"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("--adopt-through") && message.contains("--against"),
+        "{report}"
+    );
 }
 
 #[test]

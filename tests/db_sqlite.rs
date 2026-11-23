@@ -1,3 +1,5 @@
+#[path = "support/bounded_output.rs"]
+mod bounded_output;
 #[path = "support/sqlite_fixture.rs"]
 mod sqlite_fixture;
 use serde_json::Value;
@@ -1316,6 +1318,557 @@ fn sqlite_empty_scratch_takes_the_target_journal_mode() {
     }
 }
 
+/// #423 (sq-12): starting the application between plan and migrate puts the
+/// target in WAL mode (std/db/sqlite connect() does), which makes the plan
+/// stale. migrate and plan --against name that setting with both values, and
+/// following the advice (plan, approve and migrate again) applies it.
+#[test]
+fn a_changed_target_setting_is_named_in_the_stale_plan() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE events(id INTEGER PRIMARY KEY, kind TEXT NOT NULL);",
+    );
+    let plan = f.plan("p1.json");
+    set_journal_mode(&f.target(), "wal");
+    let expected = "target setting journal_mode: plan delete, now wal";
+    let r = f.apply("p1.json", plan["plan_digest"].as_str());
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert!(d["message"].as_str().unwrap().contains(expected), "{d}");
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("Plan, review and approve again"),
+        "{d}"
+    );
+    let r = f.command("plan", &["--against", "p1.json"]);
+    assert_eq!(r["plan_validation"]["outcome"], "fail", "{r}");
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert!(d["message"].as_str().unwrap().contains(expected), "{d}");
+    let again = f.plan("p2.json");
+    let applied = f.apply("p2.json", again["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
+/// #425 (sq-18, cli-13): DB_APPROVAL_REQUIRED says to set this database's
+/// approval_secret, by name, to the reviewed plan's digest through the
+/// provider and rerun the same plan; following it runs. A wrong approval
+/// value is never shown.
+#[test]
+fn approval_refusals_say_how_to_approve_the_plan() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let plan = f.plan("review.json");
+    let digest = plan["plan_digest"].as_str().unwrap();
+    for approval in [None, Some("ntnt425_wrong_approval")] {
+        let r = f.apply("review.json", approval);
+        let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+        let message = d["message"].as_str().unwrap();
+        assert!(
+            message.contains("DB_APPROVAL") && message.contains("database app"),
+            "{d}"
+        );
+        let next_action = d["next_action"].as_str().unwrap();
+        assert!(next_action.starts_with("Set DB_APPROVAL"), "{d}");
+        for says in [digest, "secrets provider", "same plan"] {
+            assert!(next_action.contains(says), "{says}: {d}");
+        }
+        assert!(!r.to_string().contains("ntnt425_wrong_approval"), "{r}");
+    }
+    // A provider that can read no secret says how to fix the provider.
+    let owned = digest.to_owned();
+    let r = report_with(&f, "migrate", &move |c| {
+        c.args(["--plan", "review.json"])
+            .env("DB_APPROVAL", &owned)
+            .env("NTNT_ENV", "production");
+    });
+    let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+    assert!(
+        d["message"].as_str().unwrap().starts_with(
+            "Approval secret DB_APPROVAL cannot be read: the env secrets provider is disabled"
+        ),
+        "{d}"
+    );
+    assert!(
+        d["next_action"].as_str().unwrap().contains("NTNT_ENV"),
+        "{d}"
+    );
+    // Following the advice literally: the same plan, approved.
+    let applied = f.apply("review.json", Some(digest));
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
+/// CodeRabbit 4656381389: secret names may hold `.` and `-`, which no POSIX
+/// shell takes in `export`. For such a name the advice gives an `env` command
+/// with the same plan instead, and run by a shell as written, it migrates. A
+/// name that is a shell variable name keeps `export`, which works as written
+/// too. Both refusals, an unset secret and another value, give that advice.
+#[cfg(unix)]
+#[test]
+fn approval_advice_runs_as_written_for_any_secret_name() {
+    use bounded_output::BoundedOutput;
+    let json = |output: std::process::Output| -> Value {
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    for name in ["deploy.approval", "app-approval", "DB_APPROVAL"] {
+        let f = Fixture::new();
+        let manifest = f.root.path().join("ntnt.toml");
+        let declared = std::fs::read_to_string(&manifest)
+            .unwrap()
+            .replace(
+                "approval_secret = \"DB_APPROVAL\"",
+                &format!("approval_secret = \"{name}\""),
+            )
+            .replace("[secrets.DB_APPROVAL]", &format!("[secrets.\"{name}\"]"));
+        std::fs::write(&manifest, declared).unwrap();
+        f.sql(
+            "0001_initial.sql",
+            "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+        );
+        let digest = f.plan("review.json")["plan_digest"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut advice = Vec::new();
+        for value in [None, Some("ntnt445_other_digest")] {
+            let mut migrate = f.process("migrate");
+            migrate.args(["--plan", "review.json"]).env_remove(name);
+            if let Some(value) = value {
+                migrate.env(name, value);
+            }
+            let r = json(migrate.bounded_output());
+            let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+            assert!(!r.to_string().contains("ntnt445_other_digest"), "{r}");
+            advice.push(d["next_action"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(advice[0], advice[1], "{name}");
+        let next_action = &advice[0];
+        assert!(
+            next_action.starts_with(&format!(
+                "Set {name} to this plan's plan_digest, {digest}, through the secrets provider"
+            )),
+            "{next_action}"
+        );
+        let script = if name == "DB_APPROVAL" {
+            // export, then the same plan, run again.
+            let export = format!("export {name}={digest}");
+            assert!(next_action.contains(&export), "{next_action}");
+            assert!(!next_action.contains("`env "), "{next_action}");
+            format!("{export} && ntnt db migrate --plan review.json --target test --json")
+        } else {
+            assert!(
+                !next_action.contains(&format!("export {name}=")),
+                "{next_action}"
+            );
+            // The command between backticks, as written.
+            let command = next_action
+                .split('`')
+                .nth(1)
+                .unwrap_or_else(|| panic!("no command: {next_action}"));
+            assert_eq!(
+                command,
+                format!(
+                    "env '{name}={digest}' ntnt db migrate --target test --plan review.json --json"
+                ),
+                "{next_action}"
+            );
+            command.to_owned()
+        };
+        // Run by a shell in the project, with this build's ntnt first on PATH.
+        let bin = std::path::Path::new(env!("CARGO_BIN_EXE_ntnt"))
+            .parent()
+            .unwrap();
+        let path = std::env::join_paths(std::iter::once(bin.to_owned()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        let applied = json(
+            std::process::Command::new("sh")
+                .args(["-c", &script])
+                .env("PATH", path)
+                .env("DB_TARGET", &f.target_path)
+                .env("DB_SCRATCH", &f.scratch_path)
+                .env("NTNT_ENV", "development")
+                .env("NTNT_SECRETS_PROVIDER", "env")
+                .env_remove(name)
+                .current_dir(f.root.path())
+                .bounded_output(),
+        );
+        assert_eq!(applied["outcome"], "pass", "{script}: {applied}");
+        assert_eq!(applied["plan_digest"], digest.as_str(), "{applied}");
+    }
+}
+
+/// CodeRabbit on #445 (execution.rs): an approval secret the provider cannot
+/// read is refused for that cause, not as a value that differs from the
+/// plan's digest, and nothing runs. Following each advice in turn (start the
+/// agent, let the deployment's scope read the secret, set it to the plan's
+/// digest), the same plan migrates. A value that differs keeps the digest
+/// advice and is never shown.
+#[cfg(unix)]
+#[test]
+fn approval_secrets_the_provider_cannot_read_are_refused_for_that_cause() {
+    use std::io::{BufRead, Write};
+    use std::sync::{Arc, Mutex};
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let plan = f.plan("review.json");
+    let digest = plan["plan_digest"].as_str().unwrap().to_owned();
+    // A short socket path without symlinks: macOS limits socket paths to
+    // about 104 bytes, and its /tmp is a link.
+    let sockets = tempfile::Builder::new()
+        .prefix("ntnt-sa")
+        .tempdir_in(std::path::Path::new("/tmp").canonicalize().unwrap())
+        .unwrap();
+    let endpoint = sockets.path().join("agent.sock");
+    let migrate = || {
+        let output = f
+            .process("migrate")
+            .args(["--plan", "review.json"])
+            .env("NTNT_SECRETS_PROVIDER", "unix-socket")
+            .env("NTNT_SECRETS_SOCKET_ENDPOINTS", &endpoint)
+            .env("NTNT_SECRETS_AUTHORIZATION_SCOPE", "deployment-a")
+            .env("NTNT_SECRETS_TIMEOUT_MS", "10000")
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    // A refusal saying `message`, whose advice starts with `advice`; nothing ran.
+    let refused = |r: &Value, message: &str, advice: &str| {
+        let d = diagnostic(r, "DB_APPROVAL_REQUIRED");
+        assert_eq!(d["message"], message, "{d}");
+        assert!(
+            d["next_action"].as_str().unwrap().starts_with(advice),
+            "{d}"
+        );
+        let objects: i64 = f
+            .target()
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(objects, 0, "{r}");
+    };
+    // No agent listens on the endpoint yet.
+    refused(
+        &migrate(),
+        "Approval secret DB_APPROVAL cannot be read: the secrets provider is unavailable. No target or ledger writes were attempted.",
+        "Check that the secrets agent is running and listening on NTNT_SECRETS_SOCKET_ENDPOINTS",
+    );
+    // The agent answers one lookup per connection from `values`, and denies
+    // access to the names in `denied`.
+    let text = |path: &std::path::Path| path.to_str().unwrap().to_owned();
+    let values = Arc::new(Mutex::new(std::collections::BTreeMap::from([
+        ("DB_TARGET".to_owned(), text(&f.target_path)),
+        ("DB_SCRATCH".to_owned(), text(&f.scratch_path)),
+        ("DB_APPROVAL".to_owned(), "ntnt445_other_digest".to_owned()),
+    ])));
+    let denied = Arc::new(Mutex::new(vec!["DB_APPROVAL".to_owned()]));
+    let listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+    let (agent_values, agent_denied) = (Arc::clone(&values), Arc::clone(&denied));
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut line = String::new();
+            if std::io::BufReader::new(&stream)
+                .read_line(&mut line)
+                .is_err()
+            {
+                continue;
+            }
+            let request: Value = serde_json::from_str(line.trim_end()).unwrap();
+            let name = request["name"].as_str().unwrap_or_default();
+            let mut response = serde_json::json!({"protocol": 1,
+                "request_id": request["request_id"], "scope": request["scope"]});
+            let value = agent_values.lock().unwrap().get(name).cloned();
+            if agent_denied.lock().unwrap().iter().any(|n| n == name) {
+                response["status"] = "access_denied".into();
+            } else if let Some(value) = value {
+                response["status"] = "found".into();
+                response["value"] = value.into();
+            } else {
+                response["status"] = "missing".into();
+            }
+            let _ = writeln!(stream, "{response}");
+        }
+    });
+    refused(
+        &migrate(),
+        "Approval secret DB_APPROVAL cannot be read: the secrets provider denied access to it. No target or ledger writes were attempted.",
+        "Allow this deployment's authorization scope (NTNT_SECRETS_AUTHORIZATION_SCOPE) to read DB_APPROVAL",
+    );
+    // Readable now, but holding another value: the digest advice stays.
+    denied.lock().unwrap().clear();
+    let r = migrate();
+    refused(
+        &r,
+        "Approval secret DB_APPROVAL (database app's approval_secret) does not hold this plan's plan_digest; migrate runs a plan only when it does. No target or ledger writes were attempted; provider details suppressed.",
+        &format!("Set DB_APPROVAL to this plan's plan_digest, {digest}, through the secrets provider"),
+    );
+    assert!(!r.to_string().contains("ntnt445_other_digest"), "{r}");
+    values
+        .lock()
+        .unwrap()
+        .insert("DB_APPROVAL".to_owned(), digest.clone());
+    let applied = migrate();
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
+/// #425 (cli-13): a database that declares no approval_secret, or one whose
+/// secret is not declared under [secrets], is told so, naming the database
+/// or the secret; following that advice gets the plan approved and run.
+#[test]
+fn a_missing_approval_declaration_is_named() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let manifest = f.root.path().join("ntnt.toml");
+    let declared = std::fs::read_to_string(&manifest).unwrap();
+    let without = declared
+        .replace("approval_secret = \"DB_APPROVAL\"\n", "")
+        .replace("[secrets.DB_APPROVAL]\n", "");
+    std::fs::write(&manifest, &without).unwrap();
+    let plan = f.plan("review.json");
+    let r = f.apply("review.json", plan["plan_digest"].as_str());
+    let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+    assert_eq!(
+        d["message"],
+        "Database app declares no approval_secret, so migrate cannot run any plan for it. No target or ledger writes were attempted.",
+        "{d}"
+    );
+    let next_action = d["next_action"].as_str().unwrap();
+    for says in [
+        "approval_secret = \"APP_MIGRATION_APPROVAL\"",
+        "[databases.app]",
+        "[secrets.APP_MIGRATION_APPROVAL]",
+        "plan, review and approve again",
+    ] {
+        assert!(next_action.contains(says), "{says}: {d}");
+    }
+    let migrate = |plan: &str, approval: &str| {
+        let out = f
+            .process("migrate")
+            .args(["--plan", plan])
+            .env("APP_MIGRATION_APPROVAL", approval)
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    // Declared for the database, but not under [secrets].
+    let half = without.replace(
+        "migrations_dir = \"migrations\"\n",
+        "migrations_dir = \"migrations\"\napproval_secret = \"APP_MIGRATION_APPROVAL\"\n",
+    );
+    std::fs::write(&manifest, &half).unwrap();
+    let plan = f.plan("review-2.json");
+    let r = migrate("review-2.json", plan["plan_digest"].as_str().unwrap());
+    let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Approval secret APP_MIGRATION_APPROVAL is not declared under [secrets]"),
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("[secrets.APP_MIGRATION_APPROVAL]"),
+        "{d}"
+    );
+    // Following both: declared, planned again and approved.
+    std::fs::write(
+        &manifest,
+        format!("{half}[secrets.APP_MIGRATION_APPROVAL]\n"),
+    )
+    .unwrap();
+    let plan = f.plan("review-3.json");
+    let applied = migrate("review-3.json", plan["plan_digest"].as_str().unwrap());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
+/// CodeRabbit on #445 (report.rs, execution.rs): TOML reads
+/// `[secrets.DB.target]` as nested tables, so for a dotted secret name the
+/// suggested table quotes the name. Written into ntnt.toml as suggested, it
+/// declares that secret: inspection passes, and so does migrate once the
+/// dotted approval secret is declared, planned and approved again.
+#[test]
+fn suggested_secrets_tables_declare_dotted_names() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let manifest = f.root.path().join("ntnt.toml");
+    let declared = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        declared
+            .replace("\"DB_TARGET\"", "\"DB.target\"")
+            .replace("[secrets.DB_TARGET]\n", "")
+            .replace("\"DB_APPROVAL\"", "\"deploy.approval\"")
+            .replace("[secrets.DB_APPROVAL]\n", ""),
+    )
+    .unwrap();
+    // Appends the table a next action suggests to the manifest, as written.
+    let follow = |d: &Value| {
+        let action = d["next_action"].as_str().unwrap();
+        let table = action
+            .strip_prefix("Add a ")
+            .and_then(|rest| rest.split(" table to the manifest").next())
+            .unwrap_or_else(|| panic!("{d}"))
+            .to_owned();
+        let mut text = std::fs::read_to_string(&manifest).unwrap();
+        text.push_str(&format!("{table}\n"));
+        std::fs::write(&manifest, text).unwrap();
+        table
+    };
+    let run = |command: &str, args: &[&str], approval: Option<&str>| {
+        let mut process = f.process(command);
+        process.args(args).env("DB.target", &f.target_path);
+        if let Some(digest) = approval {
+            process.env("deploy.approval", digest);
+        }
+        let output = process.output().unwrap();
+        serde_json::from_slice::<Value>(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    let r = run("status", &[], None);
+    let d = diagnostic(&r, "DB_SECRET");
+    assert_eq!(
+        d["message"],
+        "Target connection secret DB.target is not declared under [secrets] in the manifest.",
+        "{d}"
+    );
+    assert_eq!(follow(d), "[secrets.\"DB.target\"]");
+    let r = run("status", &[], None);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let plan = run("plan", &["--out", "review.json"], None);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let r = run(
+        "migrate",
+        &["--plan", "review.json"],
+        plan["plan_digest"].as_str(),
+    );
+    let d = diagnostic(&r, "DB_APPROVAL_REQUIRED");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Approval secret deploy.approval is not declared under [secrets]"),
+        "{d}"
+    );
+    assert_eq!(follow(d), "[secrets.\"deploy.approval\"]");
+    let plan = run("plan", &["--out", "review-2.json"], None);
+    assert_eq!(plan["outcome"], "pass", "{plan}");
+    let applied = run(
+        "migrate",
+        &["--plan", "review-2.json"],
+        plan["plan_digest"].as_str(),
+    );
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+}
+
+/// #425 (cli-01): a plan whose save fails after the replay (here: the saved
+/// plan would exceed the 1 MiB readback limit) prints no plan digest in the
+/// human report, since there is no saved plan to approve.
+#[test]
+fn a_plan_whose_save_failed_prints_no_digest() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    // About 1,000,000 bytes of intent IDs in the sidecar: within the 1 MiB
+    // input limit, but over it in the pretty-printed saved plan.
+    let id = "x".repeat(128);
+    let ids = vec![format!("{id:?}"); 7600].join(",\n");
+    f.sql("0001_initial.toml", &format!("intent_ids = [\n{ids}\n]\n"));
+    let template = f.process("plan");
+    let mut process = std::process::Command::new(template.get_program());
+    process.args(
+        template
+            .get_args()
+            .filter(|arg| *arg != std::ffi::OsStr::new("--json")),
+    );
+    for (key, value) in template.get_envs() {
+        match value {
+            Some(value) => process.env(key, value),
+            None => process.env_remove(key),
+        };
+    }
+    let output = process
+        .current_dir(f.root.path())
+        .args(["--out", "big.json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!output.status.success(), "{stdout}");
+    assert!(stdout.contains("DB_OUTPUT_LIMIT"), "{stdout}");
+    assert!(!stdout.contains("Plan digest"), "{stdout}");
+    assert!(!f.root.path().join("big.json").exists());
+}
+
+/// CodeRabbit on #445 (mod.rs): an --out whose path runs through a regular
+/// file (`review.json/sub/result.json`, review.json being the saved plan) is
+/// refused before migrate runs anything, naming that file, and the target is
+/// unchanged. Following the advice, a new file in an existing directory, the
+/// same plan migrates and its report is saved.
+#[test]
+fn an_out_through_a_regular_file_is_refused_before_migrate_runs() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    let plan = f.plan("review.json");
+    let digest = plan["plan_digest"].as_str().unwrap();
+    let migrate = |out: &str| {
+        let output = f
+            .process("migrate")
+            .args(["--plan", "review.json", "--out", out])
+            .env("DB_APPROVAL", digest)
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    };
+    let r = migrate("review.json/sub/result.json");
+    assert_eq!(r["outcome"], "fail", "{r}");
+    assert_eq!(r["diagnostics"].as_array().unwrap().len(), 1, "{r}");
+    let d = &r["diagnostics"][0];
+    assert_eq!(d["code"], "DB_OUTPUT", "{r}");
+    assert_eq!(
+        d["message"],
+        "Cannot save the report to review.json/sub/result.json: review.json is not a directory.",
+        "{d}"
+    );
+    assert_eq!(
+        d["next_action"], "Pass --out a new file in an existing directory.",
+        "{d}"
+    );
+    // Nothing ran: the target has no table and no ledger.
+    let objects: i64 = f
+        .target()
+        .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(objects, 0, "{r}");
+    let applied = migrate("result.json");
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(applied["progress"][0]["state"], "committed", "{applied}");
+    assert!(f.root.path().join("result.json").is_file());
+}
+
 /// #413: a scratch that is not empty keeps its journal mode and is reported as
 /// not empty; nothing in it is changed.
 #[test]
@@ -1365,8 +1918,8 @@ fn sqlite_scratch_setting_mismatch_names_the_setting_and_values() {
 }
 
 /// #414: any failing statement is numbered, and an error that SQLite ties to a
-/// token of the statement (here an unknown column) reports its real SQLite code,
-/// not -1.
+/// token of the statement (here an unknown column) reports its real SQLite code
+/// by name (#424), not -1.
 #[test]
 fn sqlite_failed_statement_is_numbered() {
     let f = Fixture::new();
@@ -1379,7 +1932,7 @@ fn sqlite_failed_statement_is_numbered() {
     let d = diagnostic(&r, "DB_SQLITE");
     let message = d["message"].as_str().unwrap();
     assert!(message.starts_with("Statement 3: "), "{message}");
-    assert!(message.contains("(code 1)"), "{message}");
+    assert!(message.contains("(SQLITE_ERROR)"), "{message}");
     assert_eq!(d["source"], "0001_initial.sql", "{d}");
 }
 
@@ -1568,6 +2121,26 @@ fn sqlite_dropping_a_table_with_on_delete_children_requires_rebuild_mode() {
     assert!(message.contains("`posts` (ON DELETE CASCADE)"), "{message}");
     assert!(!message.contains("tags"), "{message}");
     assert_eq!(d["source"], "0002_rebuild.sql", "{d}");
+    // Statements 1 and 2 ran in the replay; the DROP did not, and the
+    // migration was rolled back. The advice says so, not that nothing ran
+    // (CodeRabbit on #445, sqlite.rs).
+    let action = d["next_action"].as_str().unwrap();
+    assert!(
+        action.ends_with("The DROP TABLE did not run; statements before it in the migration may have run, but the migration was rolled back, so none of their changes were committed."),
+        "{action}"
+    );
+    assert!(!action.contains("Nothing ran"), "{action}");
+    for file in [&f.target_path, &f.scratch_path] {
+        let copies: i64 = rusqlite::Connection::open(file)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name = 'accounts_new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(copies, 0, "{}", file.display());
+    }
     let kept: i64 = f
         .target()
         .query_row("SELECT (SELECT count(*) FROM posts) + (SELECT count(*) FROM comments WHERE account_id = 1)", [], |r| r.get(0))
@@ -1672,6 +2245,305 @@ fn sqlite_target_migration_runs_under_the_plans_statement_limit() {
     .unwrap();
     let stale = f.apply("limit.json", plan["plan_digest"].as_str());
     assert!(code(&stale, "DB_PLAN_STALE"), "{stale}");
+}
+
+/// A fixture command's report, after `configure` changes its environment.
+fn report_with(
+    f: &Fixture,
+    command: &str,
+    configure: &dyn Fn(&mut std::process::Command),
+) -> Value {
+    let mut process = f.process(command);
+    configure(&mut process);
+    let out = process.output().unwrap();
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)))
+}
+
+/// #422 (cli-12): DB_SECRET names the connection secret it could not
+/// resolve and its role, never its value, and says which cause applies;
+/// each cause has its own advice, and following it resolves the refusal.
+#[test]
+fn unresolved_connection_secrets_name_the_secret_role_and_cause() {
+    type Configure = Box<dyn Fn(&mut std::process::Command)>;
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE main.t(id INTEGER);");
+    let target = f.target_path.to_str().unwrap().to_owned();
+    let scratch = f.scratch_path.to_str().unwrap().to_owned();
+    let mut cases: Vec<(Configure, &str, &str)> = vec![
+        (
+            Box::new(|c| {
+                c.env_remove("DB_TARGET");
+            }),
+            "Target connection secret DB_TARGET is unset or empty in the environment (provider env).",
+            "Set the environment variable DB_TARGET",
+        ),
+        (
+            Box::new(|c| {
+                c.env("DB_TARGET", "");
+            }),
+            "Target connection secret DB_TARGET is unset or empty in the environment (provider env).",
+            "Set the environment variable DB_TARGET",
+        ),
+        (
+            Box::new(|c| {
+                c.env_remove("DB_SCRATCH");
+            }),
+            "Scratch connection secret DB_SCRATCH is unset or empty in the environment (provider env).",
+            "Set the environment variable DB_SCRATCH",
+        ),
+        (
+            Box::new(|c| {
+                c.env("NTNT_ENV", "production");
+            }),
+            "Target connection secret DB_TARGET cannot be read: the env secrets provider is disabled when NTNT_ENV is production.",
+            "set NTNT_ENV=development",
+        ),
+        (
+            Box::new(|c| {
+                c.env("NTNT_SECRETS_PROVIDER", "evn");
+            }),
+            "Target connection secret DB_TARGET cannot be read: NTNT_SECRETS_PROVIDER names an unsupported provider (supported: env, and unix-socket on Unix).",
+            "Set NTNT_SECRETS_PROVIDER to env",
+        ),
+    ];
+    #[cfg(unix)]
+    cases.push((
+        Box::new(|c| {
+            c.env("NTNT_SECRETS_PROVIDER", "unix-socket")
+                .env_remove("NTNT_SECRETS_SOCKET_ENDPOINTS");
+        }),
+        "Target connection secret DB_TARGET cannot be read: the unix-socket secrets provider's configuration is invalid.",
+        "NTNT_SECRETS_SOCKET_ENDPOINTS",
+    ));
+    let mut advice = std::collections::BTreeSet::new();
+    for (configure, message, next_action) in &cases {
+        let r = report_with(&f, "status", &**configure);
+        let d = diagnostic(&r, "DB_SECRET");
+        assert_eq!(d["message"], *message, "{d}");
+        let action = d["next_action"].as_str().unwrap();
+        assert!(action.contains(next_action), "{d}");
+        advice.insert(action.to_owned());
+        // Names only: neither file path is ever shown.
+        let text = r.to_string();
+        assert!(!text.contains(&target) && !text.contains(&scratch), "{r}");
+    }
+    // Each cause has its own advice (the two unset targets share theirs).
+    assert_eq!(advice.len(), cases.len() - 1, "{advice:?}");
+    // Following the advice, with the fixture's environment, inspection passes.
+    assert_eq!(report_with(&f, "status", &|_| {})["outcome"], "pass");
+
+    // A secret the manifest does not declare.
+    let manifest = f.root.path().join("ntnt.toml");
+    let declared = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, declared.replace("[secrets.DB_SCRATCH]\n", "")).unwrap();
+    let r = report_with(&f, "status", &|_| {});
+    let d = diagnostic(&r, "DB_SECRET");
+    assert_eq!(
+        d["message"],
+        "Scratch connection secret DB_SCRATCH is not declared under [secrets] in the manifest.",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("[secrets.DB_SCRATCH]"),
+        "{d}"
+    );
+    std::fs::write(&manifest, &declared).unwrap();
+    assert_eq!(report_with(&f, "status", &|_| {})["outcome"], "pass");
+
+    // migrate names the target secret the same way.
+    let plan = f.plan("plan.json");
+    let digest = plan["plan_digest"].as_str().unwrap().to_owned();
+    let r = report_with(&f, "migrate", &move |c| {
+        c.args(["--plan", "plan.json"])
+            .env("DB_APPROVAL", &digest)
+            .env_remove("DB_TARGET");
+    });
+    let d = diagnostic(&r, "DB_SECRET");
+    assert_eq!(
+        d["message"],
+        "Target connection secret DB_TARGET is unset or empty in the environment (provider env).",
+        "{d}"
+    );
+}
+
+/// #422 (sq-14, cli-14): DB_FILE_IDENTITY names the role and its secret,
+/// as the manifest names it, and the rule the path broke, never the path;
+/// following its advice resolves it.
+#[test]
+fn file_identity_refusals_name_the_secret_and_the_rule() {
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE main.t(id INTEGER);");
+    let root = f.target_path.parent().unwrap().to_path_buf();
+    // The first DB_FILE_IDENTITY of `command` with `secret` set to `value`,
+    // which the report never shows.
+    let refused = |command: &str, secret: &'static str, value: std::path::PathBuf| {
+        let shown = value.to_str().unwrap().to_owned();
+        let r = report_with(&f, command, &move |c| {
+            c.env(secret, &value);
+        });
+        assert!(!r.to_string().contains(&shown), "{r}");
+        diagnostic(&r, "DB_FILE_IDENTITY").clone()
+    };
+    let passes = |command: &str| {
+        let r = report_with(&f, command, &|_| {});
+        assert_eq!(r["outcome"], "pass", "{r}");
+    };
+    let says = |d: &Value, message: &[&str], next_action: &str| {
+        for fragment in message {
+            assert!(
+                d["message"].as_str().unwrap().contains(fragment),
+                "{fragment:?} missing: {d}"
+            );
+        }
+        assert!(
+            d["next_action"].as_str().unwrap().contains(next_action),
+            "{next_action:?} missing: {d}"
+        );
+    };
+
+    // A relative scratch path, the most common first-run mistake.
+    let d = refused("plan", "DB_SCRATCH", "relative-replay.sqlite".into());
+    says(
+        &d,
+        &["Scratch connection secret DB_SCRATCH", "a relative path"],
+        "Set DB_SCRATCH to the file's absolute path",
+    );
+    passes("plan");
+
+    // A target file that does not exist yet.
+    let missing = root.join("missing.sqlite");
+    let d = refused("status", "DB_TARGET", missing.clone());
+    says(
+        &d,
+        &["Target connection secret DB_TARGET", "does not exist"],
+        "touch",
+    );
+    std::fs::File::create(&missing).unwrap();
+    let r = report_with(&f, "status", &|c| {
+        c.env("DB_TARGET", &missing);
+    });
+    assert_eq!(r["outcome"], "pass", "{r}");
+    std::fs::remove_file(&missing).unwrap();
+
+    // A directory.
+    let d = refused("status", "DB_TARGET", root.join("migrations"));
+    says(
+        &d,
+        &["Target connection secret DB_TARGET", "not a regular file"],
+        "regular SQLite file",
+    );
+
+    // A second hard link to the target.
+    let alias = root.join("alias.sqlite");
+    std::fs::hard_link(&f.target_path, &alias).unwrap();
+    let r = report_with(&f, "status", &|_| {});
+    let d = diagnostic(&r, "DB_FILE_IDENTITY");
+    says(
+        d,
+        &[
+            "Target connection secret DB_TARGET",
+            "more than one hard link",
+        ],
+        "single link",
+    );
+    std::fs::remove_file(&alias).unwrap();
+    passes("status");
+
+    #[cfg(unix)]
+    {
+        // A link to the file, and a path through a linked directory.
+        let link = root.join("link.sqlite");
+        std::os::unix::fs::symlink(&f.target_path, &link).unwrap();
+        let d = refused("status", "DB_TARGET", link);
+        says(
+            &d,
+            &["Target connection secret DB_TARGET", "symbolic link"],
+            "pwd -P",
+        );
+        let linked = root.join("linked-dir");
+        std::os::unix::fs::symlink(&root, &linked).unwrap();
+        let d = refused("plan", "DB_SCRATCH", linked.join("scratch.sqlite"));
+        says(
+            &d,
+            &["Scratch connection secret DB_SCRATCH", "symbolic link"],
+            "pwd -P",
+        );
+        passes("plan");
+    }
+}
+
+/// #422 (cli-04): DB_ADOPTION_INPUT says which adoption requirement failed,
+/// with advice for it, and following the advice gets the adoption planned.
+#[test]
+fn adoption_refusals_say_which_requirement_failed() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE t(id INTEGER PRIMARY KEY);",
+    );
+    // An existing database that matches the migration but has no ledger.
+    f.target()
+        .execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY);")
+        .unwrap();
+    let plan = |args: &[&str]| f.command("plan", args);
+    let refusal = |r: &Value| diagnostic(r, "DB_ADOPTION_INPUT").clone();
+
+    // No adoption checks declared.
+    let d = refusal(&plan(&["--adopt-through", "1"]));
+    assert_eq!(
+        d["message"],
+        "Adoption needs at least one named check, and [databases.app.adoption_checks] declares none. No history is inferred or repaired.",
+        "{d}"
+    );
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.contains("[databases.app.adoption_checks]") && next_action.contains("main."),
+        "{d}"
+    );
+    let manifest = f.root.path().join("ntnt.toml");
+    let mut text = std::fs::read_to_string(&manifest).unwrap();
+    text.push_str("[databases.app.adoption_checks]\nids_present = \"SELECT NOT EXISTS (SELECT 1 FROM main.t WHERE id IS NULL)\"\n");
+    std::fs::write(&manifest, text).unwrap();
+
+    // An ID that is not in the migrations directory.
+    let d = refusal(&plan(&["--adopt-through", "7"]));
+    assert_eq!(
+        d["message"], "Migration ID 7 is not in migrations; the highest ID there is 1.",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("--adopt-through 1"),
+        "{d}"
+    );
+
+    // Following both pieces of advice, adoption is planned.
+    let adoption = f.command("plan", &["--adopt-through", "1", "--out", "adoption.json"]);
+    assert_eq!(adoption["outcome"], "pass", "{adoption}");
+    let adopted = f.apply("adoption.json", adoption["plan_digest"].as_str());
+    assert_eq!(adopted["outcome"], "pass", "{adopted}");
+
+    // A database whose history is already recorded is not eligible.
+    let d = refusal(&plan(&["--adopt-through", "1"]));
+    assert_eq!(
+        d["message"],
+        "The target already has an ntnt migration ledger (1 entry), so it is not eligible for adoption, which only records a baseline for a database without one.",
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("without --adopt-through"),
+        "{d}"
+    );
+    assert_eq!(plan(&[])["outcome"], "pass");
 }
 
 /// #419: DB_REBUILD_REQUIRED's advice also covers a migration that retires the
