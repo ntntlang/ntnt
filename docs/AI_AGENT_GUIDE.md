@@ -1759,6 +1759,11 @@ interpolation command are unchanged. See [Database Migrations](DATABASE_MIGRATIO
 for the precise authority, file/transport, contract and recovery boundaries before
 configuring a deployment.
 
+If `ntnt db migrate --out` reports `DB_OUTPUT`, do not assume the database rolled
+back: saving the report can fail after a migration commits. Check `progress` on
+stdout and run `ntnt db status` with the same manifest, database and target before
+deciding whether to retry. Do not edit the ledger to recreate a missing report.
+
 ### SQLite (bundled, no server needed)
 
 ```ntnt

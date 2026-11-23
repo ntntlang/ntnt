@@ -27,6 +27,11 @@ The release job remains tag-push-only: PR builds can upload test artifacts but
 cannot publish a release. After tagging, verify the release body, binary versions,
 expected assets and checksums rather than treating a pushed tag as a finished release.
 
+When release preparation changes `docs/AI_AGENT_GUIDE.md`, rebuild the binary and run
+`ntnt learn codex` followed by `ntnt learn --check` in an empty temporary directory.
+Check the generated `.agents/skills/ntnt/SKILL.md` for the new guidance: the CLI
+embeds the guide, so validating the Markdown alone does not test what agents receive.
+
 ## Unix installer
 
 `install.sh` downloads release binaries for Linux x86-64, Linux ARMv7 hard-float
