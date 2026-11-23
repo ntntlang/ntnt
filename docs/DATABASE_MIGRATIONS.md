@@ -888,7 +888,21 @@ the adoption again:
    the target with `sqlite3 -bail`, followed by its path, in the directory where the
    copy, `legacy-ledger.sqlite`, should be written. `-bail` stops the shell at the
    first error; without it, the shell runs the next statement anyway (in a shell
-   that is already open, run `.bail on`). Then, in turn:
+   that is already open, run `.bail on`). Use a maintenance window: stop other
+   users of the target and use a private directory for the archive. Run all steps
+   **in the same shell**, checking each result before proceeding.
+
+   ```sql
+   PRAGMA main.locking_mode = EXCLUSIVE;
+   BEGIN EXCLUSIVE;
+   COMMIT;
+   ```
+
+   The pragma must print `exclusive`, and both transaction statements must
+   succeed. This acquires the target lock now and keeps it until the shell
+   closes, including between the archive commit and the drop. If the database
+   is busy or any step fails, stop and close the shell. After interruption,
+   start again with a fresh archive; never resume at `DROP TABLE`.
 
    1. List the other tables whose foreign keys refer to the ledger:
 
@@ -898,12 +912,12 @@ the adoption again:
         AND f."table" = 'schema_migrations' COLLATE NOCASE;
       ```
 
-      It must list no table. If it lists any, stop: with foreign-key enforcement
+      It must list no table. If it lists any, close the shell before repairing them: with foreign-key enforcement
       on, dropping the ledger first deletes its rows, and that deletes or changes
       the rows that refer to them (`ON DELETE CASCADE`, `SET NULL`, `SET DEFAULT`)
       or makes the drop fail. Remove those foreign keys into the ledger with a
       reviewed migration first (SQLite removes a foreign key only by rebuilding
-      its table), then list again. Never turn foreign-key enforcement off to drop
+      its table), then restart from the lock step. Never turn foreign-key enforcement off to drop
       the ledger: that leaves their references dangling.
 
    2. Copy the table, and compare the copy with it:
@@ -921,7 +935,7 @@ the adoption again:
       earlier copy, the shell stops there and the ledger is untouched: move that
       file aside and start again.
 
-   3. Only then drop the ledger:
+   3. Only then drop the ledger in the same shell, then close the shell to release the lock:
 
       ```sql
       DROP TABLE main.schema_migrations;
