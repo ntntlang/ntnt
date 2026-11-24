@@ -2391,7 +2391,7 @@ pub(crate) fn statement_at(sql: &str, position: usize) -> Option<usize> {
             })
         })
         .map(|(index, _)| index + 1)
-        .last()
+        .next_back()
 }
 
 /// The statements of `sql` that add a value to an enum
