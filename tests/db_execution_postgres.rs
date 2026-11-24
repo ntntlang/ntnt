@@ -1558,9 +1558,10 @@ fn partition_bounds_are_not_disclosed_in_reports() {
 
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
-fn same_name_with_a_non_deferrable_constraint_is_reported() {
+fn same_name_with_a_non_deferrable_constraint_plans_and_migrates() {
     // SET CONSTRAINTS name DEFERRED fails if any same-named constraint is not
-    // deferrable, so this group cannot be restored either.
+    // deferrable, so replay in one transaction refused this group too. Each
+    // migration now commits on scratch (#430), which needs no restoring.
     let f = Fixture::new();
     f.sql(
         "0001_initial.sql",
@@ -1569,9 +1570,10 @@ fn same_name_with_a_non_deferrable_constraint_is_reported() {
          CREATE TABLE app.c2(pid INTEGER, CONSTRAINT fk_user FOREIGN KEY (pid) REFERENCES app.parent(id));",
     );
     f.sql("0002_next.sql", "ALTER TABLE app.c2 ADD COLUMN note TEXT;");
-    let r = f.command("plan");
-    assert!(code(&r, "DB_REPLAY_UNSUPPORTED"), "{r}");
-    assert!(!code(&r, "DB_POSTGRES"), "{r}");
+    let p = f.plan("plan.json");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
 }
 
 #[test]

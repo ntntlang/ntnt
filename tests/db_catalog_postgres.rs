@@ -2162,7 +2162,7 @@ fn scratch_is_empty_after_every_plan() {
             "CREATE TYPE app.mood AS ENUM ('ok'); CREATE DOMAIN app.positive AS int CHECK (VALUE > 0);
              CREATE TYPE app.pair AS (a int, b text); CREATE SEQUENCE app.s; SELECT nextval('app.s');
              CREATE FUNCTION app.f() RETURNS int LANGUAGE sql AS 'SELECT 1';
-             ALTER TABLE app.t ENABLE ROW LEVEL SECURITY; CREATE POLICY p ON app.t USING (true);
+             ALTER TABLE app.t ENABLE ROW LEVEL SECURITY; CREATE POLICY p ON app.t TO CURRENT_USER USING (true);
              CREATE EXTENSION citext WITH SCHEMA app; CREATE EXTENSION pg_trgm WITH SCHEMA app;
              CREATE EXTENSION btree_gist WITH SCHEMA app;
              CREATE TABLE public.audit (id int, mood app.mood);",
@@ -2336,7 +2336,8 @@ fn leftovers_of_an_unfinished_replay_are_cleaned_only_with_the_marker() {
     let public = public_state(&f);
     f.sql(
         "0001_types.sql",
-        "CREATE TYPE app.mood AS ENUM ('ok'); CREATE TABLE app.t (id int, m app.mood); CREATE EXTENSION citext WITH SCHEMA app; GRANT CREATE ON SCHEMA public TO PUBLIC;",
+        "CREATE TYPE app.mood AS ENUM ('ok'); CREATE TABLE app.t (id int, m app.mood); CREATE EXTENSION citext WITH SCHEMA app;
+         CREATE POLICY own ON app.t TO CURRENT_USER USING (true); GRANT CREATE ON SCHEMA public TO PUBLIC;",
     );
     f.sql(
         "0002_wait.sql",
@@ -2474,4 +2475,40 @@ fn concurrent_plans_on_one_scratch_are_serialized() {
     assert_eq!(b["outcome"], "pass", "{b}");
     assert_eq!(a["plan_digest"], b["plan_digest"]);
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// #430: cleanup's DROP OWNED would revoke privileges granted to the
+/// scratch role on objects it does not own, here the target database, so
+/// such a scratch is refused before anything runs, and the grant stays.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_scratch_role_with_privileges_it_does_not_own_is_refused() {
+    let mut f = Fixture::new();
+    let public = public_state(&f);
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
+    let grant = format!("GRANT CONNECT ON DATABASE {} TO {}", f.target, f.scratch);
+    f.admin.batch_execute(&grant).unwrap();
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_UNSAFE").unwrap_or_else(|| panic!("{r}"));
+    assert!(
+        names(&d["objects"]).iter().any(|o| o.contains(&f.target)),
+        "{d}"
+    );
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    let held: bool = f
+        .admin
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a JOIN pg_roles r ON r.oid=a.grantee WHERE d.datname=$2::text AND r.rolname=$1::text AND a.privilege_type='CONNECT')",
+            &[&f.scratch, &f.target],
+        )
+        .unwrap()
+        .get(0);
+    assert!(held, "the grant to the scratch role was revoked");
+    f.admin
+        .batch_execute(&format!(
+            "REVOKE CONNECT ON DATABASE {} FROM {}",
+            f.target, f.scratch
+        ))
+        .unwrap();
+    assert_eq!(f.command("plan")["outcome"], "pass");
 }
