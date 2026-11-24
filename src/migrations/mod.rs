@@ -44,6 +44,8 @@ pub(super) struct RowSecurity {
     /// Whether it has FORCE ROW LEVEL SECURITY, which applies its policies
     /// to its owner too.
     pub forced: bool,
+    /// Whether the check names it, rather than reaching it through a view.
+    pub direct: bool,
 }
 
 /// `name ([ensures])`, `name ([requires])` or `name (adoption_checks)`: a
@@ -60,33 +62,45 @@ fn row_security_relations(blocked: &[RowSecurity]) -> String {
     blocked
         .iter()
         .map(|r| {
-            if r.forced {
-                format!("{} (FORCE ROW LEVEL SECURITY)", r.relation)
+            let how = if r.forced {
+                "FORCE ROW LEVEL SECURITY"
             } else {
-                format!("{} (row-level security, owned by another role)", r.relation)
+                "row-level security, owned by another role"
+            };
+            if r.direct {
+                format!("{} ({how})", r.relation)
+            } else {
+                format!("{} (through a view; {how})", r.relation)
             }
         })
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-/// `DB_CHECK_ROW_SECURITY`: check `name` of `phase` would read `blocked`,
-/// where row-level security applies to the migration `role` (#430). Checks
-/// read with row_security=off, so PostgreSQL would refuse the read with a
-/// bare SQLSTATE 42501; the check is refused before it runs instead.
+/// `DB_CHECK_ROW_SECURITY`: check `name` of `phase` reads `blocked`, where
+/// row-level security applies to the migration `role` (#430). Checks read
+/// with row_security=off, so PostgreSQL refuses the read with a bare
+/// SQLSTATE 42501. A check that names such a table is refused before it
+/// runs; one that `ran` reached it through a view and was refused.
 pub(super) fn row_security_refusal(
     name: &str,
     phase: &str,
     role: &str,
     blocked: &[RowSecurity],
+    ran: bool,
 ) -> Diagnostic {
     let objects: Vec<String> = blocked.iter().map(|r| r.key.clone()).collect();
     let mut d = Diagnostic::new(
         "DB_CHECK_ROW_SECURITY",
         &format!(
-            "Check {} reads {}, where row-level security applies to the migration role {role}. Checks read with row_security=off so that no policy can silently filter what they see, and PostgreSQL refuses such a read (SQLSTATE 42501) unless the role bypasses row-level security. The check did not run.",
+            "Check {} reads {}, where row-level security applies to the migration role {role}. Checks read with row_security=off so that no policy can silently filter what they see, and PostgreSQL refuses such a read (SQLSTATE 42501) unless the role bypasses row-level security. {}",
             check_label(name, phase),
-            row_security_relations(blocked)
+            row_security_relations(blocked),
+            if ran {
+                "PostgreSQL refused this check's read."
+            } else {
+                "The check did not run."
+            }
         ),
     )
     .with_objects(&objects);
@@ -113,9 +127,14 @@ pub(super) fn row_security_warning(
         "relation": blocked.relation,
         "forced": blocked.forced,
         "message": format!(
-            "Check {} reads {}, where row-level security applies to the migration role, which does not bypass it. Checks read with row_security=off, so migrate will refuse this check (DB_CHECK_ROW_SECURITY) and roll its migration back. Give the migration role BYPASSRLS, or change the check, then plan again.",
+            "Check {} reads {}, where row-level security applies to the migration role, which does not bypass it. Checks read with row_security=off, so {} (DB_CHECK_ROW_SECURITY) and roll its migration back. Give the migration role BYPASSRLS, or change the check, then plan again.",
             check_label(name, phase),
-            row_security_relations(std::slice::from_ref(blocked))
+            row_security_relations(std::slice::from_ref(blocked)),
+            if blocked.direct {
+                "migrate will refuse this check"
+            } else {
+                "PostgreSQL will refuse the check's read of that table, if the view reads it, and migrate will fail the check"
+            }
         ),
     })
 }

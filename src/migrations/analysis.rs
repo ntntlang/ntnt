@@ -2006,12 +2006,14 @@ pub(crate) fn protected_targets(sql: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// The extensions a PostgreSQL migration creates by name, with the 1-based
-/// number of each `CREATE EXTENSION [IF NOT EXISTS] name` statement. Read
-/// from tokens: sqlparser does not parse `SCHEMA s` without `WITH`. An
-/// extension created in a `DO` block, or installed as a requirement of one
-/// created `CASCADE`, is not named.
-pub(crate) fn created_extensions(sql: &str) -> Vec<(usize, String)> {
+/// The top-level statements of a PostgreSQL migration that create or alter
+/// an extension, in order: the 1-based statement number, the extension's
+/// name and whether the statement acts on that extension alone. That is a
+/// `CREATE EXTENSION [IF NOT EXISTS] name` without `CASCADE`; one with
+/// `CASCADE` may install others, and `ALTER EXTENSION name` may update it.
+/// Read from tokens: sqlparser does not parse `SCHEMA s` without `WITH`.
+/// Extensions created in a `DO` block are not listed.
+pub(crate) fn created_extensions(sql: &str) -> Vec<(usize, String, bool)> {
     use sqlparser::tokenizer::Token;
     let mut found = vec![];
     for (index, tokens) in statements(sql).unwrap_or_default().into_iter().enumerate() {
@@ -2020,7 +2022,8 @@ pub(crate) fn created_extensions(sql: &str) -> Vec<(usize, String)> {
             .map(|t| &t.token)
             .filter(|t| !matches!(t, Token::Whitespace(_)))
             .collect();
-        if !(keyword(t.first(), "CREATE") && keyword(t.get(1), "EXTENSION")) {
+        let alter = keyword(t.first(), "ALTER");
+        if !((alter || keyword(t.first(), "CREATE")) && keyword(t.get(1), "EXTENSION")) {
             continue;
         }
         let at =
@@ -2030,7 +2033,12 @@ pub(crate) fn created_extensions(sql: &str) -> Vec<(usize, String)> {
                 2
             };
         if let Some(Token::Word(w)) = t.get(at) {
-            found.push((index + 1, folded(&w.value, w.quote_style.is_some())));
+            let cascade = t.iter().skip(at + 1).any(|t| keyword(Some(t), "CASCADE"));
+            found.push((
+                index + 1,
+                folded(&w.value, w.quote_style.is_some()),
+                !alter && !cascade,
+            ));
         }
     }
     found
@@ -2435,13 +2443,16 @@ mod tests {
             created_extensions(
                 "CREATE TABLE app.t (id int);\n-- CREATE EXTENSION commented\nCREATE EXTENSION IF NOT EXISTS postgres_fdw SCHEMA app;\ncreate extension \"Quoted\" WITH SCHEMA app CASCADE;\nCREATE EXTENSION Pg_Trgm;\nDO $$ BEGIN CREATE EXTENSION citext; END $$;"
             ),
-            [
-                (2, "postgres_fdw".to_string()),
-                (3, "Quoted".to_string()),
-                (4, "pg_trgm".to_string())
+[
+                (2, "postgres_fdw".to_string(), true),
+                (3, "Quoted".to_string(), false),
+                (4, "pg_trgm".to_string(), true)
             ]
         );
-        assert!(created_extensions("ALTER EXTENSION pg_trgm UPDATE").is_empty());
+        assert_eq!(
+            created_extensions("ALTER EXTENSION pg_trgm UPDATE"),
+            [(1, "pg_trgm".to_string(), false)]
+        );
     }
     #[test]
     fn check_tables_lists_every_table_a_check_reads() {

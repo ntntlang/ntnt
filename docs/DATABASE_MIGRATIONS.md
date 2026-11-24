@@ -498,10 +498,13 @@ Pending "0001_tenants.sql" (...): hazards [...]; unknowns [...]
 ```
 
 The warning does not block the plan. `migrate` tests each check with PostgreSQL's
-`row_security_active()` before running it and refuses one that would read such a
-table with `DB_CHECK_ROW_SECURITY`, naming the check, its phase and each table
-(`objects` holds their catalog keys). The check does not run and its migration's
-transaction rolls back. To run the check, have a superuser give the migration role
+`row_security_active()` first. A check that names such a table is refused with
+`DB_CHECK_ROW_SECURITY`, naming the check, its phase and each table (`objects`
+holds their catalog keys); it does not run and is not counted in
+`assertions.executed`. A check that reaches such a table only through a view runs,
+since a view can name a table without reading it; if PostgreSQL refuses its read,
+the failure is the same `DB_CHECK_ROW_SECURITY`, marked `(through a view)`. Either
+way the migration's transaction rolls back. To run the check, have a superuser give the migration role
 `BYPASSRLS` (`ALTER ROLE app_owner BYPASSRLS`), then plan, review and approve
 again: the role's attributes are part of the plan's target binding. The scratch
 role may then have `BYPASSRLS` too. Otherwise, change the check so that it reads

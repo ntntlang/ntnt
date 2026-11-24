@@ -1287,10 +1287,12 @@ fn checks_on_forced_row_security_tables_are_flagged_and_named() {
         .find(|d| d["code"] == "DB_CHECK_ROW_SECURITY")
         .unwrap_or_else(|| panic!("named refusal, not a bare SQLSTATE: {r}"));
     let message = d["message"].as_str().unwrap();
+    // Reached through a view, the table is named once PostgreSQL refuses the
+    // read: a view may name a table it does not read.
     assert!(
-        message.starts_with(
-            "Check slugs_via_view ([requires]) reads app.tenants (FORCE ROW LEVEL SECURITY)"
-        ) && message.contains(&f.target),
+        message.starts_with("Check slugs_via_view ([requires]) reads app.tenants (through a view; FORCE ROW LEVEL SECURITY)")
+            && message.contains(&f.target)
+            && message.ends_with("PostgreSQL refused this check's read."),
         "{d}"
     );
     assert!(
@@ -1311,6 +1313,7 @@ fn checks_on_forced_row_security_tables_are_flagged_and_named() {
         ]),
         "{r}"
     );
+    assert_eq!(r["assertions"]["executed"], 2, "{r}");
     assert_eq!(r["progress"][0]["state"], "committed", "{r}");
     assert_eq!(r["progress"][1]["state"], "failed", "{r}");
     let added: bool = f
@@ -1322,6 +1325,34 @@ fn checks_on_forced_row_security_tables_are_flagged_and_named() {
         .unwrap()
         .get(0);
     assert!(!added, "the refused migration was rolled back");
+    // A check that names the table is refused before it runs and is not
+    // counted as executed.
+    let names_toml =
+        std::fs::read_to_string(f.root.path().join("migrations/0002_names.toml")).unwrap();
+    std::fs::write(
+        f.root.path().join("migrations/0002_names.toml"),
+        "[requires]\nslugs_present = \"SELECT EXISTS (SELECT 1 FROM app.tenants WHERE slug = 'internal')\"\n",
+    )
+    .unwrap();
+    let p = f.plan("plan_direct.json");
+    let r = f.apply("plan_direct.json", p["plan_digest"].as_str());
+    let d = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_CHECK_ROW_SECURITY")
+        .unwrap_or_else(|| panic!("named refusal: {r}"));
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            "Check slugs_present ([requires]) reads app.tenants (FORCE ROW LEVEL SECURITY)"
+        ) && message.ends_with("The check did not run."),
+        "{d}"
+    );
+    assert_eq!(d["source"], "0002_names.sql", "{d}");
+    assert_eq!(r["assertions"]["executed"], 0, "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    std::fs::write(f.root.path().join("migrations/0002_names.toml"), names_toml).unwrap();
     // The documented remedy: the migration role bypasses row-level security.
     // Its attributes are part of the plan's binding, so plan again.
     f.admin
@@ -1375,7 +1406,7 @@ fn untrusted_extensions_fail_with_a_named_privilege_diagnostic() {
     );
     f.sql(
         "0001_fdw.sql",
-        "DO $$ BEGIN CREATE EXTENSION postgres_fdw; END $$;",
+        "DO $$ BEGIN CREATE EXTENSION postgres_fdw; END $$;\nCREATE EXTENSION pgcrypto SCHEMA app;",
     );
     let d = refusal(&f.command("plan"));
     assert!(

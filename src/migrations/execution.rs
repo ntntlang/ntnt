@@ -442,25 +442,37 @@ async fn checks(
     db.check_purity(schema, &inputs.history_schemas, outside)
         .await?;
     for (name, sql) in checks {
-        let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
-        report["assertions"]["executed"] = json!(count + 1);
         report["assertions"]["outcome"] = json!("unknown");
         // Checks read with row_security=off. Where row-level security
-        // applies to the migration role, PostgreSQL would refuse the read
-        // with a bare SQLSTATE 42501, so name the check and the table first.
+        // applies to the migration role, PostgreSQL refuses the read with a
+        // bare SQLSTATE 42501. A check that names such a table is refused by
+        // name before it runs. One that may reach such a table through a
+        // view runs, and its SQLSTATE 42501 is explained the same way.
         let read: Vec<String> = super::analysis::check_tables(sql, schema)
             .into_iter()
             .filter(|(s, _)| s == schema)
             .map(|(_, table)| table)
             .collect();
+        let role = &inputs.endpoint.role;
         let result = match db.row_security_blocked(schema, &read).await {
-            Ok(blocked) if blocked.is_empty() => db.check(sql, schema).await,
-            Ok(blocked) => Err(super::row_security_refusal(
-                name,
-                phase,
-                &inputs.endpoint.role,
-                &blocked,
+            Ok(blocked) if blocked.iter().any(|r| r.direct) => Err(super::row_security_refusal(
+                name, phase, role, &blocked, false,
             )),
+            Ok(blocked) => {
+                // Only checks that actually run count as executed.
+                let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
+                report["assertions"]["executed"] = json!(count + 1);
+                db.check(sql, schema).await.map_err(|d| {
+                    if !blocked.is_empty()
+                        && d.code == "DB_POSTGRES"
+                        && d.message.contains("(SQLSTATE 42501)")
+                    {
+                        super::row_security_refusal(name, phase, role, &blocked, true)
+                    } else {
+                        d
+                    }
+                })
+            }
             Err(d) => Err(d),
         };
         if report["assertions"]["checks"].is_null() {
