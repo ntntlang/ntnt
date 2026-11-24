@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+
+- Update `cookie` to 0.18.3 for RUSTSEC-2026-0594 (#456).
+
 ### Fixed
 
 - `ntnt db` (PostgreSQL): enums, domains and composite types plan, migrate and
