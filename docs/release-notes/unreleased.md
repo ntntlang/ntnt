@@ -33,8 +33,17 @@
   read tables with columns of these types, and run while an extension's casts
   exist. Adopting a history that uses an enum or citext column used to fail at
   `migrate` with `DB_CHECK_UNSUPPORTED`. Checks still run no routine the
-  history wrote: comparing a domain's values does not evaluate its
-  constraints (#430).
+  history wrote. Comparing a column with a literal converts the literal to the
+  column's type; for a domain that is its base type, so a domain's own
+  constraints never run, whatever they call. The elements of an array and the
+  attributes of a composite go through their types' input, though, so a check
+  that can read `emails app.email[]`, where `app.email`'s constraint calls a
+  function the history wrote or a volatile one such as `nextval`, fails with
+  `DB_CHECK_UNSUPPORTED` before it runs, naming the table, column, type,
+  domain and function. So does a view that converts values to such a domain,
+  or that uses an operator whose function the history wrote. A domain whose
+  constraint uses only builtins, such as a regular expression, is allowed at
+  any depth (#430).
 
 Catalogs that use none of these keep their fingerprints, so saved plans and
 applied history stay valid.

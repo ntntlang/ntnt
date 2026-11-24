@@ -21,7 +21,11 @@
   `DB_CATALOG_AMBIGUOUS` names the shared key and the migration (#430).
 - `ntnt db` (PostgreSQL): `EXCLUDE` constraints plan, migrate and verify (#430).
 - `ntnt db` (PostgreSQL): `requires`, `ensures` and adoption checks can read
-  tables with columns of these types, and run while an extension's casts exist
+  tables with columns of these types, and run while an extension's casts exist.
+  They still run no routine the history wrote: `DB_CHECK_UNSUPPORTED` names a
+  column whose type holds a domain below its top level (an array's element, a
+  composite's attribute) whose constraint calls one or a volatile function,
+  and a view that converts values to such a domain or uses such an operator
   (#430).
 
 ## 0.6.4
