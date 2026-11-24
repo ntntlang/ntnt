@@ -1366,6 +1366,111 @@ fn checks_on_forced_row_security_tables_are_flagged_and_named() {
     assert_eq!(f.command("verify")["outcome"], "pass");
 }
 
+/// #456 and #430 together: one `plan.check_warnings` for both. A check on a
+/// FORCE ROW LEVEL SECURITY table that compares a citext column gets both
+/// warnings, the operator's first, as migrate meets them; a second check
+/// on the table gets only the row-security one. migrate refuses the first
+/// check before any check of the phase runs and rolls the migration back.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn a_check_with_several_hazards_gets_each_warning_and_is_refused() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_users.sql",
+        "CREATE EXTENSION citext WITH SCHEMA app;
+         CREATE TABLE app.users (id BIGINT PRIMARY KEY, email app.citext NOT NULL);
+         ALTER TABLE app.users ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE app.users FORCE ROW LEVEL SECURITY;
+         CREATE POLICY users_all ON app.users USING (true) WITH CHECK (true);
+         INSERT INTO app.users VALUES (1, 'Admin@example.com');",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0001_users.toml"),
+        "[ensures]\nadmin_present = \"SELECT EXISTS (SELECT 1 FROM app.users WHERE email = 'admin@example.com')\"\none_user = \"SELECT (SELECT count(*) FROM app.users) = 1\"\n",
+    )
+    .unwrap();
+    let p = f.plan("plan.json");
+    let warnings = p["plan"]["check_warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("plan flags the checks: {p}"));
+    let found: Vec<(&str, &str)> = warnings
+        .iter()
+        .map(|w| {
+            assert_eq!(w["source"], "0001_users.sql", "{w}");
+            assert_eq!(w["phase"], "ensures", "{w}");
+            assert_eq!(w["relation"], "app.users", "{w}");
+            (w["check"].as_str().unwrap(), w["code"].as_str().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("admin_present", "CHECK_OPERATOR_MISMATCH"),
+            ("admin_present", "CHECK_ROW_SECURITY"),
+            ("one_user", "CHECK_ROW_SECURITY"),
+        ],
+        "{p}"
+    );
+    assert!(warnings[0].get("forced").is_none(), "{p}");
+    assert_eq!(warnings[1]["forced"], true, "{p}");
+    assert!(
+        warnings[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("app.=(app.citext,app.citext)")
+            && warnings[1]["message"]
+                .as_str()
+                .unwrap()
+                .contains("BYPASSRLS"),
+        "{p}"
+    );
+    // The human plan prints each warning under its migration.
+    let human = std::process::Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["db", "plan", "--target", "test"])
+        .env("DB_TARGET", &f.target_url)
+        .env("DB_SCRATCH", &f.scratch_url)
+        .env_remove("DB_APPROVAL")
+        .env("NTNT_SECRETS_PROVIDER", "env")
+        .env("NTNT_ENV", "development")
+        .current_dir(f.root.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&human.stdout);
+    for line in [
+        "Warning \"CHECK_OPERATOR_MISMATCH\" on \"app.users\" (\"ensures\" check \"admin_present\")",
+        "Warning \"CHECK_ROW_SECURITY\" on \"app.users\" (\"ensures\" check \"admin_present\")",
+        "Warning \"CHECK_ROW_SECURITY\" on \"app.users\" (\"ensures\" check \"one_user\")",
+    ] {
+        assert!(text.contains(line), "{line}: {text}");
+    }
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "fail", "{r}");
+    let d = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_CHECK_UNSUPPORTED")
+        .unwrap_or_else(|| panic!("refused before any check runs: {r}"));
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Check admin_present ([ensures]) compares column email of app.users (type app.citext) with =")
+            && message.ends_with("No check of this phase ran."),
+        "{d}"
+    );
+    assert_eq!(d["source"], "0001_users.sql", "{d}");
+    assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0, "{r}");
+    assert_eq!(r["progress"][0]["state"], "failed", "{r}");
+    let created: bool = f
+        .target()
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='app' AND c.relname='users')",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(!created, "the refused migration was rolled back");
+}
+
 /// #430 (pg-09): the unprivileged roles NTNT requires can create only
 /// trusted extensions. Creating an untrusted one fails with a diagnostic
 /// that names the statement and the extension and explains trusted and
