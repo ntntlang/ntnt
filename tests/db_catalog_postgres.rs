@@ -1979,7 +1979,10 @@ fn citext_checks(setup: &str, checks: &[(&str, &str)]) -> (Value, Value) {
 /// passed where the application's citext `=` finds the account. Such a
 /// comparison is refused by name before any check runs, and `plan` warns:
 /// on a citext column, through a domain over citext as a scalar
-/// subquery's output, and on an enum the history gave its own `=`.
+/// subquery's output, on an enum the history gave its own `=`, on an
+/// integer column the history gave an `=(integer,integer)` (an application
+/// whose path lists `app` first uses it), and on a table's whole row
+/// (`users = users`) under an `=` the history wrote for its row type.
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn checks_refuse_comparisons_the_application_makes_with_another_operator() {
@@ -2007,6 +2010,20 @@ CREATE OPERATOR app.= (LEFTARG = app.role, RIGHTARG = app.role, FUNCTION = app.r
 ",
             "SELECT EXISTS (SELECT 1 FROM app.users WHERE role = 'admin')",
             &["compares column role of app.users (type app.role) with =", "app.=(app.role,app.role)"][..],
+        ),
+        (
+            "CREATE FUNCTION app.int_eq(integer, integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1 <> $2';
+CREATE OPERATOR app.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = app.int_eq);
+",
+            "SELECT EXISTS (SELECT 1 FROM app.users WHERE id = 1)",
+            &["compares column id of app.users (type integer) with =", "app.=(integer,integer)"][..],
+        ),
+        (
+            "CREATE FUNCTION app.users_eq(app.users, app.users) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false';
+CREATE OPERATOR app.= (LEFTARG = app.users, RIGHTARG = app.users, FUNCTION = app.users_eq);
+",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.users WHERE NOT (users = users))",
+            &["compares column users of app.users (type app.users) with =", "app.=(app.users,app.users)"][..],
         ),
     ] {
         let (plan, r) = citext_checks(setup, &[("no_admin_account", check)]);

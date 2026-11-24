@@ -298,7 +298,9 @@ ORDER BY 1, 2 LIMIT 20"#;
 /// resolve to a different one (see `Postgres::check_hazards`): $1 names the
 /// column, $2/$3 the tables it can name, innermost first, $4/$5 every table
 /// the check reads (used only when none of $2/$3 has such a column), $6 is
-/// the managed schema and $7 the operator's name. One row per table: its
+/// the managed schema and $7 the operator's name. A name that no table at
+/// its levels has as a column is, as in PostgreSQL, the whole row of the
+/// table it names, typed by that table's row type. One row per table: its
 /// catalog key, its name, the column's type, the type in its domain
 /// base-type chain the operator takes, and the operator.
 const CHECK_OPERATOR_HAZARDS: &str = r#"WITH RECURSIVE named(ord, rel) AS (
@@ -311,7 +313,10 @@ cols(rel, typ) AS (SELECT rel, typ FROM exact
   SELECT a.attrelid, a.atttypid FROM ROWS FROM (pg_catalog.unnest($4::text[]), pg_catalog.unnest($5::text[])) t(nsp, rel)
   JOIN pg_catalog.pg_namespace n ON n.nspname=t.nsp JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=t.rel
   JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attname=$1 AND a.attnum>0 AND NOT a.attisdropped
-  WHERE NOT EXISTS (SELECT 1 FROM exact)),
+  WHERE NOT EXISTS (SELECT 1 FROM exact)
+  UNION ALL
+  SELECT c.oid, c.reltype FROM named JOIN pg_catalog.pg_class c ON c.oid=named.rel
+  WHERE c.relname=$1 AND NOT EXISTS (SELECT 1 FROM exact)),
 chain(rel, top, typ) AS (SELECT rel, typ, typ FROM cols
   UNION ALL
   SELECT ch.rel, ch.top, t.typbasetype FROM chain ch JOIN pg_catalog.pg_type t ON t.oid=ch.typ WHERE t.typtype='d')
@@ -324,8 +329,9 @@ JOIN pg_catalog.pg_type t ON t.oid=ch.typ JOIN pg_catalog.pg_namespace tn ON tn.
 JOIN pg_catalog.pg_operator o ON o.oprname=$7 AND o.oprkind='b' JOIN pg_catalog.pg_namespace okn ON okn.oid=o.oprnamespace
 JOIN pg_catalog.pg_type lt ON lt.oid=o.oprleft JOIN pg_catalog.pg_type rt ON rt.oid=o.oprright
 JOIN pg_catalog.pg_class rc ON rc.oid=ch.rel JOIN pg_catalog.pg_namespace rn ON rn.oid=rc.relnamespace
-WHERE tn.nspname<>'pg_catalog' AND okn.nspname<>'pg_catalog'
-  AND (ch.typ IN (o.oprleft, o.oprright) OR (lt.typtype='p' AND lt.typname LIKE 'any%') OR (rt.typtype='p' AND rt.typname LIKE 'any%'))
+WHERE okn.nspname<>'pg_catalog'
+  AND (ch.typ IN (o.oprleft, o.oprright)
+    OR (tn.nspname<>'pg_catalog' AND ((lt.typtype='p' AND lt.typname LIKE 'any%') OR (rt.typtype='p' AND rt.typname LIKE 'any%'))))
 ORDER BY rc.oid, (o.oprleft=ch.typ AND o.oprright=ch.typ) DESC, ch.typ IN (o.oprleft, o.oprright) DESC, o.oid"#;
 
 /// Views a check reads ($1/$2, the tables it names), directly or through
@@ -1216,12 +1222,16 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     ///
     /// Checks resolve operators with search_path=pg_catalog, while the
     /// application's search path reaches the managed schema. When a column
-    /// the check compares (`analysis::check_operands`) has a type, or a type
-    /// in its domain base-type chain, outside pg_catalog for which a binary
-    /// operator of that name exists outside pg_catalog (or one that takes a
-    /// polymorphic type), the application would use that operator and the
-    /// check would not: citext's `=` compares case-insensitively, but a check
-    /// would convert the column to text and compare with text's `=`. A view
+    /// the check compares (`analysis::check_operands`), or a table's whole
+    /// row, has a type, or a type in its domain base-type chain, that a
+    /// binary operator of that name outside pg_catalog takes (for a type
+    /// outside pg_catalog, also one that takes a polymorphic type), the
+    /// application may use that operator and the check would not: citext's
+    /// `=` compares case-insensitively, but a check would convert the column
+    /// to text and compare with text's `=`, and pg_catalog has no
+    /// `=(varchar,varchar)`, so an application finds `app.=(varchar,varchar)`
+    /// first. The operator counts in any schema, because ntnt cannot know
+    /// the application's search path. A view
     /// keeps the operators chosen when a migration created it, and an enum,
     /// domain, composite or array with no such operator resolves to the same
     /// pg_catalog operator either way, so those stay allowed.
@@ -1234,7 +1244,18 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
                 .into_iter()
                 .unzip();
         let mut found = vec![];
+        let mut seen = vec![];
         for operand in super::analysis::check_operands(sql, schema) {
+            // `users = users` names one operand twice.
+            let operand_key = (
+                operand.column.clone(),
+                operand.operator,
+                operand.tables.clone(),
+            );
+            if seen.contains(&operand_key) {
+                continue;
+            }
+            seen.push(operand_key);
             let (named_schemas, named): (Vec<String>, Vec<String>) =
                 operand.tables.iter().cloned().unzip();
             for row in self
