@@ -82,8 +82,18 @@
   such as `postgres_fdw`, fails with `DB_EXTENSION_PRIVILEGE`, naming the
   statement and the extension, explaining that roles that are not superusers
   can create only trusted extensions, and saying what to do. It used to fail
-  with a bare SQLSTATE 42501. Support for extensions that a superuser installs
-  remains open in #430.
+  with a bare SQLSTATE 42501.
+- **Extensions a superuser installs.** `[databases.<name>] extensions =
+  ["postgres_fdw", "pg_stat_statements"]` declares extensions that a superuser
+  installs in both the target and the scratch database, at one version and in
+  one schema, which may be `public`. Inspection compares each by its version and
+  schema, so a mismatch between the two databases is drift; scratch may hold the
+  extension and what it owns, and one missing from scratch is refused by name;
+  migrations may keep `CREATE EXTENSION IF NOT EXISTS`, which then does nothing.
+  An undeclared extension outside the managed scope, such as a DBA's
+  `pg_stat_statements` in `public`, still leaves the catalog uncovered, and the
+  diagnostic now says to declare it. The key is part of the plan only when
+  present (#430).
 
 Catalogs that use none of these keep their fingerprints, so saved plans and
 applied history stay valid.

@@ -648,14 +648,58 @@ as a requirement, is explained without a name), and says what to do. An
 extension's objects must also stay within
 [inspection coverage](#inspection-coverage-and-drift).
 
-NTNT does not yet support an extension that a superuser must install. Installing
-one out of band does not help today: on the target, an extension outside the
-managed scope is reported in `catalog.uncovered` (`DB_COVERAGE_INCOMPLETE`), one in
-the managed schema of a target without a ledger makes `status` report
-`DB_UNRECOGNIZED_HISTORY`, and scratch may hold no extension but `plpgsql`
-(`DB_SCRATCH_NOT_EMPTY`). Use a trusted extension where one serves, or keep the
-untrusted extension out of the databases NTNT manages. #430 tracks support for
-extensions that a superuser installs in both the target and scratch.
+#### Extensions a superuser installs
+
+An untrusted extension, or any extension a DBA installs out of band (monitoring
+such as `pg_stat_statements` is common), is declared in the manifest and installed
+by a superuser in **both** the target and the scratch database, at the same
+version and in the same schema:
+
+```toml
+[databases.app]
+engine = "postgresql"
+schema = "app"
+extensions = ["postgres_fdw", "pg_stat_statements"]
+```
+
+```sql
+-- As a superuser, in the target database and in the scratch database:
+CREATE EXTENSION postgres_fdw SCHEMA public;
+CREATE EXTENSION pg_stat_statements SCHEMA public;
+```
+
+- A declared extension may live in any schema, `public` included, except `_ntnt`
+  and PostgreSQL's own schemas. In the managed schema it must be `public`: replay
+  creates any other managed schema, so scratch cannot hold it beforehand.
+- Migrations may keep `CREATE EXTENSION IF NOT EXISTS postgres_fdw`. With the
+  extension installed it does nothing, in replay and on the target.
+- Inspection covers a declared extension wherever it is installed, as
+  `extension:<name>` with its version and schema. A different version or schema in
+  scratch than on the target is drift on that object. Its members outside the
+  managed scope are not inspected. When `public` is the managed schema, its
+  members there are covered by its version, the relations it installs included,
+  and they are not taken for an unrecognized history on a target without a
+  ledger.
+- Scratch must hold each declared extension. One that is missing, or installed in
+  `_ntnt`, a system schema or a managed schema other than `public`, is refused with
+  `DB_SCRATCH_MISMATCH` naming it. Scratch's `public` and the declared extensions'
+  schemas may hold only what those extensions own: their members, and what
+  depends on a member internally or automatically, such as array and row types
+  and indexes. Anything else there is refused with `DB_SCRATCH_NOT_EMPTY`.
+- A declared extension's casts do not block DDL, as an in-scope extension's do
+  not.
+- The key is part of the plan's policy, so adding or changing it needs a new plan.
+  A manifest without it keeps its plan digests.
+
+An extension installed outside the managed scope without a declaration is still
+reported in `catalog.uncovered` (`DB_COVERAGE_INCOMPLETE`), and the diagnostic says
+to declare it. A declared extension installed in `_ntnt` makes the ledger
+unrecognized (`DB_LEDGER_UNKNOWN`), as anything else there does.
+
+Managed objects that use a declared extension's members outside the scope, such as
+a column of type `public.hstore` or a view that calls `dblink`, stay outside
+inspection coverage. A trusted extension that a migration creates in the managed
+schema is covered with its members.
 
 ### Concurrent index builds
 

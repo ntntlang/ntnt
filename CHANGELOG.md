@@ -55,6 +55,16 @@
   explaining that roles that are not superusers can create only trusted
   extensions. It used to fail with a bare SQLSTATE 42501 (#430).
 
+### Added
+
+- `ntnt db` (PostgreSQL): `[databases.<name>] extensions = [...]` declares
+  extensions a superuser installs in both the target and the scratch database,
+  in any schema but `_ntnt` and PostgreSQL's, `public` included. Each is compared
+  by version and schema, scratch may hold it and what it owns, and migrations may
+  keep `CREATE EXTENSION IF NOT EXISTS` for it. An undeclared extension outside
+  the managed scope is still uncovered, and `DB_COVERAGE_INCOMPLETE` now says to
+  declare it. Manifests without the key keep their plan digests (#430).
+
 ### Changed
 
 - `ntnt db` (PostgreSQL): the `capabilities.inspection` keys of the JSON
