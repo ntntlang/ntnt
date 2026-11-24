@@ -2,7 +2,23 @@
 
 ## Unreleased
 
-No changes recorded since 0.6.4.
+### Fixed
+
+- `ntnt db` (PostgreSQL): enums, domains and composite types plan, migrate and
+  verify, in the managed schema and in schemas the history creates; a change
+  to one outside a migration is drift (#430).
+- `ntnt db` (PostgreSQL): a trusted extension installed in the managed schema,
+  such as pg_trgm or citext, covers its types, operators, operator classes and
+  casts by its version, so indexes and columns that use them plan and migrate,
+  and citext's casts no longer block later migrations; an out-of-band
+  `ALTER EXTENSION ... UPDATE` is drift (#430).
+- `ntnt db` (PostgreSQL): overloaded operators and operator classes with one
+  name in two access methods no longer collide as catalog keys, and
+  `DB_CATALOG_AMBIGUOUS` names the shared key and the migration (#430).
+- `ntnt db` (PostgreSQL): `EXCLUDE` constraints plan, migrate and verify (#430).
+- `ntnt db` (PostgreSQL): `requires`, `ensures` and adoption checks can read
+  tables with columns of these types, and run while an extension's casts exist
+  (#430).
 
 ## 0.6.4
 
