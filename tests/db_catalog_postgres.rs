@@ -1883,6 +1883,30 @@ CREATE VIEW app.firsts AS SELECT id FROM app.orders WHERE id OPERATOR(app.===) 1
             "app.same(integer,integer) (a routine the history wrote)",
         ],
     );
+    // The planner may put an operator's negator in its place.
+    assert_check_refused(
+        &format!("{orders}CREATE FUNCTION app.differ(a int, b int) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN a <> b; END $$;
+CREATE OPERATOR app.!== (LEFTARG = int, RIGHTARG = int, FUNCTION = app.differ);
+CREATE OPERATOR app.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, NEGATOR = !==);
+CREATE VIEW app.others AS SELECT id FROM app.orders WHERE NOT (id OPERATOR(app.===) 2);
+"),
+        "SELECT EXISTS (SELECT 1 FROM app.others WHERE id IS NOT NULL)",
+        &["which the planner may replace with app.!==(integer,integer)", "app.differ(integer,integer)"],
+    );
+    // Builtins that convert to a type given at run time record no
+    // dependency on it.
+    assert_check_refused(
+        &format!("{orders}CREATE VIEW app.valid_emails AS SELECT id, pg_input_is_valid(email, 'app.email') AS ok FROM app.orders;\n"),
+        "SELECT EXISTS (SELECT 1 FROM app.valid_emails WHERE ok)",
+        &["view app.valid_emails calls pg_input_is_valid(text,text)"],
+    );
+    assert_check_refused(
+        "CREATE TABLE app.people (id int, email app.email);
+CREATE VIEW app.imports AS SELECT (json_populate_record(p, '{\"email\": \"a@b\"}')).email AS email FROM app.people p;
+",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.imports WHERE email IS NULL)",
+        &["view app.imports calls json_populate_record(anyelement,json,boolean)"],
+    );
 }
 
 /// #456 review: what stays allowed. A literal compared with a column of a
