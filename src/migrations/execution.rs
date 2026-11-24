@@ -413,6 +413,7 @@ async fn connect(inputs: &CapturedInputs, saved: &Value) -> Result<Adapter> {
         &inputs.endpoint,
         &inputs.config.engine,
         Access::Execute(saved["plan"]["binding"]["target"].clone()),
+        inputs.config.declared_extensions(),
     )
     .await
 }

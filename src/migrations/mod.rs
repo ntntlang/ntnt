@@ -280,6 +280,36 @@ fn check_warnings<'a>(
         .filter(move |warning| warning["source"] == *source)
 }
 
+/// `DB_COVERAGE_INCOMPLETE` with `message` for the `uncovered` keys. An
+/// extension a superuser installed outside the managed scope is covered once
+/// `[databases.<database>] extensions` declares it (#430), so its key says
+/// how; one declared but uncovered sits in `_ntnt` or a system schema.
+pub(super) fn coverage_incomplete(
+    message: &str,
+    uncovered: &[String],
+    database: &str,
+    declared: &[String],
+) -> Diagnostic {
+    let (declared_here, undeclared): (Vec<&str>, Vec<&str>) = uncovered
+        .iter()
+        .filter_map(|key| key.strip_prefix("extension:"))
+        .partition(|name| declared.iter().any(|d| d == name));
+    let mut text = message.to_owned();
+    if !undeclared.is_empty() {
+        text.push_str(&format!(
+            " Extension {} is installed outside the managed scope. If a superuser installed it, declare it in [databases.{database}] extensions and install it in the scratch database too, at the same version and in the same schema; it is then compared by version and schema.",
+            undeclared.join(", ")
+        ));
+    }
+    if !declared_here.is_empty() {
+        text.push_str(&format!(
+            " Declared extension {} is installed in _ntnt or a PostgreSQL system schema, where NTNT does not inspect it; install it in another schema, such as public.",
+            declared_here.join(", ")
+        ));
+    }
+    Diagnostic::new("DB_COVERAGE_INCOMPLETE", &text).with_objects(uncovered)
+}
+
 /// A migration with no statements yet (#428): only comments, whitespace or
 /// semicolons, such as the file `ntnt db new` creates.
 pub(super) fn empty_migration() -> Diagnostic {
@@ -1262,6 +1292,24 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn coverage_names_how_to_declare_an_extension() {
+        let uncovered = vec![
+            "extension:pageinspect".to_owned(),
+            "extension:pg_stat_statements".to_owned(),
+            "relation:t".to_owned(),
+        ];
+        let d = super::coverage_incomplete("Gaps.", &uncovered, "app", &["pageinspect".into()]);
+        assert_eq!(d.code, "DB_COVERAGE_INCOMPLETE");
+        assert_eq!(d.objects, uncovered);
+        assert_eq!(
+            d.message,
+            "Gaps. Extension pg_stat_statements is installed outside the managed scope. If a superuser installed it, declare it in [databases.app] extensions and install it in the scratch database too, at the same version and in the same schema; it is then compared by version and schema. Declared extension pageinspect is installed in _ntnt or a PostgreSQL system schema, where NTNT does not inspect it; install it in another schema, such as public."
+        );
+        // Nothing to add without uncovered extensions.
+        let d = super::coverage_incomplete("Gaps.", &uncovered[2..], "app", &[]);
+        assert_eq!(d.message, "Gaps.");
+    }
     #[test]
     fn configuration_diagnostics_have_specific_next_actions() {
         use super::inventory::{

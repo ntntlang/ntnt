@@ -173,6 +173,10 @@ pub(crate) struct Postgres {
     transport: Value,
     /// Set once `prepare_scratch` validated this session as scratch.
     scratch: std::sync::OnceLock<Box<ScratchScope>>,
+    /// The declared extensions (`[databases.<name>] extensions`, #430): a
+    /// superuser installed them in the target and scratch databases, and
+    /// inspection covers them wherever they are installed.
+    extensions: Box<[String]>,
 }
 /// What a prepared scratch database held outside system schemas: the
 /// managed schema and `public`. Objects that appear outside the managed
@@ -506,7 +510,13 @@ impl Postgres {
             task,
             transport,
             scratch: std::sync::OnceLock::new(),
+            extensions: Box::default(),
         })
+    }
+    /// This session with the declared `extensions` (see `extensions`).
+    pub fn with_declared_extensions(mut self, extensions: &[String]) -> Self {
+        self.extensions = extensions.into();
+        self
     }
     pub async fn batch(&self, sql: &str) -> Result<()> {
         bounded(self.client.batch_execute(sql)).await
@@ -1032,25 +1042,65 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         // or as a superuser); it never gains other elevated attributes.
         let target_bypasses_rls = target.bypasses_row_security();
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
-        let r=bounded(self.client.query_one(r#"
-SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $1))
+        let declared: &[String] = &self.extensions;
+        // A superuser installs each declared extension here as on the target
+        // (#430). One that is missing, or sits where NTNT keeps its ledger or
+        // PostgreSQL its own objects, or in the schema this transaction
+        // creates, is refused by name.
+        for row in self
+            .rows("SELECT x.name, n.nspname::text FROM pg_catalog.unnest($1::text[]) x(name) LEFT JOIN pg_catalog.pg_extension e ON e.extname=x.name LEFT JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace ORDER BY 1", &[&declared])
+            .await?
+        {
+            let (name, installed): (String, Option<String>) = (row.get(0), row.get(1));
+            let message = match installed.as_deref() {
+                None => format!("Scratch lacks the declared extension {name}. A superuser installs each extension in extensions = [...] in the scratch database too, at the target's version and in the target's schema."),
+                Some(nsp) if nsp == "_ntnt" || nsp == "information_schema" || nsp.starts_with("pg_") => format!("The declared extension {name} is installed in schema {nsp} in scratch: declared extensions may live in any schema but _ntnt and PostgreSQL's own."),
+                Some(nsp) if nsp == schema && schema != "public" => format!("The declared extension {name} is installed in the managed schema {nsp} in scratch, which replay creates: install it in public or another schema, in both databases."),
+                Some(_) => continue,
+            };
+            let mut d = Diagnostic::new("DB_SCRATCH_MISMATCH", &message);
+            d.next_action = "As a superuser, install each declared extension in the scratch database with the target's version and schema (CREATE EXTENSION name VERSION 'v' SCHEMA s), then run the command again. See docs/DATABASE_MIGRATIONS.md, Extensions.".into();
+            return Err(d);
+        }
+        // `public` and the declared extensions' schemas hold only what the
+        // declared extensions own (`DECLARED_OWNED`). With none declared,
+        // `public` is empty and no other schema exists, as before.
+        let r=bounded(self.client.query_one(&format!(r#"
+WITH RECURSIVE {owned},
+prepared AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname='public' OR n.oid IN (SELECT e.extnamespace FROM pg_catalog.pg_extension e WHERE e.extname=ANY($1::text[])))
+SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $2))
  AND d.datdba=r.oid AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=r.oid)
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_event_trigger)
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname<>'plpgsql')
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname<>'plpgsql' AND extname<>ALL($1::text[]))
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_default_acl)
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('public','information_schema') AND nspname NOT LIKE 'pg_%')
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public')
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public')
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public')
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname NOT IN ('public','information_schema') AND n.nspname NOT LIKE 'pg_%' AND n.oid NOT IN (SELECT oid FROM prepared))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_class'::pg_catalog.regclass AND o.objid=c.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_proc'::pg_catalog.regclass AND o.objid=p.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type t WHERE t.typnamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_type'::pg_catalog.regclass AND o.objid=t.oid))
 FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user AND d.datname=pg_catalog.current_database()
-"#,&[&target_bypasses_rls])).await?;
+"#, owned = super::catalog_sql::DECLARED_OWNED),&[&declared, &target_bypasses_rls])).await?;
         if !r.get::<_, bool>(0) {
-            return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions or default grants."));
+            return Err(Diagnostic::new(
+                "DB_SCRATCH_NOT_EMPTY",
+                if declared.is_empty() {
+                    "Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions or default grants."
+                } else {
+                    "Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions but the declared ones, or default grants; public and the declared extensions' schemas may hold only what those extensions own."
+                },
+            ));
         }
+        // Inspection ignores what the declared extensions own there, by
+        // catalog key (`Catalog::owned`).
         let public = self.catalog("public", &[], &[], &endpoint.role).await?;
-        if public.objects.len() != 1
-            || !public.objects.contains_key("schema:public")
-            || !public.uncovered.is_empty()
+        if !public.objects.contains_key("schema:public")
+            || public
+                .objects
+                .keys()
+                .any(|key| key != "schema:public" && !public.owned.contains(key))
+            || public
+                .uncovered
+                .iter()
+                .any(|key| !public.owned.contains(key))
         {
             return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch public namespace contains unsupported objects or cannot be fully inspected."));
         }
@@ -1105,14 +1155,16 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// Reject custom implicit/assignment casts database-wide before DDL:
     /// ordinary coercion could run them without appearing in the reviewed
     /// script. The casts of an extension installed in the managed `scope`
-    /// (citext's, say) are the extension's own code, which its version
-    /// covers like its routines and operators, so they are allowed.
+    /// (citext's, say) or declared (#430) are the extension's own code,
+    /// which its version covers like its routines and operators, so they are
+    /// allowed.
     async fn reject_custom_casts(&self, scope: &[String]) -> Result<()> {
+        let declared: &[String] = &self.extensions;
         let casts: Vec<String> = self
             .rows("SELECT 'cast:'||pg_catalog.format_type(c.castsource,NULL)||' AS '||pg_catalog.format_type(c.casttarget,NULL) FROM pg_catalog.pg_cast c
  WHERE c.oid>=16384 AND c.castcontext IN ('i','a') AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
- WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=c.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND en.nspname=ANY($1))
- ORDER BY 1 LIMIT 101", &[&scope])
+ WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=c.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND (en.nspname=ANY($1) OR e.extname=ANY($2)))
+ ORDER BY 1 LIMIT 101", &[&scope, &declared])
             .await?
             .iter()
             .map(|r| r.get(0))
@@ -1639,10 +1691,17 @@ impl RelationalAdapter for Postgres {
     ) -> Result<Catalog> {
         self.batch("SET LOCAL search_path=pg_catalog").await?;
         let scope = scope(schema, extra);
+        let declared: &[String] = &self.extensions;
         let mut catalog = Catalog::default();
         for (kind, sql) in super::catalog_sql::QUERIES {
-            // $1, $2 and $3 as `catalog_sql` describes them.
-            for r in self.rows(sql, &[&schema, &scope, &outside]).await? {
+            // $1, $2, $3 and $4 as `catalog_sql` describes them.
+            let rows = if super::catalog_sql::WITH_DECLARED_EXTENSIONS.contains(kind) {
+                self.rows(sql, &[&schema, &scope, &outside, &declared])
+                    .await?
+            } else {
+                self.rows(sql, &[&schema, &scope, &outside]).await?
+            };
+            for r in rows {
                 let name: String = r.get(0);
                 let mut value: Value = r.get(1);
                 let supported: bool = r.get(2);
@@ -1672,8 +1731,68 @@ impl RelationalAdapter for Postgres {
         }
         catalog.uncovered.sort();
         catalog.uncovered.dedup();
+        if !declared.is_empty() {
+            // The relations the declared extensions own in the scope, as
+            // their keys are qualified: in the managed schema, none.
+            let relations: Vec<(Option<String>, String, String)> = self
+                .rows(
+                    &format!("WITH RECURSIVE {} SELECT CASE WHEN n.nspname<>$2::text THEN pg_catalog.quote_ident(n.nspname) END, c.relname::text, pg_catalog.quote_ident(c.relname) FROM pg_catalog.pg_class c JOIN owned o ON o.classid='pg_catalog.pg_class'::pg_catalog.regclass AND o.objid=c.oid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY($3::text[])", super::catalog_sql::DECLARED_OWNED),
+                    &[&declared, &schema, &scope],
+                )
+                .await?
+                .iter()
+                .map(|r| (r.get(0), r.get(1), r.get(2)))
+                .collect();
+            catalog.owned = catalog
+                .objects
+                .iter()
+                .filter(|(key, value)| declared_owned(key, value, declared, &relations))
+                .map(|(key, _)| key.clone())
+                .collect();
+        }
         Ok(catalog)
     }
+}
+
+/// Whether catalog object `key` (`value`) is owned by a declared extension
+/// (#430): one of `declared` itself, a member (inspection marks routines,
+/// types and other objects with their extension), or one of its
+/// `relations` (qualifier, name, quoted name) with the columns,
+/// constraints, triggers, policies and rules that follow it.
+fn declared_owned(
+    key: &str,
+    value: &Value,
+    declared: &[String],
+    relations: &[(Option<String>, String, String)],
+) -> bool {
+    let is_declared = |name: &str| declared.iter().any(|d| d == name);
+    if let Some(name) = key.strip_prefix("extension:") {
+        return is_declared(name);
+    }
+    if value["extension"].as_str().is_some_and(is_declared) {
+        return true;
+    }
+    relations.iter().any(|(qualifier, name, quoted)| {
+        let key = match qualifier {
+            Some(qualifier) => match key.strip_prefix(&format!("{qualifier}.")) {
+                Some(key) => key,
+                None => return false,
+            },
+            None => key,
+        };
+        ["relation:", "index:", "view:", "sequence:"]
+            .iter()
+            .any(|kind| key.strip_prefix(kind) == Some(name.as_str()))
+            || [
+                "column:",
+                "constraint:",
+                "trigger:",
+                "policy:",
+                "other:rule.",
+            ]
+            .iter()
+            .any(|kind| key.starts_with(&format!("{kind}{quoted}.")))
+    })
 }
 
 #[cfg(test)]

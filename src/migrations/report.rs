@@ -702,11 +702,12 @@ async fn replay_prefix(
         if let (Some(migration), false) = (migration, uncovered.is_empty()) {
             // The target's catalog.uncovered cannot name these:
             // they exist only in the replayed intermediate catalog.
-            let mut d = Diagnostic::new(
-                "DB_COVERAGE_INCOMPLETE",
+            let mut d = super::coverage_incomplete(
                 "Intermediate catalog exceeds execution coverage.",
-            )
-            .with_objects(&uncovered);
+                &uncovered,
+                &inputs.database_name,
+                inputs.config.declared_extensions(),
+            );
             d.source = Some(migration.name.clone());
             return Err(d);
         }
@@ -786,6 +787,7 @@ async fn observe(
         &inputs.endpoint,
         &inputs.config.engine,
         Access::Inspect,
+        inputs.config.declared_extensions(),
     )
     .await?;
     let observed = async {
@@ -896,10 +898,11 @@ async fn inspect_observed(
     }
     if adoption.is_none()
         && !history.present
-        && catalog
-            .objects
-            .iter()
-            .any(|(k, v)| !k.starts_with("schema:") && v["external"] != true)
+        && catalog.objects.iter().any(|(k, v)| {
+            // What declared extensions own came from a superuser, not
+            // from a history (#430).
+            !k.starts_with("schema:") && v["external"] != true && !catalog.owned.contains(k)
+        })
     {
         report["history"]["outcome"] = json!("fail");
         report["outcome"] = json!("fail");
@@ -933,6 +936,7 @@ async fn inspect_observed(
                 &scratch_config.endpoint,
                 &inputs.config.engine,
                 Access::Scratch(json!(&identity)),
+                inputs.config.declared_extensions(),
             )
             .await?;
             let work = async {
@@ -995,7 +999,12 @@ async fn inspect_observed(
     if !catalog.uncovered.is_empty() {
         report["diagnostics"].as_array_mut().unwrap().insert(
             coverage_at,
-            json!(Diagnostic::new("DB_COVERAGE_INCOMPLETE","Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted.").with_objects(&catalog.uncovered)),
+            json!(super::coverage_incomplete(
+                "Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted.",
+                &catalog.uncovered,
+                &inputs.database_name,
+                inputs.config.declared_extensions(),
+            )),
         );
     }
     let Replayed {
@@ -1179,6 +1188,7 @@ mod tests {
             endpoint,
             "sqlite",
             Access::Inspect,
+            &[],
         )
         .await
         .unwrap();
@@ -1190,6 +1200,7 @@ mod tests {
             scratch_endpoint,
             "sqlite",
             Access::Scratch(json!(&identity)),
+            &[],
         )
         .await
         .unwrap();
