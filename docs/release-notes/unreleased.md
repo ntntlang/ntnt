@@ -46,6 +46,28 @@
   while such a domain exists. A domain whose
   constraint uses only builtins, such as a regular expression, is allowed at
   any depth (#430).
+- **Checks compare as the application does.** Checks resolve operators with
+  `search_path=pg_catalog`, so `email = 'admin@example.com'` on a `citext`
+  column compared case-sensitive text, and a check that the application's
+  comparison would fail could pass. A check that compares a column whose type
+  (or a domain's base type) has a same-named operator outside `pg_catalog`
+  is now refused before any check runs, with `DB_CHECK_UNSUPPORTED` naming
+  the check, table, column, type and operator (`app.=(app.citext,app.citext)`),
+  and `plan` lists it in `plan.check_warnings`. Compare in a view a migration
+  creates, which keeps citext's operator, and check the view. Enums, `citext[]`
+  arrays and citext columns read with `IS NULL` or `count(*)` stay allowed
+  (#456).
+- **Checks never write through a view.** A check that reads a view, directly
+  or through other views, that calls `nextval`, `setval`, an advisory-lock
+  function or another builtin PostgreSQL marks parallel unsafe is refused
+  before it runs, naming the check, view and function. `random()`,
+  `clock_timestamp()` and `gen_random_uuid()` stay allowed (#456).
+- **Enum values used too early are named.** A statement that uses an enum
+  value that `ALTER TYPE ... ADD VALUE` added in the same transaction fails
+  with `DB_ENUM_VALUE_UNCOMMITTED`, naming the migration and statements, in
+  replay and in `migrate`, instead of an opaque SQLSTATE 55P04. Put
+  `ALTER TYPE ... ADD VALUE` in its own migration and use the value in a later
+  one (#456).
 
 - **Replay commits each migration on scratch, as `migrate` does on the target.**
   Replay used to run the whole history in one rollback-only transaction. A
@@ -54,7 +76,7 @@
   PostgreSQL 16 (SQLSTATE 55P04); it now plans, migrates and verifies on 16,
   17 and 18. A migration that adds a value and uses it in the same script
   used to plan on 17 and 18 and then fail at `migrate`; it now fails at plan
-  with the same SQLSTATE. Each migration runs in a `READ COMMITTED`
+  with `DB_ENUM_VALUE_UNCOMMITTED`. Each migration runs in a `READ COMMITTED`
   transaction with the target's settings and commits (#430).
 - **Scratch is cleaned up, fail-safe.** Replay commits a marker (schema
   `_ntnt_replay`) before the first migration and, whatever the outcome, drops
@@ -87,6 +109,18 @@
 
 Catalogs that use none of these keep their fingerprints, so saved plans and
 applied history stay valid.
+
+### Changed: capabilities keys
+
+`capabilities.inspection` in the JSON reports names what PostgreSQL inspection
+covers, and its keys changed with `format_version` still 1:
+
+| 0.6.4 | 0.6.5 |
+| --- | --- |
+| `custom_types_external_dependencies_non_sql_routines`: `unknown` | `enums_domains_composite_types_operators_exclusion_constraints`: `definition_fingerprints` and `range_and_base_types_external_dependencies_non_sql_routines`: `unknown` |
+| `managed_schema_extensions`: `version` | `managed_schema_extensions`: `version_covers_members` |
+
+A script that reads these keys must use the new names (#430).
 
 ## Security
 

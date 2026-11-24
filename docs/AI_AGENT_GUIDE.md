@@ -1744,9 +1744,9 @@ Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
 On PostgreSQL, replay commits each migration on scratch, in a transaction set up
 like the target's, so a plan sees what `migrate` will: an enum value one migration
 adds with `ALTER TYPE ... ADD VALUE` can be used by the next on PostgreSQL 16, and
-a migration that adds and uses one fails at plan (SQLSTATE 55P04). Afterwards
-replay drops what the scratch role owns and restores `public`; never put anything
-you need in scratch. A second plan on the same scratch waits for the first, up to
+a migration that adds and uses one fails at plan with `DB_ENUM_VALUE_UNCOMMITTED`.
+Afterwards replay drops what the scratch role owns and restores `public`; never put
+anything you need in scratch. A second plan on the same scratch waits for the first, up to
 `migrator_wait_seconds`, then fails with `DB_SCRATCH_BUSY`: rerun it. A plan
 after a killed one cleans up NTNT's marker schema `_ntnt_replay` and what that
 replay committed (`scratch.recovered`). `DB_SCRATCH_NOT_EMPTY` means scratch holds

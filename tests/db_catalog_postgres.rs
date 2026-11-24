@@ -1944,6 +1944,276 @@ CREATE VIEW app.recent AS SELECT id, contact FROM app.orders WHERE contact <> 'x
     assert!(!ran, "app.valid ran: {r}");
 }
 
+/// #456: the data of the tester's j3 case, a citext column holding
+/// 'Admin@example.com', with a domain over citext, a citext array and an
+/// enum beside it.
+const CITEXT_USERS: &str = "CREATE EXTENSION citext WITH SCHEMA app;
+CREATE DOMAIN app.email AS app.citext;
+CREATE TYPE app.role AS ENUM ('admin', 'member');
+CREATE TABLE app.users (id int PRIMARY KEY, email app.citext NOT NULL UNIQUE, contact app.email, aliases app.citext[], role app.role NOT NULL DEFAULT 'member');
+INSERT INTO app.users VALUES (1, 'Admin@example.com', 'Admin@example.com', '{Admin@example.com}', 'admin');
+";
+
+/// Migrates `CITEXT_USERS` and `setup`, then a second migration whose
+/// `ensures` holds `checks`. Returns the plan and the migrate report.
+fn citext_checks(setup: &str, checks: &[(&str, &str)]) -> (Value, Value) {
+    let f = Fixture::new();
+    f.sql("0001_users.sql", &format!("{CITEXT_USERS}{setup}"));
+    f.sql("0002_checked.sql", "CREATE TABLE app.marker (id int);\n");
+    let ensures: String = checks
+        .iter()
+        .map(|(name, sql)| format!("{name} = {sql:?}\n"))
+        .collect();
+    std::fs::write(
+        f.root.path().join("migrations/0002_checked.toml"),
+        format!("[ensures]\n{ensures}"),
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    (plan, r)
+}
+
+/// #456: checks resolve operators with search_path=pg_catalog, so on the
+/// j3 data `email = 'admin@example.com'` compared case-sensitive text and
+/// passed where the application's citext `=` finds the account. Such a
+/// comparison is refused by name before any check runs, and `plan` warns:
+/// on a citext column, through a domain over citext as a scalar
+/// subquery's output, and on an enum the history gave its own `=`.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_comparisons_the_application_makes_with_another_operator() {
+    for (setup, check, named) in [
+        (
+            "",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.users WHERE email = 'admin@example.com')",
+            &[
+                "Check no_admin_account ([ensures]) compares column email of app.users (type app.citext) with =",
+                "app.=(app.citext,app.citext)",
+                "search_path=pg_catalog",
+            ][..],
+        ),
+        (
+            "",
+            "SELECT (SELECT contact FROM app.users WHERE id = 1) <> 'admin@example.com'",
+            &[
+                "compares column contact of app.users (type app.email, a domain over app.citext) with <>",
+                "app.<>(app.citext,app.citext)",
+            ][..],
+        ),
+        (
+            "CREATE FUNCTION app.role_eq(app.role, app.role) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1::text = $2::text';
+CREATE OPERATOR app.= (LEFTARG = app.role, RIGHTARG = app.role, FUNCTION = app.role_eq);
+",
+            "SELECT EXISTS (SELECT 1 FROM app.users WHERE role = 'admin')",
+            &["compares column role of app.users (type app.role) with =", "app.=(app.role,app.role)"][..],
+        ),
+    ] {
+        let (plan, r) = citext_checks(setup, &[("no_admin_account", check)]);
+        let warning = &plan["plan"]["check_warnings"][0];
+        assert_eq!(warning["code"], "CHECK_OPERATOR_MISMATCH", "{plan}");
+        assert_eq!(warning["source"], "0002_checked.sql", "{plan}");
+        assert_eq!(warning["check"], "no_admin_account", "{plan}");
+        assert_eq!(warning["relation"], "app.users", "{plan}");
+        let d = diagnostic(&r, "DB_CHECK_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+        for name in named {
+            assert!(d["message"].as_str().unwrap().contains(name), "{name}: {d}");
+        }
+        assert_eq!(d["objects"], serde_json::json!(["relation:users"]), "{d}");
+        assert_eq!(d["source"], "0002_checked.sql", "{d}");
+        assert!(
+            d["next_action"].as_str().unwrap().contains("in a view that a migration creates"),
+            "{d}"
+        );
+        assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+        assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+        assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0, "{r}");
+    }
+}
+
+/// #456: a comparison on a builtin-typed column of a table that also has
+/// citext columns, citext read with IS NULL, count(*) or GROUP BY, a citext
+/// array (whose `=` compares elements with citext's default operator class
+/// either way) and an enum compared with a literal all run, and pass.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_compare_builtin_columns_and_read_citext_without_comparing_it() {
+    let (plan, r) = citext_checks(
+        "",
+        &[
+            ("by_id", "SELECT EXISTS (SELECT 1 FROM app.users WHERE id = 1)"),
+            ("no_null_email", "SELECT NOT EXISTS (SELECT 1 FROM app.users WHERE email IS NULL)"),
+            ("one_user", "SELECT (SELECT count(*) FROM app.users) = 1"),
+            (
+                "unique_emails",
+                "SELECT NOT EXISTS (SELECT email FROM app.users GROUP BY email HAVING count(*) > 1)",
+            ),
+            (
+                "admin_alias",
+                "SELECT EXISTS (SELECT 1 FROM app.users WHERE aliases = '{admin@example.com}')",
+            ),
+            ("has_admin", "SELECT EXISTS (SELECT 1 FROM app.users WHERE role = 'admin')"),
+        ],
+    );
+    assert!(plan["plan"]["check_warnings"].is_null(), "{plan}");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 6, "{r}");
+}
+
+/// #456: the documented way to compare a citext column. A view a migration
+/// creates keeps citext's `=`, so a check of the view sees what the
+/// application sees and fails on the j3 data.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_view_keeps_the_application_operator_for_checks() {
+    let (plan, r) = citext_checks(
+        "CREATE VIEW app.admin_accounts AS SELECT id FROM app.users WHERE email = 'admin@example.com';\n",
+        &[("no_admin_account", "SELECT NOT EXISTS (SELECT 1 FROM app.admin_accounts)")],
+    );
+    assert!(plan["plan"]["check_warnings"].is_null(), "{plan}");
+    assert!(diagnostic(&r, "DB_CHECK_FAILED").is_some(), "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+    assert_eq!(r["assertions"]["checks"][0]["outcome"], "fail", "{r}");
+}
+
+/// #456: a check must not read a view, directly or through another view,
+/// that calls a builtin that writes or takes locks. pg_depend records no
+/// builtin, so the views' stored queries are read. The refusal names the
+/// check, the view and the function, and the sequence shows the check never
+/// ran: an advance survives the rollback.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_views_that_call_builtins_that_write_or_lock() {
+    for (views, named) in [
+        (
+            "CREATE VIEW app.next_ids AS SELECT pg_catalog.nextval('app.ids') AS id;\n",
+            &["Check ids ([ensures]) reads view app.next_ids, which calls nextval(regclass)"][..],
+        ),
+        (
+            "CREATE VIEW app.inner_ids AS SELECT pg_catalog.nextval('app.ids') AS id;
+CREATE VIEW app.next_ids AS SELECT id FROM app.inner_ids;
+",
+            &["reads view app.inner_ids, which calls nextval(regclass)"][..],
+        ),
+        (
+            "CREATE VIEW app.next_ids AS SELECT pg_catalog.pg_try_advisory_xact_lock(1) AS locked, pg_catalog.setval('app.ids', 5) AS id;\n",
+            &["pg_try_advisory_xact_lock(bigint)", "setval(regclass,bigint)"][..],
+        ),
+    ] {
+        let f = Fixture::new();
+        f.sql("0001_views.sql", &format!("CREATE SEQUENCE app.ids;\n{views}"));
+        f.sql("0002_checked.sql", "CREATE TABLE app.marker (id int);\n");
+        std::fs::write(
+            f.root.path().join("migrations/0002_checked.toml"),
+            "[ensures]\nids = \"SELECT (SELECT count(*) FROM app.next_ids) = 1\"\n",
+        )
+        .unwrap();
+        let plan = f.plan("plan.json");
+        assert_eq!(plan["plan"]["check_warnings"][0]["code"], "CHECK_VIEW_WRITES", "{plan}");
+        let r = f.apply("plan.json", plan["plan_digest"].as_str());
+        let d = diagnostic(&r, "DB_CHECK_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+        for name in named {
+            assert!(d["message"].as_str().unwrap().contains(name), "{name}: {d}");
+        }
+        assert!(d["next_action"].as_str().unwrap().contains("underlying tables"), "{d}");
+        assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+        assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0, "{r}");
+        let called: bool = f
+            .target()
+            .query_one("SELECT is_called FROM app.ids", &[])
+            .unwrap()
+            .get(0);
+        assert!(!called, "the check ran: {r}");
+    }
+}
+
+/// #456: volatile builtins that change nothing stay allowed in views checks
+/// read.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_read_views_that_call_volatile_builtins_that_change_nothing() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_views.sql",
+        "CREATE VIEW app.dice AS SELECT pg_catalog.random() AS r, pg_catalog.clock_timestamp() AS c, pg_catalog.now() AS t, pg_catalog.gen_random_uuid() AS u;\n",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0001_views.toml"),
+        "[ensures]\none_row = \"SELECT (SELECT count(*) FROM app.dice) = 1\"\n",
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    assert!(plan["plan"]["check_warnings"].is_null(), "{plan}");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+}
+
+/// #456: PostgreSQL cannot use an enum value in the transaction that added
+/// it (SQLSTATE 55P04). A migration that adds a value to an existing type
+/// and uses it fails with DB_ENUM_VALUE_UNCOMMITTED naming the migration
+/// and both statements. Replay commits each migration as the target does
+/// (#430), so it fails at plan on every major, as `migrate` would; 17 and
+/// later used to accept it in replay, whose one transaction had created
+/// the type too.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn enum_values_used_in_the_transaction_that_added_them_are_named() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_orders.sql",
+        "CREATE TYPE app.order_status AS ENUM ('pending', 'paid');
+CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DEFAULT 'pending');
+",
+    );
+    f.sql(
+        "0002_archived.sql",
+        "ALTER TYPE app.order_status ADD VALUE 'archived';\nINSERT INTO app.orders VALUES (1, 'archived');\n",
+    );
+    let r = f.command("plan");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_ENUM_VALUE_UNCOMMITTED").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["source"], "0002_archived.sql", "{d}");
+    let message = d["message"].as_str().unwrap();
+    assert!(message.starts_with("Statement 2 uses an enum value that ALTER TYPE ... ADD VALUE added in the same transaction (SQLSTATE 55P04). This migration adds an enum value in statement 1."), "{d}");
+    assert!(
+        d["next_action"].as_str().unwrap().contains(
+            "put ALTER TYPE ... ADD VALUE in its own migration and use the value in a later one"
+        ),
+        "{d}"
+    );
+}
+
+/// #456: a value added in one migration and used in a later one plans,
+/// migrates and verifies on every major. Replay commits each migration as
+/// the target does (#430); on 16 it used to fail with
+/// DB_ENUM_VALUE_UNCOMMITTED, because its one transaction added the value.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn enum_values_added_by_an_earlier_migration() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_orders.sql",
+        "CREATE TYPE app.order_status AS ENUM ('pending', 'paid');
+CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DEFAULT 'pending');
+",
+    );
+    let first = f.plan("plan1.json");
+    let r = f.apply("plan1.json", first["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    f.sql(
+        "0002_archived.sql",
+        "ALTER TYPE app.order_status ADD VALUE 'archived';\n",
+    );
+    f.sql(
+        "0003_default.sql",
+        "ALTER TABLE app.orders ALTER COLUMN status SET DEFAULT 'archived';\n",
+    );
+    let plan = f.plan("plan2.json");
+    let r = f.apply("plan2.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
 // #430: PostgreSQL replay commits each migration on scratch, in a transaction
 // set up as the target's, then cleans scratch up. These tests drive the real
 // CLI against the fixture's scratch database.
@@ -2069,12 +2339,13 @@ fn report_of(child: &mut std::process::Child) -> String {
     out
 }
 
-/// #430 (x_evo_enum): a value `ALTER TYPE ... ADD VALUE` adds in one
-/// migration can be used by the next on every supported major. PostgreSQL
-/// 16 forbids using it in the transaction that added it, which used to be
-/// the whole replay. A migration that adds a value and uses it fails at
-/// plan with what the target raises, SQLSTATE 55P04, also on 17 and 18,
-/// where a type created in the same transaction used to hide it.
+/// #430 (the tester's x_evo_enum stages): a value `ALTER TYPE ... ADD VALUE`
+/// adds in one migration can be used by the next on every supported major.
+/// PostgreSQL 16 forbids using it in the transaction that added it, which
+/// used to be the whole replay. A migration that adds a value and uses it
+/// in a column default fails at plan with DB_ENUM_VALUE_UNCOMMITTED, as the
+/// target raises SQLSTATE 55P04, also on 17 and 18, where a type created in
+/// the same transaction used to hide it.
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn an_enum_value_added_by_one_migration_can_be_used_by_the_next() {
@@ -2092,9 +2363,12 @@ fn an_enum_value_added_by_one_migration_can_be_used_by_the_next() {
     let same = "ALTER TYPE app.order_status ADD VALUE 'archived' AFTER 'shipped';\nALTER TABLE app.orders ALTER COLUMN status SET DEFAULT 'archived';";
     f.sql("0003_archived_default.sql", same);
     let r = f.command("plan");
-    let d = diagnostic(&r, "DB_POSTGRES").unwrap_or_else(|| panic!("{r}"));
+    let d = diagnostic(&r, "DB_ENUM_VALUE_UNCOMMITTED").unwrap_or_else(|| panic!("{r}"));
     assert!(
-        d["message"].as_str().unwrap().contains("SQLSTATE 55P04"),
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("This migration adds an enum value in statement 1."),
         "{d}"
     );
     assert_eq!(d["source"], "0003_archived_default.sql", "{d}");

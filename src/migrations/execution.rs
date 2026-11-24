@@ -441,6 +441,17 @@ async fn checks(
     db.lock_for_checks(&tables).await?;
     db.check_purity(schema, &inputs.history_schemas, outside)
         .await?;
+    // Before any check of this phase runs, refuse one that would compare a
+    // column with another operator than the application's, or read a view
+    // that writes or takes locks (#456).
+    for (name, sql) in checks {
+        let hazards = db.check_hazards(schema, sql).await?;
+        if !hazards.is_empty() {
+            let mut d = super::check_hazard_refusal(name, phase, &hazards);
+            d.source = Some(source.into());
+            return Err(d);
+        }
+    }
     for (name, sql) in checks {
         let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
         report["assertions"]["executed"] = json!(count + 1);
