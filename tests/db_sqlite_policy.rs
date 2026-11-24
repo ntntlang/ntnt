@@ -355,6 +355,17 @@ fn sqlite_planner_statistics_stay_out_of_coverage_and_drift() {
         "DROP INDEX t_a; DROP TABLE old; CREATE INDEX t_a_id ON t(a, id); ANALYZE;",
     );
     cycle(&f, "0002.json");
+    // The application's ANALYZE above read ntnt's ledger too; the
+    // migration's ANALYZE, which clears the statistics, leaves it out.
+    let ledger: i64 = f
+        .target()
+        .query_row(
+            "SELECT count(*) FROM sqlite_stat1 WHERE tbl = '_ntnt_schema_migrations_v2'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ledger, 0);
     let described: Vec<(String, Option<String>)> = f
         .target()
         .prepare("SELECT DISTINCT tbl, idx FROM sqlite_stat1 ORDER BY tbl, idx")
@@ -504,7 +515,7 @@ fn sqlite_rebuild_keeps_the_autoincrement_counter() {
         "The rebuild of table `orders` did not keep what a rebuild must: the AUTOINCREMENT counter of table `orders` went back from 3 to 2 (sqlite_sequence), so SQLite would give new rows the ids of deleted ones. Row values suppressed.",
         "{r}"
     );
-    let line = "UPDATE sqlite_sequence SET seq = (SELECT seq FROM sqlite_sequence WHERE name='orders') WHERE name='orders_new';";
+    let line = "DELETE FROM sqlite_sequence WHERE name='orders_new'; INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', seq FROM sqlite_sequence WHERE name='orders';";
     assert!(
         d["next_action"].as_str().unwrap().starts_with(&format!(
             "Before the DROP TABLE, copy the counter to the replacement table: `{line}`."
@@ -526,6 +537,154 @@ fn sqlite_rebuild_keeps_the_autoincrement_counter() {
         .query_row("SELECT id FROM orders WHERE ref = 'd'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(id, 4);
+}
+
+/// F3, review: a statement that writes the replacement, even an INSERT ...
+/// SELECT that copies no row, gives it a counter row, and SQLite reads and
+/// updates only the first row for a name. A second row is refused, naming
+/// the table and the count, and the one repair the next_action gives keeps
+/// the counter whether the replacement has a row, has none, or the table
+/// never had a counter.
+#[test]
+fn sqlite_rebuild_counter_repair_holds_with_or_without_a_counter_row() {
+    let repair = "DELETE FROM sqlite_sequence WHERE name='orders_new'; INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', seq FROM sqlite_sequence WHERE name='orders';";
+    let create = "CREATE TABLE orders_new (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL CHECK (length(ref) > 0));";
+    let copy = "INSERT INTO orders_new (id, ref) SELECT id, ref FROM orders;";
+    let swap = "DROP TABLE orders; ALTER TABLE orders_new RENAME TO orders;";
+    let emptied = "INSERT INTO orders (ref) VALUES ('a'), ('b'), ('c'); DELETE FROM orders;";
+    let migrated = |before: &str| {
+        let f = Fixture::new();
+        f.sql(
+            "0001_orders.sql",
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL);",
+        );
+        cycle(&f, "0001.json");
+        f.target().execute_batch(before).unwrap();
+        f.sql("0002_rebuild.toml", "sqlite_rebuild = \"orders\"");
+        f
+    };
+    let next_id = |f: &Fixture| -> i64 {
+        let c = f.target();
+        c.execute_batch("INSERT INTO orders (ref) VALUES ('next')")
+            .unwrap();
+        c.query_row("SELECT id FROM orders WHERE ref = 'next'", [], |r| r.get(0))
+            .unwrap()
+    };
+    // The line for a copy of no row that #455 gave first, after the copy,
+    // leaves `orders` two rows: 0 first, then 3.
+    let f = migrated(emptied);
+    let second = "INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', seq FROM sqlite_sequence WHERE name='orders';";
+    f.sql(
+        "0002_rebuild.sql",
+        &format!("{create} {copy} {second} {swap}"),
+    );
+    let p = f.plan("twice.json");
+    let r = f.apply("twice.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "fail", "{r}");
+    let d = diagnostic(&r, "DB_REBUILD_GUARD");
+    assert_eq!(
+        d["message"],
+        "The rebuild of table `orders` did not keep what a rebuild must: table `orders` has 2 AUTOINCREMENT counters in sqlite_sequence, and SQLite reads and updates only the first, so it could give new rows the ids of deleted ones. Row values suppressed.",
+        "{r}"
+    );
+    assert!(
+        d["next_action"].as_str().unwrap().starts_with(&format!(
+            "Before the DROP TABLE, copy the counter to the replacement table: `{repair}`."
+        )),
+        "{r}"
+    );
+    assert_eq!(d["objects"], json!(["table:\"orders\""]), "{r}");
+    assert_eq!(counters(&f), [("orders".to_owned(), 3)]);
+    // The repair, with the copy of no row, migrates.
+    f.sql(
+        "0002_rebuild.sql",
+        &format!("{create} {copy} {repair} {swap}"),
+    );
+    cycle(&f, "repaired.json");
+    assert_eq!(counters(&f), [("orders".to_owned(), 3)]);
+    assert_eq!(next_id(&f), 4);
+    // Nothing writes the replacement, so it has no counter row to replace.
+    let f = migrated(emptied);
+    f.sql("0002_rebuild.sql", &format!("{create} {repair} {swap}"));
+    cycle(&f, "absent.json");
+    assert_eq!(counters(&f), [("orders".to_owned(), 3)]);
+    assert_eq!(next_id(&f), 4);
+    // `orders` never had a counter: the repair leaves the replacement none.
+    let f = migrated("");
+    f.sql(
+        "0002_rebuild.sql",
+        &format!("{create} {copy} {repair} {swap}"),
+    );
+    cycle(&f, "none.json");
+    assert_eq!(counters(&f), []);
+    assert_eq!(next_id(&f), 1);
+}
+
+/// F6, review: the ADD COLUMN advice follows SQLite's own refusal of an
+/// ALTER TABLE, a plain error, not its text: a trigger that raises the same
+/// text (SQLITE_CONSTRAINT_TRIGGER) gets the advice for its statement.
+#[test]
+fn sqlite_trigger_raising_add_column_text_gets_statement_advice() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_t.sql",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT); \
+         CREATE TRIGGER t_guard BEFORE INSERT ON t BEGIN SELECT RAISE(ABORT, 'Cannot add a UNIQUE column'); END;",
+    );
+    f.sql("0002_insert.sql", "INSERT INTO t (a) VALUES ('x');");
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_SQLITE");
+    assert_eq!(
+        d["message"],
+        "Statement 1: a trigger raised: Cannot add a UNIQUE column (SQLITE_CONSTRAINT_TRIGGER).",
+        "{r}"
+    );
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.starts_with("Fix statement 1 of the migration named in source"),
+        "{r}"
+    );
+    assert!(!next_action.contains("ADD COLUMN"), "{r}");
+}
+
+/// F1, review: when the history itself inserted the rows a drop breaks,
+/// replay fails the drop, and the next_action says that replay found it
+/// and the migration must change, not that the target rolled back.
+#[test]
+fn sqlite_drop_failure_found_in_replay_says_to_fix_the_migration() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_tables.sql",
+        "CREATE TABLE p (id INTEGER PRIMARY KEY, name TEXT NOT NULL); \
+         CREATE TABLE c (id INTEGER PRIMARY KEY, p_id INTEGER NOT NULL REFERENCES p (id)); \
+         INSERT INTO p VALUES (1, 'p'); INSERT INTO c VALUES (1, 1);",
+    );
+    f.sql(
+        "0002_p.sql",
+        "CREATE TABLE p_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL, note TEXT); \
+         INSERT INTO p_new (id, name) SELECT id, name FROM p; DROP TABLE p; \
+         ALTER TABLE p_new RENAME TO p;",
+    );
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_SQLITE");
+    assert_eq!(
+        d["message"], "Statement 3: FOREIGN KEY constraint failed (SQLITE_CONSTRAINT_FOREIGNKEY).",
+        "{r}"
+    );
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.starts_with("Statement 3 drops table `p`, which `c` references. SQLite deletes every row of a dropped table first, so the drop fails while rows reference it. Replay found this failure: the history inserted those rows"),
+        "{r}"
+    );
+    assert!(next_action.contains("sqlite_rebuild = \"p\""), "{r}");
+    assert!(
+        next_action.ends_with("Then rerun plan. Replay changed nothing on the target."),
+        "{r}"
+    );
+    assert!(!next_action.contains("failed on the target"), "{r}");
+    assert_eq!(schema_objects(&f), 0);
 }
 
 /// F2: DB_REBUILD_GUARD names the rule a rebuild broke and the object,
