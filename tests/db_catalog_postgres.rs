@@ -2193,12 +2193,20 @@ CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DE
     assert_eq!(d["source"], "0002_archived.sql", "{d}");
     let message = d["message"].as_str().unwrap();
     assert!(message.starts_with("Statement 2 uses an enum value that ALTER TYPE ... ADD VALUE added in the same transaction (SQLSTATE 55P04). This migration adds an enum value in statement 1."), "{d}");
+    let next = d["next_action"].as_str().unwrap();
     assert!(
-        d["next_action"].as_str().unwrap().contains(
+        next.contains(
             "put ALTER TYPE ... ADD VALUE in its own migration and use the value in a later one"
         ),
         "{d}"
     );
+    // Replay commits each migration (#430): splitting fixes plan on 16 too,
+    // as enum_values_added_by_an_earlier_migration shows.
+    assert!(
+        next.contains("fixes plan and migrate alike, on PostgreSQL 16 too"),
+        "{d}"
+    );
+    assert!(!next.contains("fixes migrate but not plan"), "{d}");
 }
 
 /// #456: a value added in one migration and used in a later one plans,
