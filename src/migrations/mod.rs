@@ -196,7 +196,8 @@ impl Diagnostic {
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
             "DB_SCRATCH_BUSY" => "Another plan, status or verify is replaying on the same PostgreSQL scratch database. Rerun once it has finished, or raise migrator_wait_seconds in [databases.<name>.limits] to wait longer. If the message says another session of the scratch role is still connected, end that session first.",
             "DB_SCRATCH_UNSAFE" => "Fix the scratch database or role as the message says: revoke the privileges its objects field names from the scratch role, or turn track_counts back on. Give scratch a dedicated unprivileged role that owns only the scratch database. Nothing was run.",
-            "DB_SCRATCH_CLEANUP" => "Rerun plan, status or verify: they clean up a scratch database that holds NTNT's replay marker (schema _ntnt_replay) when the scratch role owns everything in it. If that refuses with DB_SCRATCH_NOT_EMPTY, drop what the scratch database holds, or recreate it, as its administrator. The target was not changed.",
+            "DB_SCRATCH_CLEANUP" => "Rerun plan, status or verify: they clean up a scratch database that holds NTNT's replay marker (schema _ntnt_replay) when they can prove that everything in it is what that replay committed. If that refuses with DB_SCRATCH_NOT_EMPTY, drop what the scratch database holds, or recreate it, as its administrator. The target was not changed.",
+            "DB_TARGET_IS_SCRATCH" => "Make sure no NTNT configuration names this database as its scratch database ([databases.<name>.scratch]); give that configuration a dedicated empty scratch database instead. Then, if nothing else is in it, drop the schema _ntnt_replay from this database as its owner (DROP SCHEMA _ntnt_replay CASCADE) and rerun.",
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and other non-transactional statements from migration files. The one supported non-transactional migration is a lone named CREATE INDEX CONCURRENTLY without checks.",
             "DB_COVERAGE_INCOMPLETE" => "Its objects field lists each catalog object outside supported inspection; when replaying a migration produced them, its source field names that migration (the target's own uncovered objects are also in catalog.uncovered). Change or remove those objects to stay within the coverage in docs/DATABASE_MIGRATIONS.md, or obtain manual evidence; do not interpret this result as no drift.",
             "DB_CATALOG_AMBIGUOUS" => "Two catalog objects share the key its objects field names, or catalog metadata was missing; when replaying a migration produced them, its source field names that migration. Rename one of the objects (or drop the one that is not needed), or obtain manual evidence; do not interpret this result as no drift.",
@@ -928,10 +929,26 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 // PostgreSQL it may first wait for another replay of the same
                 // scratch database (#430), up to the migrator wait.
                 let mut deadline = inventory::Limits::default().total_deadline();
-                if inputs.config.engine == "postgresql" {
+                let postgres = inputs.config.engine == "postgresql";
+                if postgres {
                     deadline += inputs.limits().migrator_wait();
                 }
-                database_runtime(deadline, report::inspect(inputs, command, adopt_through))
+                // Replay on PostgreSQL commits on scratch, so it stops at this
+                // deadline and cleanup gets its own time after it (#430).
+                let replay = postgres.then_some(deadline);
+                if postgres {
+                    deadline += report::SCRATCH_CLEANUP_RESERVE;
+                }
+                database_runtime(
+                    deadline,
+                    report::inspect(inputs, command, adopt_through, replay),
+                )
+                .map_err(|mut d| {
+                    if postgres && d.code == "DB_TIMEOUT" {
+                        d.message.push_str(" Scratch may still hold NTNT's replay marker and the migrations replay committed there; the next plan, status or verify cleans them up when it can prove they are that replay's.");
+                    }
+                    d
+                })
             })
             .unwrap_or_else(|d| report::failure(command, d))
     };

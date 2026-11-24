@@ -733,11 +733,19 @@ async fn replay_prefix(
 /// Capture target facts in a read-only snapshot and release that session before replay.
 /// Scratch work uses separate identity/credentials; the result is schema evidence, not
 /// data-preservation proof, executed SQL assertions, or permission to migrate.
+/// The time PostgreSQL inspection keeps after its replay deadline for
+/// `cleanup_scratch` (#430).
+pub(super) const SCRATCH_CLEANUP_RESERVE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `replay`, on PostgreSQL, is how long target inspection and scratch replay
+/// may take together, from now; cleanup runs after it, whatever happens.
 pub(super) async fn inspect(
     inputs: CapturedInputs,
     command: &str,
     adopt_through: Option<u64>,
+    replay: Option<std::time::Duration>,
 ) -> Result<Value> {
+    let replay_until = replay.map(|budget| tokio::time::Instant::now() + budget);
     if let Some(id) = adopt_through {
         super::adoption::Adoption::selected(&inputs, id)?;
     }
@@ -753,6 +761,7 @@ pub(super) async fn inspect(
         history,
         adopt_through,
         &secret,
+        replay_until,
     )
     .await
 }
@@ -826,6 +835,7 @@ async fn inspect_observed(
     history: Result<History>,
     adopt_through: Option<u64>,
     target_secret: &crate::interpreter::SecretValue,
+    replay_until: Option<tokio::time::Instant>,
 ) -> Result<Value> {
     let inventory: Vec<_> = inputs
         .migrations
@@ -945,10 +955,29 @@ async fn inspect_observed(
                     &mut replayed,
                 )
                 .await
+            };
+            // The replay deadline leaves cleanup its own time. A replay cut
+            // short there, or by a client deadline, has the statement it was
+            // running cancelled, so that cleanup can run.
+            let work = match replay_until {
+                Some(until) => tokio::time::timeout_at(until, work).await.unwrap_or_else(|_| {
+                    Err(Diagnostic::new(
+                        "DB_TIMEOUT",
+                        "Scratch replay did not finish within the inspection deadline, so NTNT cancelled it; scratch.cleanup says whether cleanup then removed what it had committed.",
+                    ))
+                }),
+                None => work.await,
+            };
+            if work.as_ref().is_err_and(|d| d.code == "DB_TIMEOUT") {
+                scratch.cancel_running().await;
             }
-            .await;
             let cleanup = scratch.cleanup_scratch().await;
-            report["scratch"]["cleanup"] = json!(if cleanup.is_ok() { "pass" } else { "unknown" });
+            report["scratch"]["cleanup"] = json!(match cleanup {
+                Ok(true) => "pass",
+                Ok(false) => "not_needed",
+                Err(_) => "unknown",
+            });
+            let cleanup = cleanup.map(|_| ());
             if cleanup.is_err() {
                 replayed.expected = None;
                 replayed.candidate = None;

@@ -404,6 +404,7 @@ impl Postgres {
         config.application_name("ntnt-db-inspect-v1");
         config.options("-c default_transaction_read_only=on -c search_path=pg_catalog -c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000 -c standard_conforming_strings=on -c row_security=off");
         let (connector, mut transport) = transport.connector().await?;
+        let cancel_tls = connector.clone();
         let (client, task) = match connector {
             None => {
                 let (client, connection) = bounded(config.connect(NoTls)).await?;
@@ -437,7 +438,7 @@ impl Postgres {
             task,
             transport,
             scratch: std::sync::OnceLock::new(),
-            replay: Box::default(),
+            replay: Box::new(scratch::Replay::new(cancel_tls)),
         })
     }
     pub async fn batch(&self, sql: &str) -> Result<()> {
@@ -534,6 +535,23 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     /// Local unknown objects fail closed; unrelated global coverage gaps are reported
     /// separately and must not masquerade as corrupt migration history.
     pub async fn history(&self) -> Result<History> {
+        // A target that holds NTNT's replay marker is, or was, a scratch
+        // database: the next plan of the configuration whose scratch it is
+        // would clean it up (#430).
+        let marked: bool = self
+            .rows(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname='_ntnt_replay')",
+                &[],
+            )
+            .await?[0]
+            .get(0);
+        if marked {
+            return Err(Diagnostic::new(
+                "DB_TARGET_IS_SCRATCH",
+                "The target database holds NTNT's replay marker, the schema _ntnt_replay: it is, or was, the scratch database of an NTNT configuration, whose next plan, status or verify may clean it up. Nothing was read or changed.",
+            )
+            .with_objects(&["schema:_ntnt_replay".to_owned()]));
+        }
         let ns = self
             .rows(
                 "SELECT oid FROM pg_catalog.pg_namespace WHERE nspname='_ntnt'",
@@ -986,11 +1004,14 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
         // Cleaned up in this transaction, so a refusal below keeps the
         // leftovers, and their marker, as they were.
-        let recovered = self.recover_leftovers().await?;
+        let recovered = self
+            .recover_leftovers(&identity.cluster, identity.database_oid)
+            .await?;
         self.check_empty(target_bypasses_rls).await?;
         let (public, shared, foreign) = self.scratch_baseline().await?;
         self.check_cleanable(public.oid).await?;
-        self.create_marker(&public).await?;
+        self.create_marker(&public, &identity.cluster, identity.database_oid)
+            .await?;
         // `public` already exists (and was just verified empty); any other
         // managed schema is created and committed with the marker.
         if schema != "public" {
@@ -1007,6 +1028,9 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             .map(|r| r.get(0))
             .collect();
         let marker = self.own_marker().await?;
+        // Recovery after a crash recovers only what this transaction and the
+        // replay steps recorded writing (see `scratch`).
+        self.record_xids().await?;
         self.batch("COMMIT").await?;
         self.scratch
             .set(Box::new(ScratchScope {
