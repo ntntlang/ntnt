@@ -1739,7 +1739,24 @@ catalog to replay at the **applied prefix**, not the pending repository head. Re
 and zero executed SQL assertions is `not_run`, not a business-verification pass.
 `DB_COVERAGE_INCOMPLETE` lists the uncovered catalog keys in `objects` and, when
 replaying a migration produced them, names that migration in `source`. SQLite
-covers partial and expression indexes by definition, like PostgreSQL.
+covers partial and expression indexes by definition, like PostgreSQL. SQLite
+migrations can call SQLite's built-in functions (JSON, `hex`, `randomblob` and
+window functions included; not `load_extension`, `sqlite_log`, or extension and
+application functions) and use AUTOINCREMENT, `WITH RECURSIVE` and `ANALYZE`;
+`sqlite_sequence` and the `sqlite_stat*` planner statistics are outside coverage
+and drift. A `sqlite_rebuild` must keep an AUTOINCREMENT table's counter (before
+the DROP, run the `UPDATE`, `DELETE` and `INSERT` in docs/DATABASE_MIGRATIONS.md,
+Explicit one-table rebuild: they leave the replacement one counter row, the one
+SQLite reads, with the highest counter of both tables, whether it had none, one
+or more), recreate
+indexes, triggers and views with their stored SQL text exactly, and is needed on
+populated targets for any rebuild of a table other tables reference by foreign key;
+`DB_REBUILD_GUARD` names the rule and object it broke. SQLite's ADD COLUMN cannot
+add a UNIQUE or PRIMARY KEY column (add the column, then CREATE UNIQUE INDEX) and,
+on a table with rows, accepts only a constant default. INSTEAD OF triggers are
+unsupported. SQLite adoption compares stored CREATE text exactly, so write
+baselines from the database's own `sqlite_master.sql`. Approve a saved plan only
+when its outcome is `pass` and it has a `plan_digest`.
 Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
 On PostgreSQL, `plan.check_warnings` lists pending checks that `migrate` will
 refuse, several per check if need be: `CHECK_OPERATOR_MISMATCH` and

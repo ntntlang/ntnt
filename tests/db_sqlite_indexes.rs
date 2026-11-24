@@ -113,10 +113,9 @@ fn sqlite_partial_and_partial_unique_indexes_plan_migrate_and_verify() {
 }
 
 /// Indexes are compared by the hash of their stored definition, so a changed
-/// predicate is drift on the named index. That includes a predicate calling a
-/// function outside the migration allowlist: SQLite resolves index predicates
-/// when it loads the schema, without the authorizer, so such an out-of-band
-/// index is reported as drift rather than accepted.
+/// predicate is drift on the named index, whatever it calls: SQLite resolves
+/// index predicates when it loads the schema, without the authorizer, so an
+/// out-of-band index is reported as drift rather than accepted.
 #[test]
 fn sqlite_partial_index_predicate_changed_out_of_band_is_drift() {
     let f = Fixture::new();
@@ -271,17 +270,20 @@ fn sqlite_expression_indexes_plan_migrate_verify_and_drift() {
 }
 
 /// A migration's index predicate or expression is authorized when SQLite
-/// compiles the CREATE INDEX, against the same function allowlist as other
-/// migration SQL; the allowlisted equivalents are covered.
+/// compiles the CREATE INDEX, against the same function policy as other
+/// migration SQL; SQLite's built-in functions are covered (#427).
 #[test]
 fn sqlite_index_predicates_and_expressions_keep_the_function_allowlist() {
     let f = Fixture::new();
     for (index, function) in [
         (
-            "CREATE INDEX t_marked ON t(x) WHERE instr(x, '@') > 0;",
-            "instr",
+            "CREATE INDEX t_marked ON t(x) WHERE sqlite_log(1, x) IS NULL;",
+            "sqlite_log",
         ),
-        ("CREATE INDEX t_hex ON t(hex(x));", "hex"),
+        (
+            "CREATE INDEX t_loaded ON t(load_extension(x));",
+            "load_extension",
+        ),
     ] {
         f.sql(
             "0001_initial.sql",
@@ -308,7 +310,7 @@ fn sqlite_index_predicates_and_expressions_keep_the_function_allowlist() {
         );
         assert_eq!(schema_objects(&f.target()), 0);
     }
-    f.sql("0001_initial.sql", "CREATE TABLE t(id INTEGER PRIMARY KEY, x TEXT); CREATE INDEX t_marked ON t(x) WHERE length(x) > 0; CREATE INDEX t_lower ON t(lower(x));");
+    f.sql("0001_initial.sql", "CREATE TABLE t(id INTEGER PRIMARY KEY, x TEXT); CREATE INDEX t_marked ON t(x) WHERE instr(x, '@') > 0; CREATE INDEX t_hex ON t(hex(x)); CREATE INDEX t_lower ON t(lower(x)) WHERE length(x) > 0;");
     let plan = f.plan("plan.json");
     let applied = f.apply("plan.json", plan["plan_digest"].as_str());
     assert_eq!(applied["outcome"], "pass", "{applied}");

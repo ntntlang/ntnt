@@ -209,13 +209,14 @@ fn sqlite_scratch_aliases_and_replaced_targets_fail_closed() {
 
 /// The allowlist is re-resolved before every statement of a script: a name
 /// dropped earlier must not keep authority and fall through to an eponymous
-/// virtual table, while a legitimately recreated name regains it.
+/// virtual table (here `dbstat`, which reads the file's pages), while a
+/// legitimately recreated name regains it.
 #[test]
 fn sqlite_authorizer_refreshes_relations_before_each_statement() {
     let f = Fixture::new();
     for sql in [
-        "CREATE TABLE json_each(value INTEGER); DROP TABLE json_each; CREATE TABLE t(value INTEGER); INSERT INTO t SELECT value FROM json_each('[1,2]');",
-        "CREATE TABLE json_tree(value INTEGER); CREATE TABLE t(value INTEGER); DROP TABLE json_tree; CREATE VIEW v AS SELECT value FROM json_tree('[1]');",
+        "CREATE TABLE dbstat(pageno INTEGER); DROP TABLE dbstat; CREATE TABLE t(value INTEGER); INSERT INTO t SELECT pageno FROM dbstat;",
+        "CREATE TABLE dbstat(pageno INTEGER); CREATE TABLE t(value INTEGER); DROP TABLE dbstat; CREATE VIEW v AS SELECT pageno FROM dbstat;",
     ] {
         f.sql("0001_dropped.sql", sql);
         let r = f.command("plan", &[]);
@@ -242,9 +243,11 @@ fn sqlite_native_authorizer_rejects_escape_and_opaque_programs() {
         "CREATE TABLE main.t(id INTEGER); ALTER TABLE main.t RENAME TO _ntnt_hidden;",
         "CREATE TABLE main.t(id INTEGER); CREATE VIEW v AS SELECT load_extension('not-a-library');",
         "CREATE TABLE main.t(id INTEGER); CREATE VIEW v AS SELECT * FROM pragma_database_list;",
-        "CREATE TABLE main.t(id INTEGER); CREATE VIEW v AS SELECT * FROM json_each('[1,2]');",
-        "CREATE TABLE t(value INTEGER); INSERT INTO t SELECT value FROM json_each('[1,2]');",
-        "CREATE TABLE json_each(value INTEGER); DROP TABLE json_each; CREATE TABLE t(value INTEGER); INSERT INTO t SELECT value FROM json_each('[1,2]');",
+        "CREATE TABLE main.t(id INTEGER); CREATE VIEW v AS SELECT * FROM dbstat;",
+        "CREATE TABLE t(value INTEGER); INSERT INTO t SELECT pageno FROM dbstat;",
+        "CREATE TABLE t(value INTEGER); INSERT INTO t SELECT count(*) FROM dbstat;",
+        "CREATE TABLE dbstat(pageno INTEGER); DROP TABLE dbstat; CREATE TABLE t(value INTEGER); INSERT INTO t SELECT pageno FROM dbstat;",
+        "CREATE TABLE t(value INTEGER); INSERT INTO t SELECT fts3_tokenizer('simple');",
         "CREATE TABLE t(value INTEGER); INSERT INTO t VALUES(?1);",
         "CREATE TABLE main.t(id INTEGER); CREATE TRIGGER hidden AFTER INSERT ON main.t BEGIN SELECT load_extension('not-a-library'); END;",
     ] {
@@ -1260,14 +1263,16 @@ fn sqlite_time_defaults_and_triggers_plan_apply_and_verify() {
 
 /// #414: a function outside the allowed set is reported as DB_SQL_UNSUPPORTED
 /// naming the function, the statement and the migration, not as an opaque
-/// DB_SQLITE code -1. Literals in the statement stay out of the report.
+/// DB_SQLITE code -1. Literals in the statement stay out of the report. Since
+/// #427 the allowed set is SQLite's built-in functions; `load_extension`, which
+/// loads code, is not in it.
 #[test]
 fn sqlite_unsupported_function_names_the_function_and_statement() {
     let f = Fixture::new();
     f.sql(
         "0001_initial.sql",
         "CREATE TABLE a(id INTEGER PRIMARY KEY); \
-         CREATE TABLE b(id INTEGER PRIMARY KEY, token TEXT DEFAULT (hex(randomblob(16)) || 'private_marker_414'));",
+         CREATE TABLE b(id INTEGER PRIMARY KEY, token TEXT DEFAULT (load_extension('private_marker_414')));",
     );
     let r = f.command("plan", &[]);
     assert_ne!(r["outcome"], "pass", "{r}");
@@ -1275,10 +1280,7 @@ fn sqlite_unsupported_function_names_the_function_and_statement() {
     let d = diagnostic(&r, "DB_SQL_UNSUPPORTED");
     let message = d["message"].as_str().unwrap();
     assert!(message.contains("Statement 2"), "{message}");
-    assert!(
-        message.contains("`randomblob`") || message.contains("`hex`"),
-        "{message}"
-    );
+    assert!(message.contains("`load_extension`"), "{message}");
     assert_eq!(d["source"], "0001_initial.sql", "{d}");
     assert!(!r.to_string().contains("private_marker_414"), "{r}");
     assert_eq!(
@@ -2041,13 +2043,13 @@ fn sqlite_replay_timeout_is_not_masked_by_its_cleanup() {
 fn sqlite_refusals_are_named_where_the_statement_compiles_them() {
     let trigger = "CREATE TABLE t(id INTEGER PRIMARY KEY, token TEXT); \
         CREATE TRIGGER t_token AFTER INSERT ON t BEGIN \
-        UPDATE t SET token = hex(randomblob(8)) WHERE id = new.id; END;";
+        UPDATE t SET token = fts5_source_id() WHERE id = new.id; END;";
     let view = "CREATE TABLE t(id INTEGER PRIMARY KEY); \
-        CREATE VIEW v AS SELECT id, random() AS r FROM t;";
+        CREATE VIEW v AS SELECT id, fts5_source_id() AS r FROM t;";
     let cases = [
-        (format!("{trigger} INSERT INTO t(id) VALUES (1);"), "DB_SQL_UNSUPPORTED", Some("Statement 3 uses SQLite function `hex`"), None),
+        (format!("{trigger} INSERT INTO t(id) VALUES (1);"), "DB_SQL_UNSUPPORTED", Some("Statement 3 uses SQLite function `fts5_source_id`"), None),
         (trigger.to_owned(), "DB_COVERAGE_INCOMPLETE", None, Some(r#"table:"t""#)),
-        (format!("{view} CREATE TABLE copy(id INTEGER, r INTEGER); INSERT INTO copy SELECT id, r FROM main.v;"), "DB_SQL_UNSUPPORTED", Some("Statement 4 uses SQLite function `random`"), None),
+        (format!("{view} CREATE TABLE copy(id INTEGER, r INTEGER); INSERT INTO copy SELECT id, r FROM main.v;"), "DB_SQL_UNSUPPORTED", Some("Statement 4 uses SQLite function `fts5_source_id`"), None),
         (view.to_owned(), "DB_COVERAGE_INCOMPLETE", None, Some(r#"view:"v""#)),
         ("CREATE TABLE t(id INTEGER PRIMARY KEY); PRAGMA foreign_keys = ON;".to_owned(), "DB_REPLAY_UNSUPPORTED", None, None),
     ];
