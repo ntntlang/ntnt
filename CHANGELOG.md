@@ -84,6 +84,17 @@
   `ALTER TYPE ... ADD VALUE` in the same transaction fails with
   `DB_ENUM_VALUE_UNCOMMITTED` naming the migration and statements, in replay
   and in `migrate`, instead of an opaque `DB_POSTGRES` SQLSTATE 55P04 (#456).
+- `ntnt db` (PostgreSQL): a `requires`, `ensures` or adoption check that reads a
+  table whose row-level security applies to the migration role, such as one with
+  `FORCE ROW LEVEL SECURITY`, is listed in `plan.check_warnings`
+  (`CHECK_ROW_SECURITY`), and `migrate` refuses it with `DB_CHECK_ROW_SECURITY`,
+  naming the check, its phase and the table, and saying the role needs
+  `BYPASSRLS`. It used to fail with a bare SQLSTATE 42501 after `plan` passed
+  (#430).
+- `ntnt db` (PostgreSQL): creating an untrusted extension such as `postgres_fdw`
+  fails with `DB_EXTENSION_PRIVILEGE`, naming the statement and the extension and
+  explaining that roles that are not superusers can create only trusted
+  extensions. It used to fail with a bare SQLSTATE 42501 (#430).
 - `ntnt db` (SQLite): migrations can call SQLite's built-in functions, the JSON
   functions, `hex` and `randomblob` included; `load_extension`, `sqlite_log`
   and extension or application functions stay refused, and the refusal says

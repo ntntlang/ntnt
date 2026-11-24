@@ -28,6 +28,14 @@ impl Identity {
             Self::Sqlite(i) => Sqlite::capabilities(i.version),
         }
     }
+    /// Whether row-level security can apply to this login role. SQLite has
+    /// none; a PostgreSQL role escapes it with BYPASSRLS or as a superuser.
+    pub fn row_security_applies(&self) -> bool {
+        match self {
+            Self::Postgres(i) => !i.bypasses_row_security(),
+            Self::Sqlite(_) => false,
+        }
+    }
 }
 /// The descriptor format identifies an engine-specific canonical catalog.
 pub(super) fn catalog_format(engine: &str) -> &'static str {
@@ -376,6 +384,19 @@ impl Adapter {
         match self {
             Self::Postgres(pg) => pg.check(sql, schema).await,
             Self::Sqlite(db) => db.check(sql).await,
+        }
+    }
+    /// PostgreSQL: what a check naming `tables` would read where row-level
+    /// security applies to this session's role, which a check cannot read
+    /// (`Postgres::row_security_blocked`). SQLite has no row-level security.
+    pub async fn row_security_blocked(
+        &self,
+        schema: &str,
+        tables: &[String],
+    ) -> Result<Vec<super::RowSecurity>> {
+        match self {
+            Self::Postgres(pg) => pg.row_security_blocked(schema, tables).await,
+            Self::Sqlite(_) => Ok(vec![]),
         }
     }
     pub async fn import_legacy_history(&self, database: &str, schema: &str) -> Result<()> {

@@ -1776,6 +1776,15 @@ Settings, grants and comments a migration puts on the scratch database or its
 role are restored afterwards. `DB_REPLAY_UNSUPPORTED` from a `DO` block that
 changes a password (even one rolled back), memberships or another database means:
 move that statement out of the migration history.
+On PostgreSQL, `plan.check_warnings` lists pending checks that `migrate` will
+refuse, several per check if need be: `CHECK_OPERATOR_MISMATCH` and
+`CHECK_VIEW_WRITES` (`DB_CHECK_UNSUPPORTED`), and, since checks read with
+`row_security=off`, `CHECK_ROW_SECURITY` for one that would read a
+`FORCE ROW LEVEL SECURITY` table as a migration role without `BYPASSRLS`
+(`DB_CHECK_ROW_SECURITY`). Migrations can create only trusted extensions; an
+untrusted one such as `postgres_fdw` fails with `DB_EXTENSION_PRIVILEGE`. See
+[Checks and row-level security](DATABASE_MIGRATIONS.md#checks-and-row-level-security)
+and [Extensions](DATABASE_MIGRATIONS.md#extensions).
 
 `ntnt db migrate --database app --target development --plan review.json --json`
 (and `ntnt db reconcile` with the same plan after an interrupted
