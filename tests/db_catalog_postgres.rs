@@ -3275,3 +3275,36 @@ fn a_replay_cut_short_by_its_deadline_is_cleaned_up() {
     assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
 }
+
+/// #430 review (Greptile P1): a replay killed after a migration committed a
+/// timezone for the scratch database leaves new sessions with it, which no
+/// longer match the target. The next plan cleans the leftovers up first,
+/// restoring the setting, and reports the mismatch; the one after passes.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_setting_an_unfinished_replay_left_is_restored_before_the_mismatch() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    let state = database_state(&f);
+    f.sql(
+        "0001_timezone.sql",
+        "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET timezone = ''Pacific/Chatham''', current_database()); END $$;
+         CREATE TABLE app.t (id int);",
+    );
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    assert_ne!(database_state(&f), state, "the crash left no setting");
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_MISMATCH").unwrap_or_else(|| panic!("{r}"));
+    assert!(d["message"].as_str().unwrap().contains("rerun"), "{d}");
+    assert_eq!(database_state(&f), state);
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    std::fs::remove_file(f.root.path().join("migrations/0002_wait.sql")).unwrap();
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(database_state(&f), state);
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
