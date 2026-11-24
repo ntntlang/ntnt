@@ -318,6 +318,16 @@ impl Adapter {
             Self::Sqlite(db) => db.check_purity().await,
         }
     }
+    /// PostgreSQL: what stops check `sql` from running as written
+    /// (`Postgres::check_hazards`). SQLite resolves no operators by search
+    /// path, and its authorizer already refuses every function a view could
+    /// call to write.
+    pub async fn check_hazards(&self, schema: &str, sql: &str) -> Result<Vec<super::CheckHazard>> {
+        match self {
+            Self::Postgres(pg) => pg.check_hazards(schema, sql).await,
+            Self::Sqlite(_) => Ok(vec![]),
+        }
+    }
     pub async fn check(&self, sql: &str, schema: &str) -> Result<()> {
         match self {
             Self::Postgres(pg) => pg.check(sql, schema).await,

@@ -34,6 +34,150 @@ pub struct Diagnostic {
     pub next_action: String,
 }
 
+/// What stops a check from running as written (#456), found before any
+/// check of its phase runs (`Postgres::check_hazards`).
+pub(super) enum CheckHazard {
+    /// The check compares `column` of `relation` (catalog key `key`) with
+    /// `operator_name`, and `operator` (`app.=(app.citext,app.citext)`)
+    /// takes `base_type`, the column's type or a type in its domain
+    /// base-type chain: the application would use it, but checks resolve
+    /// operators with search_path=pg_catalog, where it is not visible.
+    Operator {
+        key: String,
+        relation: String,
+        column: String,
+        operator_name: &'static str,
+        column_type: String,
+        base_type: String,
+        operator: String,
+    },
+    /// The check reads `view` (catalog key `key`), directly or through other
+    /// views, and it calls `function`, a builtin that writes or takes locks.
+    ViewWrites {
+        key: String,
+        view: String,
+        function: String,
+    },
+}
+
+impl CheckHazard {
+    fn key(&self) -> &str {
+        match self {
+            Self::Operator { key, .. } | Self::ViewWrites { key, .. } => key,
+        }
+    }
+    fn relation(&self) -> &str {
+        match self {
+            Self::Operator { relation, .. } => relation,
+            Self::ViewWrites { view, .. } => view,
+        }
+    }
+    /// What the check does, after its name.
+    fn describe(&self) -> String {
+        match self {
+            Self::Operator {
+                relation,
+                column,
+                operator_name,
+                column_type,
+                base_type,
+                operator,
+                ..
+            } => {
+                let typ = if column_type == base_type {
+                    format!("type {column_type}")
+                } else {
+                    format!("type {column_type}, a domain over {base_type}")
+                };
+                format!("compares column {column} of {relation} ({typ}) with {operator_name}. The application's {operator_name} there is {operator}, but checks resolve operators with search_path=pg_catalog, where it is not visible, so the check would compare with another operator (citext, for example, would compare as case-sensitive text) or fail")
+            }
+            Self::ViewWrites { view, function, .. } => format!(
+                "reads view {view}, which calls {function}, a builtin that writes or takes locks; checks must not change anything"
+            ),
+        }
+    }
+    /// How to write the check so that it can run.
+    fn remedy(&self) -> &'static str {
+        match self {
+            Self::Operator { .. } => "Do the comparison in a view that a migration creates (a view keeps the operator chosen when it is created) and check the view, for example SELECT NOT EXISTS (SELECT 1 FROM app.admin_accounts); or use count(*) or IS NULL forms, which compare no value.",
+            Self::ViewWrites { .. } => "Read the view's underlying tables in the check instead.",
+        }
+    }
+}
+
+/// `name ([ensures])`, `name ([requires])` or `name (adoption_checks)`: a
+/// check as its sidecar or the manifest declares it.
+fn check_label(name: &str, phase: &str) -> String {
+    match phase {
+        "adoption" => format!("{name} (adoption_checks)"),
+        phase => format!("{name} ([{phase}])"),
+    }
+}
+
+/// `DB_CHECK_UNSUPPORTED`: check `name` of `phase` has `hazards` (#456), so
+/// it is refused before any check of its phase runs.
+pub(super) fn check_hazard_refusal(name: &str, phase: &str, hazards: &[CheckHazard]) -> Diagnostic {
+    let mut objects: Vec<String> = hazards.iter().map(|h| h.key().to_owned()).collect();
+    objects.sort();
+    objects.dedup();
+    let what: Vec<String> = hazards.iter().map(CheckHazard::describe).collect();
+    let mut d = Diagnostic::new(
+        "DB_CHECK_UNSUPPORTED",
+        &format!(
+            "Check {} {}. No check of this phase ran.",
+            check_label(name, phase),
+            what.join("; it also ")
+        ),
+    )
+    .with_objects(&objects);
+    let mut remedies: Vec<&str> = hazards.iter().map(CheckHazard::remedy).collect();
+    remedies.dedup();
+    d.next_action = format!(
+        "{} Then plan, review and approve again. The refused check's migration rolled back; progress shows each migration's state. See docs/DATABASE_MIGRATIONS.md, Immutable SQL inventory.",
+        remedies.join(" ")
+    );
+    d
+}
+
+/// A plan's warning that check `name` of `phase` in `source` has `hazard`,
+/// so migrate will refuse it with `DB_CHECK_UNSUPPORTED` (#456).
+pub(super) fn check_hazard_warning(
+    source: &str,
+    name: &str,
+    phase: &str,
+    hazard: &CheckHazard,
+) -> serde_json::Value {
+    serde_json::json!({
+        "code": match hazard {
+            CheckHazard::Operator { .. } => "CHECK_OPERATOR_MISMATCH",
+            CheckHazard::ViewWrites { .. } => "CHECK_VIEW_WRITES",
+        },
+        "source": source,
+        "phase": phase,
+        "check": name,
+        "relation": hazard.relation(),
+        "message": format!(
+            "Check {} {}. migrate will refuse this check (DB_CHECK_UNSUPPORTED) before any check of its phase runs and roll its migration back. {}",
+            check_label(name, phase),
+            hazard.describe(),
+            hazard.remedy()
+        ),
+    })
+}
+
+/// A plan's `check_warnings` for the checks of `source` (a migration file,
+/// or `manifest` for adoption checks).
+fn check_warnings<'a>(
+    report: &'a serde_json::Value,
+    source: &'a serde_json::Value,
+) -> impl Iterator<Item = &'a serde_json::Value> {
+    report["plan"]["check_warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(move |warning| warning["source"] == *source)
+}
+
 /// A migration with no statements yet (#428): only comments, whitespace or
 /// semicolons, such as the file `ntnt db new` creates.
 pub(super) fn empty_migration() -> Diagnostic {
@@ -931,6 +1075,16 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     warning["code"], warning["relation"], warning["statement"], warning["message"]
                 );
             }
+            for warning in check_warnings(&report, &migration["source"]) {
+                println!(
+                    "  Warning {} on {} ({} check {}): {}",
+                    warning["code"],
+                    warning["relation"],
+                    warning["phase"],
+                    warning["check"],
+                    warning["message"]
+                );
+            }
             // Never refused, and NTNT inspects only what the history creates
             // there: for the reviewer, like a destructive change.
             for note in migration["analysis"]["outside_scope"]
@@ -945,6 +1099,12 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     _ => println!("  Outside the managed scope: statement {statement} names schema {schema}"),
                 }
             }
+        }
+        for warning in check_warnings(&report, &serde_json::json!("manifest")) {
+            println!(
+                "Warning {} on {} (adoption check {}): {}",
+                warning["code"], warning["relation"], warning["check"], warning["message"]
+            );
         }
         for d in report["diagnostics"].as_array().into_iter().flatten() {
             println!("{}: {}", d["code"], d["message"]);

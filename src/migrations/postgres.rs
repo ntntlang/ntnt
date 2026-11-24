@@ -245,6 +245,65 @@ SELECT DISTINCT CASE WHEN rn.nspname=$1 THEN '' ELSE pg_catalog.quote_ident(rn.n
 FROM found f JOIN pg_catalog.pg_class rc ON rc.oid=f.rel JOIN pg_catalog.pg_namespace rn ON rn.oid=rc.relnamespace
 ORDER BY 1, 2 LIMIT 20"#;
 
+/// The column a check compares with an operator that the application would
+/// resolve to a different one (see `Postgres::check_hazards`): $1 names the
+/// column, $2/$3 the tables it can name, innermost first, $4/$5 every table
+/// the check reads (used only when none of $2/$3 has such a column), $6 is
+/// the managed schema and $7 the operator's name. One row per table: its
+/// catalog key, its name, the column's type, the type in its domain
+/// base-type chain the operator takes, and the operator.
+const CHECK_OPERATOR_HAZARDS: &str = r#"WITH RECURSIVE named(ord, rel) AS (
+  SELECT s.ord, c.oid FROM ROWS FROM (pg_catalog.unnest($2::text[]), pg_catalog.unnest($3::text[])) WITH ORDINALITY s(nsp, rel, ord)
+  JOIN pg_catalog.pg_namespace n ON n.nspname=s.nsp JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=s.rel),
+exact(rel, typ) AS (SELECT a.attrelid, a.atttypid FROM pg_catalog.pg_attribute a JOIN named ON named.rel=a.attrelid
+  WHERE a.attname=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY named.ord LIMIT 1),
+cols(rel, typ) AS (SELECT rel, typ FROM exact
+  UNION ALL
+  SELECT a.attrelid, a.atttypid FROM ROWS FROM (pg_catalog.unnest($4::text[]), pg_catalog.unnest($5::text[])) t(nsp, rel)
+  JOIN pg_catalog.pg_namespace n ON n.nspname=t.nsp JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=t.rel
+  JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attname=$1 AND a.attnum>0 AND NOT a.attisdropped
+  WHERE NOT EXISTS (SELECT 1 FROM exact)),
+chain(rel, top, typ) AS (SELECT rel, typ, typ FROM cols
+  UNION ALL
+  SELECT ch.rel, ch.top, t.typbasetype FROM chain ch JOIN pg_catalog.pg_type t ON t.oid=ch.typ WHERE t.typtype='d')
+SELECT DISTINCT ON (rc.oid)
+  CASE WHEN rn.nspname=$6 THEN '' ELSE pg_catalog.quote_ident(rn.nspname)||'.' END||'relation:'||rc.relname,
+  pg_catalog.quote_ident(rn.nspname)||'.'||pg_catalog.quote_ident(rc.relname),
+  pg_catalog.format_type(ch.top, NULL), pg_catalog.format_type(ch.typ, NULL), o.oid::pg_catalog.regoperator::text
+FROM chain ch
+JOIN pg_catalog.pg_type t ON t.oid=ch.typ JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace
+JOIN pg_catalog.pg_operator o ON o.oprname=$7 AND o.oprkind='b' JOIN pg_catalog.pg_namespace okn ON okn.oid=o.oprnamespace
+JOIN pg_catalog.pg_type lt ON lt.oid=o.oprleft JOIN pg_catalog.pg_type rt ON rt.oid=o.oprright
+JOIN pg_catalog.pg_class rc ON rc.oid=ch.rel JOIN pg_catalog.pg_namespace rn ON rn.oid=rc.relnamespace
+WHERE tn.nspname<>'pg_catalog' AND okn.nspname<>'pg_catalog'
+  AND (ch.typ IN (o.oprleft, o.oprright) OR (lt.typtype='p' AND lt.typname LIKE 'any%') OR (rt.typtype='p' AND rt.typname LIKE 'any%'))
+ORDER BY rc.oid, (o.oprleft=ch.typ AND o.oprright=ch.typ) DESC, ch.typ IN (o.oprleft, o.oprright) DESC, o.oid"#;
+
+/// Views a check reads ($1/$2, the tables it names), directly or through
+/// other views, whose stored query calls a builtin that writes or takes
+/// locks: one PostgreSQL marks parallel unsafe (nextval, setval, set_config,
+/// txid_current, the lo_* functions and more), or an advisory-lock function
+/// or pg_notify, which it marks only parallel restricted. pg_depend never
+/// records a builtin (pinned) function, so calls are read from the rules'
+/// stored expressions. $3 is the managed schema. One row per view and
+/// function: the view's catalog key, its name and the function.
+const CHECK_VIEW_WRITES: &str = r#"WITH RECURSIVE reach(rel) AS (
+  SELECT c.oid FROM ROWS FROM (pg_catalog.unnest($1::text[]), pg_catalog.unnest($2::text[])) t(nsp, rel)
+  JOIN pg_catalog.pg_namespace n ON n.nspname=t.nsp JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=t.rel
+  UNION
+  SELECT d.refobjid FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v'
+  JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
+  JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass)
+SELECT DISTINCT CASE WHEN n.nspname=$3 THEN '' ELSE pg_catalog.quote_ident(n.nspname)||'.' END||'relation:'||v.relname,
+  pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(v.relname), p.oid::pg_catalog.regprocedure::text
+FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v' JOIN pg_catalog.pg_namespace n ON n.oid=v.relnamespace
+JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
+CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':(?:funcid|opfuncid) (\d+)', 'g') m
+JOIN pg_catalog.pg_proc p ON p.oid=m[1]::oid
+WHERE p.pronamespace='pg_catalog'::pg_catalog.regnamespace
+  AND (p.proparallel='u' OR p.proname ~ '^pg_(try_)?advisory_' OR p.proname='pg_notify')
+ORDER BY 1, 3 LIMIT 20"#;
+
 impl Postgres {
     /// Open a dedicated session after checking explicit host, role, database and transport.
     /// The initial connection is read-only by default. Every TLS sslmode requires TLS from
@@ -1044,6 +1103,71 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             .with_objects(&objects));
         }
         Ok(())
+    }
+
+    /// What stops a check from running as written (#456), found from the
+    /// live catalog before any check of its phase runs.
+    ///
+    /// Checks resolve operators with search_path=pg_catalog, while the
+    /// application's search path reaches the managed schema. When a column
+    /// the check compares (`analysis::check_operands`) has a type, or a type
+    /// in its domain base-type chain, outside pg_catalog for which a binary
+    /// operator of that name exists outside pg_catalog (or one that takes a
+    /// polymorphic type), the application would use that operator and the
+    /// check would not: citext's `=` compares case-insensitively, but a check
+    /// would convert the column to text and compare with text's `=`. A view
+    /// keeps the operators chosen when a migration created it, and an enum,
+    /// domain, composite or array with no such operator resolves to the same
+    /// pg_catalog operator either way, so those stay allowed.
+    ///
+    /// A check also must not read a view, directly or through other views,
+    /// that calls a builtin that writes or takes locks (`CHECK_VIEW_WRITES`).
+    pub async fn check_hazards(&self, schema: &str, sql: &str) -> Result<Vec<super::CheckHazard>> {
+        let (schemas, tables): (Vec<String>, Vec<String>) =
+            super::analysis::check_tables(sql, schema)
+                .into_iter()
+                .unzip();
+        let mut found = vec![];
+        for operand in super::analysis::check_operands(sql, schema) {
+            let (named_schemas, named): (Vec<String>, Vec<String>) =
+                operand.tables.iter().cloned().unzip();
+            for row in self
+                .rows(
+                    CHECK_OPERATOR_HAZARDS,
+                    &[
+                        &operand.column,
+                        &named_schemas,
+                        &named,
+                        &schemas,
+                        &tables,
+                        &schema,
+                        &operand.operator,
+                    ],
+                )
+                .await?
+            {
+                found.push(super::CheckHazard::Operator {
+                    key: row.get(0),
+                    relation: row.get(1),
+                    column: operand.column.clone(),
+                    operator_name: operand.operator,
+                    column_type: row.get(2),
+                    base_type: row.get(3),
+                    operator: row.get(4),
+                });
+            }
+        }
+        for row in self
+            .rows(CHECK_VIEW_WRITES, &[&schemas, &tables, &schema])
+            .await?
+        {
+            found.push(super::CheckHazard::ViewWrites {
+                key: row.get(0),
+                view: row.get(1),
+                function: row.get(2),
+            });
+        }
+        Ok(found)
     }
 
     /// Execute captured check bytes once; consume at most two rows and inspect
