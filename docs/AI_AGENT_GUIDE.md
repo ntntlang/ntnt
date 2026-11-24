@@ -1745,9 +1745,9 @@ window functions included; not `load_extension`, `sqlite_log`, or extension and
 application functions) and use AUTOINCREMENT, `WITH RECURSIVE` and `ANALYZE`;
 `sqlite_sequence` and the `sqlite_stat*` planner statistics are outside coverage
 and drift. A `sqlite_rebuild` must keep an AUTOINCREMENT table's counter (before
-the DROP, `DELETE FROM sqlite_sequence WHERE name='orders_new'; INSERT INTO
-sqlite_sequence (name, seq) SELECT 'orders_new', seq FROM sqlite_sequence WHERE
-name='orders';`, right whether or not `orders_new` already has a counter row;
+the DROP, raise the replacement's counter row to the higher of the two counters
+or add one, with the `UPDATE` and `INSERT` in docs/DATABASE_MIGRATIONS.md,
+Explicit one-table rebuild, right whether or not it already has one;
 SQLite uses only the first row for a name, so never add a second), recreate
 indexes, triggers and views with their stored SQL text exactly, and is needed on
 populated targets for any rebuild of a table other tables reference by foreign key;
