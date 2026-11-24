@@ -1220,7 +1220,8 @@ GRANT SELECT ON app.account_emails TO PUBLIC;
 /// #420, so plans saved by earlier releases keep validating. The
 /// fingerprints were recorded with ntnt 0.6.4 before #420 (81a5ad0). They
 /// differ between PostgreSQL major versions (for example the default table
-/// privileges gained MAINTAIN in 17), never within one.
+/// privileges gained MAINTAIN in 17), never within one. #430 left them
+/// unchanged too: it covers kinds of objects this history does not use.
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn single_schema_catalog_fingerprints_are_unchanged() {
@@ -1333,5 +1334,350 @@ fn a_policy_calling_a_routine_outside_the_scope_is_uncovered() {
             .iter()
             .any(|o| o.as_str().unwrap().contains("t_read")),
         "{d}"
+    );
+}
+
+/// A difference of `change` on `object` in a verify report.
+fn drifted(r: &Value, object: &str, change: &str) -> bool {
+    r["drift"]["differences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["object"] == object && d["change"] == change)
+}
+
+/// Plan, approve and migrate the history in `f`, then verify it.
+fn migrate_and_verify(f: &Fixture) -> Value {
+    let plan = f.plan("plan.json");
+    let applied = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let clean = f.command("verify");
+    assert_eq!(clean["outcome"], "pass", "{clean}");
+    assert_eq!(
+        clean["catalog"]["uncovered"],
+        serde_json::json!([]),
+        "{clean}"
+    );
+    clean
+}
+
+/// #430 (pg-05): enums, domains and composite types, in the managed schema
+/// and in a schema the history creates, are compared by definition like
+/// tables. A history that uses them plans, migrates and verifies, columns of
+/// those types are covered, and an out-of-band change to a type is drift on
+/// that type.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn enums_domains_and_composite_types_are_compared_by_definition() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_types.sql",
+        "CREATE TYPE app.order_status AS ENUM ('pending', 'paid', 'shipped');
+CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DEFAULT 'pending', history app.order_status[]);
+CREATE DOMAIN app.email AS text CHECK (VALUE ~ '@');
+CREATE TABLE app.contacts (id int PRIMARY KEY, email app.email NOT NULL);
+CREATE TYPE app.address AS (street text, city text);
+CREATE TABLE app.places (id int PRIMARY KEY, addr app.address);
+CREATE SCHEMA billing;
+CREATE DOMAIN billing.cents AS bigint NOT NULL DEFAULT 0 CHECK (VALUE >= 0);
+CREATE TABLE app.invoices (id int PRIMARY KEY, total billing.cents);
+",
+    );
+    let clean = migrate_and_verify(&f);
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "type:order_status",
+        "type:email",
+        "relation:address",
+        "column:address.street",
+        "column:orders.status",
+        "column:orders.history",
+        "column:contacts.email",
+        "column:places.addr",
+        "billing.type:cents",
+        "column:invoices.total",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    // Enum labels are literals: reported by digest, as definitions are.
+    assert_eq!(
+        objects["type:order_status"]["labels"]["redacted"], true,
+        "{}",
+        objects["type:order_status"]
+    );
+    for (change, object, how) in [
+        (
+            "ALTER TYPE app.order_status ADD VALUE 'refunded'",
+            "type:order_status",
+            "changed",
+        ),
+        (
+            "ALTER DOMAIN app.email DROP CONSTRAINT email_check; ALTER DOMAIN app.email ADD CONSTRAINT email_check CHECK (VALUE ~ '@.')",
+            "type:email",
+            "changed",
+        ),
+        (
+            "ALTER DOMAIN billing.cents SET DEFAULT 1",
+            "billing.type:cents",
+            "changed",
+        ),
+        (
+            "ALTER TYPE app.address ADD ATTRIBUTE zip text",
+            "column:address.zip",
+            "unexpected",
+        ),
+        (
+            "REVOKE USAGE ON TYPE app.address FROM PUBLIC",
+            "relation:address",
+            "changed",
+        ),
+    ] {
+        f.target().batch_execute(change).unwrap();
+        let r = f.command("verify");
+        assert_eq!(r["outcome"], "fail", "{change}: {r}");
+        assert!(drifted(&r, object, how), "{change}: {}", r["drift"]);
+    }
+}
+
+/// #430 (pg-04): a trusted extension installed in the managed schema is
+/// covered by its name and version, and so are its members: types,
+/// operators, operator classes and families, aggregates and casts. Indexes
+/// and columns that use them are covered, citext's implicit casts do not
+/// stop later migrations, and changing the version out of band is drift.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn trusted_extensions_in_the_managed_schema_are_covered_by_version() {
+    let f = Fixture::new();
+    // The #430 repro, `SCHEMA` without `WITH` included.
+    f.sql(
+        "0001_trgm.sql",
+        "CREATE EXTENSION pg_trgm SCHEMA app;
+CREATE TABLE app.products (id int PRIMARY KEY, name text NOT NULL);
+CREATE INDEX products_name_trgm ON app.products USING gin (name app.gin_trgm_ops);
+",
+    );
+    f.sql(
+        "0002_citext.sql",
+        "CREATE EXTENSION citext WITH SCHEMA app VERSION '1.4';
+CREATE TABLE app.users (id int PRIMARY KEY, email app.citext NOT NULL UNIQUE);
+",
+    );
+    f.sql(
+        "0003_nick.sql",
+        "ALTER TABLE app.users ADD COLUMN nick app.citext;\n",
+    );
+    let clean = migrate_and_verify(&f);
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "extension:pg_trgm",
+        "extension:citext",
+        "type:gtrgm",
+        "type:citext",
+        "index:products_name_trgm",
+        "index:users_email_key",
+        "column:users.email",
+        "column:users.nick",
+        "routine:max(app.citext)",
+        "other:operator.%(text,text)",
+        "other:operator.=(app.citext,app.citext)",
+        "other:operator_class.gin_trgm_ops USING gin",
+        "other:operator_class.citext_ops USING btree",
+        "other:operator_class.citext_ops USING hash",
+        "other:operator_family.citext_ops USING btree",
+        "other:operator_family.citext_ops USING hash",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    // The installer owns the members; the extension's version covers them.
+    assert_eq!(objects["type:citext"]["extension"], "citext");
+    assert!(objects["type:citext"]["owner"].is_null());
+    f.target()
+        .batch_execute("ALTER EXTENSION citext UPDATE TO '1.5'")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "fail", "{r}");
+    assert!(drifted(&r, "extension:citext", "changed"), "{}", r["drift"]);
+}
+
+/// #430 (pg-03): an operator is keyed with its argument types, as a routine
+/// is, so overloads no longer collide. One whose function is covered is
+/// covered, and dropping an overload out of band is drift on that overload.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn overloaded_operators_have_distinct_keys() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_ops.sql",
+        "CREATE FUNCTION app.eqi(a int, b int) RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT a = b $$;
+CREATE FUNCTION app.eqt(a text, b text) RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT a = b $$;
+CREATE OPERATOR app.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = app.eqi);
+CREATE OPERATOR app.=== (LEFTARG = text, RIGHTARG = text, FUNCTION = app.eqt);
+",
+    );
+    let clean = migrate_and_verify(&f);
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "other:operator.===(integer,integer)",
+        "other:operator.===(text,text)",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    f.target()
+        .batch_execute("DROP OPERATOR app.=== (text, text)")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "fail", "{r}");
+    assert!(
+        drifted(&r, "other:operator.===(text,text)", "missing"),
+        "{}",
+        r["drift"]
+    );
+    assert!(
+        !drifted(&r, "other:operator.===(integer,integer)", "missing"),
+        "{}",
+        r["drift"]
+    );
+}
+
+/// #430 (pg-03): objects that still share a catalog key (a database-wide
+/// default privilege and one in the managed schema, for the same role and
+/// object type) make inspection ambiguous. The diagnostic names the key and
+/// the migration that made them.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn colliding_catalog_keys_name_the_key_and_the_migration() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_acl.sql",
+        "CREATE TABLE app.t (id int);
+ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO PUBLIC;
+",
+    );
+    let r = f.command("plan");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_CATALOG_AMBIGUOUS").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["source"], "0001_acl.sql", "{d}");
+    let key = format!("other:default_acl.{}.r", f.scratch);
+    assert_eq!(names(&d["objects"]), [key.as_str()], "{d}");
+    assert!(
+        d["next_action"].as_str().unwrap().contains("objects field"),
+        "{d}"
+    );
+}
+
+/// #430 (pg-06): EXCLUDE constraints are covered, with built-in operator
+/// classes and with an extension's (btree_gist) installed in the managed
+/// schema, and dropping one out of band is drift.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn exclusion_constraints_are_covered() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_bookings.sql",
+        "CREATE TABLE app.bookings (id int PRIMARY KEY, room int NOT NULL, during tstzrange NOT NULL,
+  CONSTRAINT bookings_no_overlap EXCLUDE USING gist (during WITH &&));
+CREATE EXTENSION btree_gist WITH SCHEMA app;
+CREATE TABLE app.rooms (id int PRIMARY KEY, room int NOT NULL, during tstzrange NOT NULL,
+  CONSTRAINT rooms_no_overlap EXCLUDE USING gist (room WITH =, during WITH &&));
+",
+    );
+    let clean = migrate_and_verify(&f);
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "constraint:bookings.bookings_no_overlap",
+        "constraint:rooms.rooms_no_overlap",
+    ] {
+        assert_eq!(objects[key]["kind"], "x", "{key}: {:?}", objects.keys());
+    }
+    f.target()
+        .batch_execute("ALTER TABLE app.bookings DROP CONSTRAINT bookings_no_overlap")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "fail", "{r}");
+    assert!(
+        drifted(&r, "constraint:bookings.bookings_no_overlap", "missing"),
+        "{}",
+        r["drift"]
+    );
+}
+
+/// What #430 leaves outside coverage is still named, with the migration
+/// that made it: a range type is uncovered, and a custom implicit cast that
+/// is not an extension's stops the next migration by name.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn range_types_and_custom_casts_are_refused_by_name() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_span.sql",
+        "CREATE TYPE app.span AS RANGE (subtype = int4);\n",
+    );
+    let r = f.command("plan");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let coverage = diagnostic(&r, "DB_COVERAGE_INCOMPLETE").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(coverage["source"], "0001_span.sql", "{coverage}");
+    assert!(
+        names(&coverage["objects"]).contains(&"type:span"),
+        "{coverage}"
+    );
+    f.sql(
+        "0001_span.sql",
+        "CREATE TYPE app.mood AS ENUM ('ok');
+CREATE FUNCTION app.mood_text(app.mood) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT 'x' $$;
+CREATE CAST (app.mood AS text) WITH FUNCTION app.mood_text(app.mood) AS IMPLICIT;
+",
+    );
+    f.sql("0002_next.sql", "CREATE TABLE app.t (id int);\n");
+    let r = f.command("plan");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let cast = diagnostic(&r, "DB_CHECK_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(cast["source"], "0002_next.sql", "{cast}");
+    assert_eq!(names(&cast["objects"]), ["cast:app.mood AS text"], "{cast}");
+}
+
+/// The same history with `public` as the managed schema, as many
+/// applications have. Recorded with the ntnt 0.6.4 release binary, before
+/// #430 changed the catalog queries.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn single_schema_catalog_fingerprints_are_unchanged_in_public() {
+    let mut f = Fixture::with_schema("public");
+    for (name, sql) in SINGLE_SCHEMA_HISTORY {
+        f.sql(name, &sql.replace("app.", "public."));
+    }
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let major = f
+        .admin
+        .query_one(
+            "SELECT current_setting('server_version_num')::int / 10000",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i32>(0);
+    let empty = "66b18e7c326d3809ac2689e4e29d0f148deba1b3866af541cfdc416f8dbf7a1a";
+    let expected = match major {
+        16 => [
+            empty,
+            "84fc02b092c3138b2066703bfac35f3b192e87620b31b4ea43a5ec0abb8ac18c",
+            "75550a7d9fe10d0b536fe0a2dc72fa76baf7421d8596ee132a0aa3b1a2c215ec",
+        ],
+        17 => [
+            empty,
+            "fdb8c30aaa50a087cb0c2d2071a79675b6afd733b83ec69e9aa075d3dd3edb98",
+            "ebe510bef74dec28b5bd22bb3ba8db6ed07c9697992e4e3a4f410b6717b73db8",
+        ],
+        18 => [
+            empty,
+            "ac1a4983271ecb6d86b8593814d8e5ef5acb62dd945baf96498887ad501b6d8f",
+            "8420a1d8f099ea3ffcddb15d476b40615991713e2b8d8206e791fb143724a329",
+        ],
+        other => panic!("no recorded fingerprints for PostgreSQL {other}"),
+    };
+    assert_eq!(
+        r["plan"]["execution"]["prefix_fingerprints"],
+        serde_json::json!(expected),
+        "PostgreSQL {major}"
     );
 }
