@@ -2243,6 +2243,26 @@ fn check_query(q: &Query, schema: &str, depth: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// #456 review: a check cannot convert a value to a type by name, so it
+    /// never converts one to a domain itself (`check_purity` relies on that).
+    #[test]
+    fn checks_cannot_write_casts_or_typed_literals() {
+        for sql in [
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email = 'a@b'::app.email)",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email = CAST('a@b' AS app.email))",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE emails = '{a@b}'::app.email[])",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email = app.email 'a@b')",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email::text = 'a@b')",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE TRY_CAST(email AS text) = 'a@b')",
+            "SELECT 'a@b'::app.email IS NOT NULL FROM app.t",
+        ] {
+            assert!(!contract_supported(sql, "app"), "{sql}");
+        }
+        assert!(contract_supported(
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email = 'a@b')",
+            "app"
+        ));
+    }
     #[test]
     fn contract_relations_require_the_managed_schema_at_every_query_level() {
         for sql in [

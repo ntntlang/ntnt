@@ -1724,3 +1724,198 @@ CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL, c
     assert_eq!(calls, 1);
     assert_eq!(f.command("verify")["outcome"], "pass");
 }
+
+/// The first migration of a #456 check-purity case: an authored function
+/// that also advances a sequence, and a domain whose constraint calls it. A
+/// sequence advance survives the rollback a refusal causes, so `is_called`
+/// shows whether the function ran.
+const CALLS_DOMAIN: &str = "CREATE SEQUENCE app.calls;
+CREATE FUNCTION app.valid(t text) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN position('@' in t) > 0; END $$;
+CREATE DOMAIN app.email AS text CHECK (app.valid(VALUE));
+";
+
+/// Migrates `setup` after `CALLS_DOMAIN`, then a second migration whose
+/// `ensures` holds `checks`. Returns the migrate report and whether
+/// `app.valid` ran.
+fn migrate_checks(setup: &str, checks: &[(&str, &str)]) -> (Value, bool) {
+    let f = Fixture::new();
+    f.sql("0001_types.sql", &format!("{CALLS_DOMAIN}{setup}"));
+    f.sql("0002_checked.sql", "CREATE TABLE app.marker (id int);\n");
+    let ensures: String = checks
+        .iter()
+        .map(|(name, sql)| format!("{name} = {sql:?}\n"))
+        .collect();
+    std::fs::write(
+        f.root.path().join("migrations/0002_checked.toml"),
+        format!("[ensures]\n{ensures}"),
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    let ran = f
+        .target()
+        .query_one("SELECT is_called FROM app.calls", &[])
+        .unwrap()
+        .get(0);
+    (r, ran)
+}
+
+/// #456 review: `check` is refused by name before it runs, the message
+/// holding each of `named`, and `app.valid` never ran.
+fn assert_check_refused(setup: &str, check: &str, named: &[&str]) {
+    let (r, ran) = migrate_checks(setup, &[("nested", check)]);
+    let d = diagnostic(&r, "DB_CHECK_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+    let message = d["message"].as_str().unwrap();
+    for name in named {
+        assert!(message.contains(name), "{name}: {d}");
+    }
+    assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0, "{r}");
+    assert!(!ran, "app.valid ran: {r}");
+}
+
+/// #456 review: comparing a column with a literal converts the literal to
+/// the column's type, and each element of an array goes through its type's
+/// input, domain constraints included. So a check that can read an array of
+/// a domain whose constraint calls a routine the history wrote is refused
+/// by name; so is one through a domain over that array, a constraint that
+/// calls a volatile builtin, and one that uses an operator the history
+/// wrote.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_arrays_of_domains_whose_constraints_call_history_code() {
+    assert_check_refused(
+        "CREATE TABLE app.orders (id int, emails app.email[]);\n",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE emails = '{a@b}')",
+        &[
+            "table app.orders has column emails of type app.email[]",
+            "domain app.email",
+            "app.valid(text) (a routine the history wrote)",
+        ],
+    );
+    assert_check_refused(
+        "CREATE DOMAIN app.emails AS app.email[];\nCREATE TABLE app.orders (id int, emails app.emails);\n",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE emails = '{a@b}')",
+        &["column emails of type app.emails", "domain app.email,"],
+    );
+    assert_check_refused(
+        "CREATE DOMAIN app.ticket AS text CHECK (nextval('app.calls') > 0);\nCREATE TABLE app.orders (id int, tickets app.ticket[]);\n",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE tickets = '{x}')",
+        &["domain app.ticket", "nextval(regclass) (a volatile function)"],
+    );
+    assert_check_refused(
+        "CREATE FUNCTION app.same(a int, b int) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN a = b; END $$;
+CREATE OPERATOR app.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = app.same);
+CREATE DOMAIN app.three AS int CHECK (VALUE OPERATOR(app.===) 3);
+CREATE TABLE app.orders (id int, threes app.three[]);
+",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE threes = '{3}')",
+        &["domain app.three", "app.same(integer,integer)"],
+    );
+}
+
+/// #456 review: a composite's attributes go through their types' input too.
+/// In an array a composite meets a literal like any element; as a column's
+/// top-level type it meets one as an anonymous record, which PostgreSQL
+/// rejects before any input runs, but the gate counts it anyway.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_composites_with_domains_whose_constraints_call_history_code() {
+    let contact = "CREATE TYPE app.contact AS (email app.email, name text);\n";
+    assert_check_refused(
+        &format!("{contact}CREATE TABLE app.orders (id int, contact app.contact);\n"),
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE contact IS NULL)",
+        &[
+            "column contact of type app.contact",
+            "domain app.email",
+            "app.valid(text)",
+        ],
+    );
+    assert_check_refused(
+        &format!("{contact}CREATE TABLE app.orders (id int, contacts app.contact[]);\n"),
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE contacts = '{\"(a@b,x)\"}')",
+        &["column contacts of type app.contact[]", "domain app.email"],
+    );
+}
+
+/// #456 review: a top-level domain over such a composite is refused too.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_domains_over_composites_with_such_domains() {
+    assert_check_refused(
+        "CREATE TYPE app.contact AS (email app.email, name text);
+CREATE DOMAIN app.known_contact AS app.contact CHECK (VALUE IS NOT NULL);
+CREATE TABLE app.orders (id int, contact app.known_contact);
+",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE contact IS NULL)",
+        &[
+            "column contact of type app.known_contact",
+            "domain app.email",
+        ],
+    );
+}
+
+/// #456 review: reading a view runs its conversions and operators. A view
+/// that converts values to a domain whose constraint calls a routine the
+/// history wrote, or that uses an operator the history wrote, is refused
+/// by name, though the view calls no such function itself.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_views_that_convert_to_such_domains_or_use_history_operators() {
+    let orders = "CREATE TABLE app.orders (id int, email text);\nINSERT INTO app.orders VALUES (1, 'a@b');\n";
+    assert_check_refused(
+        &format!("{orders}CREATE VIEW app.contacts AS SELECT id, email::app.email AS email FROM app.orders;\n"),
+        "SELECT EXISTS (SELECT 1 FROM app.contacts WHERE email IS NOT NULL)",
+        &[
+            "view app.contacts converts values to app.email",
+            "app.valid(text)",
+        ],
+    );
+    assert_check_refused(
+        &format!("{orders}CREATE FUNCTION app.same(a int, b int) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN a = b; END $$;
+CREATE OPERATOR app.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = app.same);
+CREATE VIEW app.firsts AS SELECT id FROM app.orders WHERE id OPERATOR(app.===) 1;
+"),
+        "SELECT EXISTS (SELECT 1 FROM app.firsts WHERE id IS NOT NULL)",
+        &[
+            "view app.firsts uses operator app.===(integer,integer)",
+            "app.same(integer,integer) (a routine the history wrote)",
+        ],
+    );
+}
+
+/// #456 review: what stays allowed. A literal compared with a column of a
+/// domain, or of a domain over it, is converted to the base type, so the
+/// constraint never runs, whatever it calls; a view may compare one too.
+/// An array of a domain whose constraint uses only builtins (a regular
+/// expression) is allowed: its elements' constraint runs and passes.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_run_with_plain_domains_and_builtin_only_nested_domains() {
+    let (r, ran) = migrate_checks(
+        "CREATE DOMAIN app.address AS text CHECK (VALUE ~ '@');
+CREATE DOMAIN app.primary_email AS app.email;
+CREATE TYPE app.copy AS (address app.address, name text);
+CREATE TABLE app.orders (id int, contact app.email, backup app.primary_email, cc app.address[], copies app.copy[]);
+CREATE VIEW app.recent AS SELECT id, contact FROM app.orders WHERE contact <> 'x';
+",
+        &[
+            (
+                "plain",
+                "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE contact = 'a@b' OR backup = 'c@d')",
+            ),
+            (
+                "regex",
+                "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE cc = '{a@b}' OR copies = '{\"(c@d,x)\"}')",
+            ),
+            (
+                "view",
+                "SELECT NOT EXISTS (SELECT 1 FROM app.recent WHERE contact = 'a@b')",
+            ),
+        ],
+    );
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 3, "{r}");
+    assert!(!ran, "app.valid ran: {r}");
+}
