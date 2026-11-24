@@ -131,7 +131,11 @@
   by version and schema, scratch may hold it and what it owns, and migrations may
   keep `CREATE EXTENSION IF NOT EXISTS` for it. An undeclared extension outside
   the managed scope is still uncovered, and `DB_COVERAGE_INCOMPLETE` now says to
-  declare it. Manifests without the key keep their plan digests (#430).
+  declare it. Replay's cleanup and its recovery of an unfinished replay keep the
+  declared extensions; a privilege a DBA grants the scratch role on what they
+  install is refused by name (`DB_SCRATCH_UNSAFE`), since cleanup would revoke
+  it, and the diagnostic says to grant it to `PUBLIC` in scratch instead.
+  Manifests without the key keep their plan digests (#430).
 
 ### Changed
 

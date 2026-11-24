@@ -94,8 +94,13 @@
   migrations may keep `CREATE EXTENSION IF NOT EXISTS`, which then does nothing.
   An undeclared extension outside the managed scope, such as a DBA's
   `pg_stat_statements` in `public`, still leaves the catalog uncovered, and the
-  diagnostic now says to declare it. The key is part of the plan only when
-  present (#430).
+  diagnostic now says to declare it. Replay's cleanup, and its recovery of a
+  replay that never finished, keep the declared extensions. A privilege a DBA
+  grants the scratch role on what they install, such as `USAGE` on
+  postgres_fdw's foreign-data wrapper, is refused by name with
+  `DB_SCRATCH_UNSAFE`, since cleanup's `DROP OWNED` would revoke it; grant it to
+  `PUBLIC` in the scratch database instead. The key is part of the plan only
+  when present (#430).
 
 - **Replay commits each migration on scratch, as `migrate` does on the target.**
   Replay used to run the whole history in one rollback-only transaction. A

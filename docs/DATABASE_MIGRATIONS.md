@@ -714,6 +714,18 @@ CREATE EXTENSION pg_stat_statements SCHEMA public;
   the relations of composite types (tablefunc's and dblink's) and indexes.
   Anything else there is refused with `DB_SCRATCH_NOT_EMPTY`. Replay does not
   count what they own as the history's work.
+- A superuser owns the declared extensions and what they install, so replay's
+  cleanup (`DROP OWNED`) keeps them, and cleaning up after a replay that never
+  finished neither counts them as another role's objects nor asks the marker to
+  have recorded their catalog rows: scratch is recovered with them in place.
+- A privilege a DBA grants the scratch role itself on what a declared extension
+  installed, such as `GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO
+  <scratch role>`, is refused with `DB_SCRATCH_UNSAFE` naming it, before anything
+  runs: `DROP OWNED` would revoke it, and only the extension's owner can grant it
+  again. Grant it to `PUBLIC` in the scratch database instead
+  (`GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO PUBLIC`), which
+  `DROP OWNED` keeps. Privileges on what declared extensions install are not
+  compared, so the target's migration role keeps its own grant.
 - A declared extension's casts do not block DDL, as an in-scope extension's do
   not.
 - The key is part of the plan's policy, so adding or changing it needs a new plan.
