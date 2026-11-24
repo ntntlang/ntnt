@@ -43,6 +43,7 @@ macro_rules! declared_owned {
         )
     };
 }
+pub(super) use declared_owned;
 
 pub(super) const QUERIES: &[(&str, &str)] = &[
     (

@@ -29,6 +29,7 @@
 //! - Changes cleanup cannot undo (other databases, a password, memberships,
 //!   objects given to another role) are refused before the migration that
 //!   made them commits.
+use super::super::catalog_sql::declared_owned;
 use super::super::inventory::{Limits, Migration};
 use super::super::{Diagnostic, Result};
 use super::{
@@ -73,6 +74,26 @@ FROM ONLY _ntnt_replay.replay_v1 LIMIT 2"#;
 /// The transactions the marker records, as text: those of prepare and of
 /// each committed replay step that wrote the catalog (`record_xids`).
 const MARKER_XIDS: &str = "SELECT coalesce(xids::text, '') FROM ONLY _ntnt_replay.replay_v1";
+
+/// What a superuser installed for the declared extensions (`$2`, #430),
+/// as a `WITH RECURSIVE` element: `declared(classid, objid)`, each declared
+/// extension, the schema it is installed in and what it owns
+/// (`DECLARED_OWNED`). Scratch holds them before the marker, as the target
+/// does; `DROP OWNED` keeps them, since another role owns them, so recovery
+/// neither counts them as another role's objects nor asks a replay to have
+/// written them.
+macro_rules! declared_objects {
+    () => {
+        concat!(
+            declared_owned!("$2"),
+            r#",
+declared(classid, objid) AS (
+  SELECT 'pg_catalog.pg_extension'::pg_catalog.regclass::oid, e.oid FROM pg_catalog.pg_extension e WHERE e.extname=ANY($2::text[])
+  UNION SELECT 'pg_catalog.pg_namespace'::pg_catalog.regclass::oid, e.extnamespace FROM pg_catalog.pg_extension e WHERE e.extname=ANY($2::text[])
+  UNION SELECT o.classid, o.objid FROM owned o)"#
+        )
+    };
+}
 
 /// The catalog rows of this database's objects that `initdb` did not create
 /// (OIDs from 16384, and every large object and default privilege), with
@@ -141,19 +162,24 @@ RETURNING coalesce(r.xids::text, '')"#
 
 /// What recovery cannot prove the marker's replay wrote, by name: the rows
 /// of `CATALOG_ROWS` whose `xmin` is none of the marker's transactions,
-/// leaving out `public` ($1, which cleanup restores) and the temporary
-/// schemas of sessions. The comparison is of 32-bit transaction IDs, so
+/// leaving out `public` ($1, which cleanup restores), the temporary
+/// schemas of sessions and what a superuser installed for the declared
+/// extensions (`declared_objects`, `$2`) before any replay, which no replay
+/// transaction wrote. The comparison is of 32-bit transaction IDs, so
 /// `TOO_OLD` refuses a marker whose transactions are too old for it.
 fn unproven_sql() -> String {
     format!(
-        r#"WITH {CATALOG_ROWS},
+        r#"WITH RECURSIVE {CATALOG_ROWS},
+{declared},
 temp(oid) AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname ~ '^pg_(toast_)?temp_[0-9]+$'),
 rec(x) AS (SELECT (u.x::text::numeric % 4294967296)::bigint FROM ONLY _ntnt_replay.replay_v1 r CROSS JOIN LATERAL pg_catalog.unnest(r.xids) u(x))
 SELECT DISTINCT pg_catalog.pg_describe_object(c.classid, c.objid, 0) FROM cat c
 WHERE c.nsp NOT IN (SELECT oid FROM temp)
  AND NOT (c.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND c.objid=$1)
+ AND NOT EXISTS (SELECT 1 FROM declared w WHERE w.classid=c.classid AND w.objid=c.objid)
  AND c.x::text::bigint NOT IN (SELECT x FROM rec)
-ORDER BY 1 LIMIT 101"#
+ORDER BY 1 LIMIT 101"#,
+        declared = declared_objects!()
     )
 }
 /// Whether the marker's oldest transaction is more than 2^31 transactions
@@ -232,10 +258,16 @@ ORDER BY 1"#;
 /// it casts one of its types. `public` ($1, by OID, or the schema now
 /// named `public`, which a migration may have dropped and created again for
 /// `pg_database_owner`) is restored instead. Objects `initdb` created have
-/// OIDs below 16384.
-const FOREIGN_OBJECTS: &str = r#"WITH RECURSIVE me(oid) AS (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=session_user),
+/// OIDs below 16384. What a superuser installed for the declared extensions
+/// (`declared_objects`, `$2`) is not listed: scratch holds it before the
+/// marker, as the target does, and cleanup keeps it (#430).
+const FOREIGN_OBJECTS: &str = concat!(
+    "WITH RECURSIVE ",
+    declared_objects!(),
+    r#",
+me(oid) AS (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=session_user),
 temp(oid) AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname ~ '^pg_(toast_)?temp_[0-9]+$' OR n.nspname IN ('pg_catalog','pg_toast','information_schema')),
-owned(classid, objid, owner, nsp) AS (
+objs(classid, objid, owner, nsp) AS (
   SELECT 'pg_catalog.pg_namespace'::pg_catalog.regclass::oid, n.oid, n.nspowner, n.oid FROM pg_catalog.pg_namespace n
   UNION ALL SELECT 'pg_catalog.pg_class'::pg_catalog.regclass::oid, c.oid, c.relowner, c.relnamespace FROM pg_catalog.pg_class c
   UNION ALL SELECT 'pg_catalog.pg_type'::pg_catalog.regclass::oid, t.oid, t.typowner, t.typnamespace FROM pg_catalog.pg_type t
@@ -257,7 +289,7 @@ owned(classid, objid, owner, nsp) AS (
   UNION ALL SELECT 'pg_catalog.pg_largeobject_metadata'::pg_catalog.regclass::oid, l.oid, l.lomowner, 0::oid FROM pg_catalog.pg_largeobject_metadata l
   UNION ALL SELECT 'pg_catalog.pg_default_acl'::pg_catalog.regclass::oid, a.oid, a.defaclrole, a.defaclnamespace FROM pg_catalog.pg_default_acl a),
 candidate(classid, objid) AS (
-  SELECT o.classid, o.objid FROM owned o
+  SELECT o.classid, o.objid FROM objs o
   WHERE (o.objid>=16384 OR o.classid IN ('pg_catalog.pg_largeobject_metadata'::pg_catalog.regclass, 'pg_catalog.pg_default_acl'::pg_catalog.regclass))
    AND o.owner<>(SELECT oid FROM me) AND o.nsp NOT IN (SELECT oid FROM temp)
    AND NOT (o.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND (o.objid=$1 OR o.objid=pg_catalog.to_regnamespace('public')::oid))
@@ -274,9 +306,11 @@ part_of(classid, objid, of_class, of_obj) AS (
   SELECT u.classid, u.objid, d.refclassid, d.refobjid FROM part_of u
   JOIN pg_catalog.pg_depend d ON d.classid=u.of_class AND d.objid=u.of_obj AND d.deptype IN ('e','i','a'))
 SELECT pg_catalog.pg_describe_object(c.classid, c.objid, 0) FROM candidate c
-WHERE NOT EXISTS (SELECT 1 FROM part_of u JOIN owned o ON o.classid=u.of_class AND o.objid=u.of_obj
+WHERE NOT EXISTS (SELECT 1 FROM part_of u JOIN objs o ON o.classid=u.of_class AND o.objid=u.of_obj
   WHERE u.classid=c.classid AND u.objid=c.objid AND o.owner=(SELECT oid FROM me))
-ORDER BY 1 LIMIT 101"#;
+ AND NOT EXISTS (SELECT 1 FROM declared w WHERE w.classid=c.classid AND w.objid=c.objid)
+ORDER BY 1 LIMIT 101"#
+);
 
 /// Privileges granted to the scratch role on objects it does not own, in
 /// this database or on shared objects (databases, tablespaces,
@@ -285,9 +319,21 @@ ORDER BY 1 LIMIT 101"#;
 /// migration could change other databases. Those on `public` ($1) are
 /// restored with it; those on the members of an extension the scratch role
 /// installed go with the extension. A policy on its own table goes with
-/// the table.
-const FOREIGN_GRANTS: &str = r#"WITH me(oid) AS (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=session_user)
-SELECT pg_catalog.pg_describe_object(s.classid, s.objid, s.objsubid) FROM pg_catalog.pg_shdepend s
+/// the table. The second column names the declared extension (`$2`) whose
+/// object, or schema, the privilege is on (`declared_objects`, #430): a DBA
+/// granted it, and the scratch role cannot grant it back.
+const FOREIGN_GRANTS: &str = concat!(
+    "WITH RECURSIVE ",
+    declared_objects!(),
+    r#",
+me(oid) AS (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=session_user)
+SELECT pg_catalog.pg_describe_object(s.classid, s.objid, s.objsubid),
+ CASE WHEN s.dbid<>0 AND EXISTS (SELECT 1 FROM declared w WHERE w.classid=s.classid AND w.objid=s.objid) THEN coalesce(
+  (SELECT pg_catalog.min(e.extname::text) FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
+    WHERE d.classid=s.classid AND d.objid=s.objid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extname=ANY($2::text[])),
+  (SELECT pg_catalog.min(e.extname::text) FROM pg_catalog.pg_extension e WHERE s.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND e.extnamespace=s.objid AND e.extname=ANY($2::text[])),
+  '') END
+FROM pg_catalog.pg_shdepend s
 WHERE s.refclassid='pg_catalog.pg_authid'::pg_catalog.regclass AND s.refobjid=(SELECT oid FROM me)
  AND (s.dbid=0 OR s.dbid=(SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database()))
  AND (s.deptype='a' OR (s.deptype='r' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid=p.polrelid
@@ -295,7 +341,8 @@ WHERE s.refclassid='pg_catalog.pg_authid'::pg_catalog.regclass AND s.refobjid=(S
  AND NOT (s.dbid<>0 AND s.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND (s.objid=$1 OR s.objid=pg_catalog.to_regnamespace('public')::oid))
  AND NOT (s.dbid<>0 AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
    WHERE d.classid=s.classid AND d.objid=s.objid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extowner=(SELECT oid FROM me)))
-ORDER BY 1 LIMIT 101"#;
+ORDER BY 1 LIMIT 101"#
+);
 
 /// What the scratch role owns in scratch, other than `public` ($1), by
 /// name: what cleanup's `DROP OWNED` would drop. Before the marker this must
@@ -677,8 +724,9 @@ impl Postgres {
 
     /// Objects another role owns in scratch (`FOREIGN_OBJECTS`), by name.
     async fn foreign_objects(&self, public: u32) -> Result<Vec<String>> {
+        let declared: &[String] = &self.extensions;
         Ok(self
-            .rows(FOREIGN_OBJECTS, &[&public])
+            .rows(FOREIGN_OBJECTS, &[&public, &declared])
             .await?
             .iter()
             .map(|r| r.get::<_, Option<String>>(0).unwrap_or_default())
@@ -687,14 +735,50 @@ impl Postgres {
 
     /// Refuse a scratch role that `DROP OWNED` would take privileges from
     /// (`FOREIGN_GRANTS`), and a server whose statistics cannot show the
-    /// writes `SHARED_WRITES` refuses.
+    /// writes `SHARED_WRITES` refuses. A privilege a DBA granted it on what a
+    /// declared extension installed (#430), such as USAGE on postgres_fdw's
+    /// foreign-data wrapper, is refused by name: cleanup cannot restore it,
+    /// since only the extension's owner, a superuser, can grant it again,
+    /// and NTNT never connects to scratch as one. Granted to PUBLIC in
+    /// scratch instead, it outlives `DROP OWNED`.
     pub(super) async fn check_cleanable(&self, public: u32) -> Result<()> {
-        let grants: Vec<String> = self
-            .rows(FOREIGN_GRANTS, &[&public])
+        let declared: &[String] = &self.extensions;
+        let rows: Vec<(String, Option<String>)> = self
+            .rows(FOREIGN_GRANTS, &[&public, &declared])
             .await?
             .iter()
-            .map(|r| r.get::<_, Option<String>>(0).unwrap_or_default())
+            .map(|r| {
+                (
+                    r.get::<_, Option<String>>(0).unwrap_or_default(),
+                    r.get::<_, Option<String>>(1),
+                )
+            })
             .collect();
+        let on_declared: Vec<String> = rows
+            .iter()
+            .filter(|(_, extension)| extension.is_some())
+            .map(|(object, _)| object.clone())
+            .collect();
+        if !on_declared.is_empty() {
+            let mut extensions: Vec<&str> = rows
+                .iter()
+                .filter_map(|(_, extension)| extension.as_deref())
+                .filter(|extension| !extension.is_empty())
+                .collect();
+            extensions.sort_unstable();
+            extensions.dedup();
+            if extensions.is_empty() {
+                extensions.push("declared");
+            }
+            let mut d = Diagnostic::new(
+                "DB_SCRATCH_UNSAFE",
+                &format!("The scratch role was granted privileges on {} object(s) that the {} extension(s) installed (its objects field names them). Replay cleans scratch up with DROP OWNED, which revokes every privilege granted to the scratch role, and the scratch role cannot grant these back: only their owner, the superuser who installed the extension, can. So nothing was run.", on_declared.len(), extensions.join(", ")),
+            )
+            .with_objects(&on_declared);
+            d.next_action = "As a superuser in the scratch database, revoke those privileges from the scratch role and grant them to PUBLIC instead, for example REVOKE USAGE ON FOREIGN DATA WRAPPER postgres_fdw FROM <scratch role>; GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO PUBLIC. DROP OWNED keeps what PUBLIC holds, scratch is a database only replay uses, and the privileges on what declared extensions install are not compared with the target's, where the migration role keeps its own grant. Then rerun. See docs/DATABASE_MIGRATIONS.md, Extensions.".into();
+            return Err(d);
+        }
+        let grants: Vec<String> = rows.into_iter().map(|(object, _)| object).collect();
         if !grants.is_empty() {
             return Err(Diagnostic::new(
                 "DB_SCRATCH_UNSAFE",
@@ -967,8 +1051,9 @@ impl Postgres {
                 &[],
             ));
         }
+        let declared: &[String] = &self.extensions;
         let unproven_rows: Vec<String> = self
-            .rows(&unproven_sql(), &[&marker.public.oid])
+            .rows(&unproven_sql(), &[&marker.public.oid, &declared])
             .await?
             .iter()
             .map(|r| r.get::<_, Option<String>>(0).unwrap_or_default())
