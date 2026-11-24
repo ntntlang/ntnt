@@ -84,8 +84,9 @@ FROM pg_catalog.pg_cast c WHERE c.oid>=16384
 ORDER BY 1"#;
 
 /// What scratch holds that cleanup would leave or must not touch: objects
-/// of this database another role owns, outside the temporary schemas of
-/// sessions, and casts and other ownerless objects. An object belongs to
+/// of this database another role owns, outside PostgreSQL's schemas (as in
+/// the emptiness check) and the temporary schemas of sessions, and casts
+/// and other ownerless objects. An object belongs to
 /// the scratch role when it or what it is part of (by an internal,
 /// automatic or extension dependency, followed up) is the scratch role's:
 /// a trusted extension's members are owned by the bootstrap superuser, and
@@ -93,7 +94,7 @@ ORDER BY 1"#;
 /// it casts one of its types. `public` ($1, by OID) is restored instead.
 /// Objects `initdb` created have OIDs below 16384.
 const FOREIGN_OBJECTS: &str = r#"WITH RECURSIVE me(oid) AS (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=session_user),
-temp(oid) AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname ~ '^pg_(toast_)?temp_[0-9]+$'),
+temp(oid) AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname ~ '^pg_(toast_)?temp_[0-9]+$' OR n.nspname IN ('pg_catalog','pg_toast','information_schema')),
 owned(classid, objid, owner, nsp) AS (
   SELECT 'pg_catalog.pg_namespace'::pg_catalog.regclass::oid, n.oid, n.nspowner, n.oid FROM pg_catalog.pg_namespace n
   UNION ALL SELECT 'pg_catalog.pg_class'::pg_catalog.regclass::oid, c.oid, c.relowner, c.relnamespace FROM pg_catalog.pg_class c
@@ -139,13 +140,21 @@ ORDER BY 1 LIMIT 101"#;
 
 /// Privileges granted to the scratch role on objects it does not own, in
 /// this database or on shared objects (databases, tablespaces,
-/// parameters). `DROP OWNED` revokes them, and with a grant option a
-/// replayed migration could change other databases. Those on `public`
-/// ($1) are restored with it.
-const FOREIGN_GRANTS: &str = r#"SELECT pg_catalog.pg_describe_object(s.classid, s.objid, s.objsubid) FROM pg_catalog.pg_shdepend s
-WHERE s.refclassid='pg_catalog.pg_authid'::pg_catalog.regclass AND s.refobjid=(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=session_user)
- AND s.deptype<>'o' AND (s.dbid=0 OR s.dbid=(SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database()))
+/// parameters), and policies of other roles' tables that name it.
+/// `DROP OWNED` revokes or changes them, and with a grant option a replayed
+/// migration could change other databases. Those on `public` ($1) are
+/// restored with it; those on the members of an extension the scratch role
+/// installed go with the extension. A policy on its own table goes with
+/// the table.
+const FOREIGN_GRANTS: &str = r#"WITH me(oid) AS (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=session_user)
+SELECT pg_catalog.pg_describe_object(s.classid, s.objid, s.objsubid) FROM pg_catalog.pg_shdepend s
+WHERE s.refclassid='pg_catalog.pg_authid'::pg_catalog.regclass AND s.refobjid=(SELECT oid FROM me)
+ AND (s.dbid=0 OR s.dbid=(SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database()))
+ AND (s.deptype='a' OR (s.deptype='r' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid=p.polrelid
+   WHERE p.oid=s.objid AND c.relowner=(SELECT oid FROM me))))
  AND NOT (s.dbid<>0 AND s.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND s.objid=$1)
+ AND NOT (s.dbid<>0 AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
+   WHERE d.classid=s.classid AND d.objid=s.objid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extowner=(SELECT oid FROM me)))
 ORDER BY 1 LIMIT 101"#;
 
 /// What outlives a scratch database's objects and the scratch role could
@@ -443,7 +452,12 @@ impl Postgres {
                 changed,
             ));
         }
-        let foreign = self.foreign_objects(scope.marker.public.oid).await?;
+        let foreign: Vec<String> = self
+            .foreign_objects(scope.marker.public.oid)
+            .await?
+            .into_iter()
+            .filter(|o| !scope.foreign.contains(o))
+            .collect();
         if !foreign.is_empty() {
             return Err(attributed(
                 "DB_REPLAY_UNSUPPORTED",
@@ -470,11 +484,13 @@ impl Postgres {
     }
 
     /// What prepare must record before the first migration: `public`, and
-    /// the shared state `refuse_lasting_effects` compares.
-    pub(super) async fn scratch_baseline(&self) -> Result<(PublicState, String)> {
+    /// what `refuse_lasting_effects` compares: the shared state and the
+    /// objects of other roles scratch already holds.
+    pub(super) async fn scratch_baseline(&self) -> Result<(PublicState, String, Vec<String>)> {
         let public = self.public_state().await?.ok_or_else(not_empty)?;
         let shared: String = self.rows(SHARED_STATE, &[]).await?[0].get(0);
-        Ok((public, shared))
+        let foreign = self.foreign_objects(public.oid).await?;
+        Ok((public, shared, foreign))
     }
 
     /// The marker this session committed, for its scope.

@@ -92,6 +92,9 @@ struct ScratchScope {
     /// Shared state the scratch role could change (`scratch::SHARED_STATE`),
     /// as each replayed migration must leave it.
     shared: String,
+    /// Objects of other roles scratch held before the first migration;
+    /// replayed migrations may add none.
+    foreign: Vec<String>,
     /// A replay that never finished, whose leftovers prepare cleaned up.
     recovered: Option<Value>,
 }
@@ -897,7 +900,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         // leftovers, and their marker, as they were.
         let recovered = self.recover_leftovers().await?;
         self.check_empty(target_bypasses_rls).await?;
-        let (public, shared) = self.scratch_baseline().await?;
+        let (public, shared, foreign) = self.scratch_baseline().await?;
         self.check_cleanable(public.oid).await?;
         self.create_marker(&public).await?;
         // `public` already exists (and was just verified empty); any other
@@ -922,6 +925,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 schemas,
                 marker,
                 shared,
+                foreign,
                 recovered,
             }))
             .map_err(|_| {
