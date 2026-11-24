@@ -385,6 +385,13 @@ fn classify(a: &mut Analysis, s: &Statement, engine: &str) -> &'static str {
             ("create_trigger", "TRIGGER_EFFECTS")
         }
         Statement::DropTrigger { .. } if engine == "sqlite" => ("drop_trigger", "REMOVED_TRIGGER"),
+        // ANALYZE reads the tables it names and writes SQLite's planner
+        // statistics, which are state outside the catalog (#427).
+        Statement::Analyze(_) if engine == "sqlite" => ("analyze", "STATISTICS_SCAN"),
+        // WITH ... INSERT, UPDATE or DELETE (#427).
+        s if engine == "sqlite" && sqlite_with_dml(s) => {
+            ("data_write", "DESTRUCTIVE_OR_OVERWRITING_DML")
+        }
         Statement::AlterTable(t) => {
             for op in &t.operations {
                 if matches!(
@@ -474,25 +481,35 @@ fn sqlite_script(a: &mut Analysis, sql: &str) {
     }
 }
 
+/// Whether `s` is an INSERT, UPDATE or DELETE that a WITH clause leads
+/// (`WITH RECURSIVE r(i) AS (...) INSERT INTO t SELECT i FROM r`), which the
+/// parser reads as a query around the statement.
+fn sqlite_with_dml(s: &Statement) -> bool {
+    matches!(s, Statement::Query(query) if query.with.is_some()
+        && matches!(*query.body, SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_)))
+}
+
 /// Whether the SQLite subset includes statement `s`'s kind (see `sqlite_script`).
 fn sqlite_kind_supported(s: &Statement) -> bool {
     !matches!(s, Statement::CreateTable(table) if table.query.is_some())
-        && matches!(
-            s,
-            Statement::CreateTable(_)
-                | Statement::AlterTable(_)
-                | Statement::CreateIndex(_)
-                | Statement::CreateView { .. }
-                | Statement::CreateTrigger { .. }
-                | Statement::DropTrigger { .. }
-                | Statement::Insert(_)
-                | Statement::Update(_)
-                | Statement::Delete(_)
-                | Statement::Drop {
-                    object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
-                    ..
-                }
-        )
+        && (sqlite_with_dml(s)
+            || matches!(
+                s,
+                Statement::CreateTable(_)
+                    | Statement::AlterTable(_)
+                    | Statement::CreateIndex(_)
+                    | Statement::CreateView { .. }
+                    | Statement::CreateTrigger { .. }
+                    | Statement::DropTrigger { .. }
+                    | Statement::Analyze(_)
+                    | Statement::Insert(_)
+                    | Statement::Update(_)
+                    | Statement::Delete(_)
+                    | Statement::Drop {
+                        object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
+                        ..
+                    }
+            ))
 }
 
 /// Why the SQLite parser gate refuses a migration (#424): the statement it
@@ -827,6 +844,68 @@ pub(crate) fn sqlite_created_raise_messages(sql: &str, count: usize) -> Vec<Stri
             }
         })
         .collect()
+}
+
+/// Whether the SQLite `CREATE TABLE` statement `sql` declares AUTOINCREMENT.
+pub(crate) fn sqlite_autoincrement(sql: &str) -> bool {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql)
+        .tokenize()
+        .is_ok_and(|tokens| {
+            tokens.iter().any(|t| {
+                matches!(t, Token::Word(w) if w.quote_style.is_none()
+                    && w.value.eq_ignore_ascii_case("AUTOINCREMENT"))
+            })
+        })
+}
+
+/// The table that an `ALTER TABLE <name> RENAME TO <table>` statement of the
+/// SQLite migration `sql` renames to `table` (the last such statement): the
+/// replacement table of a rebuild.
+pub(crate) fn sqlite_renamed_to(sql: &str, table: &str) -> Option<String> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let tokens = Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql)
+        .tokenize_with_location()
+        .ok()?;
+    let keyword = |token: &Token, k: &str| matches!(token, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(k));
+    // SQLite also reads a single-quoted string where it expects a name.
+    let name = |token: &Token| match token {
+        Token::Word(w) => Some(w.value.clone()),
+        Token::SingleQuotedString(s) => Some(s.clone()),
+        _ => None,
+    };
+    sqlite_statements(&tokens)
+        .ranges
+        .iter()
+        .rev()
+        .find_map(|range| {
+            let words: Vec<&Token> = tokens[range.clone()]
+                .iter()
+                .map(|t| &t.token)
+                .filter(|t| !matches!(t, Token::Whitespace(_)))
+                .collect();
+            let [alter, kind, rest @ ..] = words.as_slice() else {
+                return None;
+            };
+            if !(keyword(alter, "ALTER") && keyword(kind, "TABLE")) {
+                return None;
+            }
+            // `main.<name>`: the schema is the only one a migration has.
+            let rest = match rest {
+                [_, Token::Period, rest @ ..] => rest,
+                rest => rest,
+            };
+            match rest {
+                [from, rename, to, new, ..]
+                    if keyword(rename, "RENAME")
+                        && keyword(to, "TO")
+                        && name(new).is_some_and(|new| new.eq_ignore_ascii_case(table)) =>
+                {
+                    name(from)
+                }
+                _ => None,
+            }
+        })
 }
 
 /// The messages of the RAISEs in `tokens` whose message is one string
@@ -3327,5 +3406,39 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod renamed_to_tests {
+    use super::sqlite_renamed_to;
+
+    /// The replacement a rebuild renames to the table, with its names
+    /// quoted or not (review).
+    #[test]
+    fn sqlite_renamed_to_reads_single_quoted_names() {
+        for sql in [
+            "ALTER TABLE orders_new RENAME TO orders;",
+            "ALTER TABLE orders_new RENAME TO 'orders';",
+            "ALTER TABLE 'orders_new' RENAME TO \"orders\";",
+            "ALTER TABLE main.'orders_new' RENAME TO 'orders';",
+        ] {
+            assert_eq!(
+                sqlite_renamed_to(sql, "orders").as_deref(),
+                Some("orders_new"),
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            sqlite_renamed_to("ALTER TABLE orders_new RENAME TO 'other';", "orders"),
+            None
+        );
+        assert_eq!(
+            sqlite_renamed_to(
+                "SELECT 'ALTER', 'TABLE', 'RENAME', 'TO', 'orders';",
+                "orders"
+            ),
+            None
+        );
     }
 }
