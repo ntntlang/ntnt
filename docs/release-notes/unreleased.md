@@ -90,16 +90,23 @@
 - **Concurrent plans on one scratch database wait for each other** instead of
   interleaving: a session advisory lock covers each replay, a second plan,
   status or verify waits up to `migrator_wait_seconds` and then fails with
-  `DB_SCRATCH_BUSY` (#430).
+  `DB_SCRATCH_BUSY`. A migration that releases the lock
+  (`pg_advisory_unlock_all()`) is refused before it commits, and a killed
+  replay's leftovers wait until no other session of the scratch role is
+  connected (`DB_SCRATCH_BUSY`) (#430).
 - **Changes cleanup cannot undo are refused before they commit**, with
   `DB_REPLAY_UNSUPPORTED` naming the migration: `ALTER DATABASE` or
   `ALTER ROLE` settings, database-level grants and comments, connection limits
   and passwords made in a `DO` block or function, objects given to another
   role, and a session left acting as another role (#430).
-- **Two new scratch requirements:** the scratch role may hold no privileges on
-  objects it does not own other than on `public` (`DROP OWNED` would revoke
+- **Three new scratch requirements:** the scratch role may hold no privileges
+  on objects it does not own other than on `public` (`DROP OWNED` would revoke
   them), and `track_counts` must be on, as it is by default. Otherwise plans
-  fail with `DB_SCRATCH_UNSAFE` and change nothing (#430).
+  fail with `DB_SCRATCH_UNSAFE` and change nothing. Before replay the scratch
+  role must also own nothing in scratch but `public`, such as a large object
+  or a publication, which the emptiness check did not look for: `DROP OWNED`
+  would drop it. Such a scratch is refused with `DB_SCRATCH_NOT_EMPTY` and
+  kept (#430).
 - Same-named constraints with different `INITIALLY DEFERRED` defaults no
   longer stop replay with `DB_REPLAY_UNSUPPORTED` (#430).
 - `capabilities.operations.transactional_script_replay` now reads

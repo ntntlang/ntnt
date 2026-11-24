@@ -4,7 +4,10 @@
 //! ever dropped:
 //!
 //! - A session advisory lock serializes replays on one scratch database,
-//!   from the first look at its contents until cleanup ends.
+//!   from the first look at its contents until cleanup ends. A migration
+//!   that releases it is refused before it commits.
+//! - Before the marker, the scratch role may own nothing in scratch but
+//!   `public`, since cleanup drops whatever it owns.
 //! - Before the first migration a committed marker, the schema
 //!   `_ntnt_replay` with one row, records the replay and the state of
 //!   `public`, which the scratch role can change (as a member of
@@ -12,7 +15,9 @@
 //! - Cleanup drops everything the scratch role owns (`DROP OWNED`), restores
 //!   `public` and runs the emptiness check again, in one transaction.
 //! - A marker that a replay which never finished left behind is cleaned
-//!   the same way, but only when no other role owns anything in scratch.
+//!   the same way, but only when no other role owns anything in scratch and
+//!   no other session of the scratch role, which may still be that replay,
+//!   is connected.
 //! - Changes `DROP OWNED` cannot undo (database and role settings, grants
 //!   and comments on the database, a password, objects given to another
 //!   role) are refused before the migration that made them commits.
@@ -29,6 +34,12 @@ use std::time::Duration;
 /// target's migrator lock uses the same first key with 245.
 const LOCK: &str = "SELECT pg_catalog.pg_advisory_lock(1853124212, 430)";
 const UNLOCK: &str = "SELECT pg_catalog.pg_advisory_unlock(1853124212, 430)";
+/// Whether this session still holds the replay lock: a migration can
+/// release it (`pg_advisory_unlock_all()`).
+const HOLDS_LOCK: &str = "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l WHERE l.locktype='advisory' AND l.classid=1853124212 AND l.objid=430 AND l.objsubid=2 AND l.pid=pg_catalog.pg_backend_pid() AND l.granted)";
+/// Whether another session of the scratch role is connected to scratch. A
+/// replay whose migration released the replay lock may still be running.
+const OTHER_SESSIONS: &str = "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a WHERE a.datname=pg_catalog.current_database() AND a.usename=session_user AND a.backend_type='client backend' AND a.pid<>pg_catalog.pg_backend_pid())";
 
 /// The marker's schema and table. Its one row names the replay and holds
 /// the state `public` had before the first migration, which cleanup
@@ -155,6 +166,17 @@ WHERE s.refclassid='pg_catalog.pg_authid'::pg_catalog.regclass AND s.refobjid=(S
  AND NOT (s.dbid<>0 AND s.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND s.objid=$1)
  AND NOT (s.dbid<>0 AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
    WHERE d.classid=s.classid AND d.objid=s.objid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extowner=(SELECT oid FROM me)))
+ORDER BY 1 LIMIT 101"#;
+
+/// What the scratch role owns in scratch, other than `public` ($1), by
+/// name: what cleanup's `DROP OWNED` would drop. Before the marker this must
+/// be nothing, so that cleanup only drops what replay created; the
+/// emptiness check does not see large objects or publications, say.
+const OWNED_OBJECTS: &str = r#"SELECT pg_catalog.pg_describe_object(s.classid, s.objid, s.objsubid) FROM pg_catalog.pg_shdepend s
+WHERE s.deptype='o' AND s.refclassid='pg_catalog.pg_authid'::pg_catalog.regclass
+ AND s.refobjid=(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=session_user)
+ AND s.dbid=(SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database())
+ AND NOT (s.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND s.objid=$1)
 ORDER BY 1 LIMIT 101"#;
 
 /// What outlives a scratch database's objects and the scratch role could
@@ -388,9 +410,9 @@ impl Postgres {
     }
 
     /// Right after `migration` ran on scratch, before it is inspected and
-    /// commits: it must leave the session as the scratch role, NTNT's marker
-    /// as it was, the role and databases as they were, and nothing owned by
-    /// another role.
+    /// commits: it must leave the session as the scratch role and holding
+    /// the replay lock, NTNT's marker as it was, the role and databases as
+    /// they were, and nothing owned by another role.
     pub(super) async fn refuse_lasting_effects(
         &self,
         migration: &Migration,
@@ -401,6 +423,13 @@ impl Postgres {
             d.source = Some(migration.name.clone());
             d
         };
+        if !self.rows(HOLDS_LOCK, &[]).await?[0].get::<_, bool>(0) {
+            return Err(attributed(
+                "DB_REPLAY_UNSUPPORTED",
+                "Replaying this migration released NTNT's replay lock on scratch (pg_advisory_unlock_all() or pg_advisory_unlock(1853124212, 430)), so another plan, status or verify could replay there at the same time. On the target it would release NTNT's migrator lock the same way. Release only the advisory locks the migration takes itself.",
+                vec![],
+            ));
+        }
         let acting: Option<String> = self
             .rows(
                 "SELECT CASE WHEN current_user<>session_user THEN current_user::text END",
@@ -485,9 +514,19 @@ impl Postgres {
 
     /// What prepare must record before the first migration: `public`, and
     /// what `refuse_lasting_effects` compares: the shared state and the
-    /// objects of other roles scratch already holds.
+    /// objects of other roles scratch already holds. Anything the scratch
+    /// role already owns but `public` is refused (`OWNED_OBJECTS`).
     pub(super) async fn scratch_baseline(&self) -> Result<(PublicState, String, Vec<String>)> {
         let public = self.public_state().await?.ok_or_else(not_empty)?;
+        let owned: Vec<String> = self
+            .rows(OWNED_OBJECTS, &[&public.oid])
+            .await?
+            .iter()
+            .map(|r| r.get::<_, Option<String>>(0).unwrap_or_default())
+            .collect();
+        if !owned.is_empty() {
+            return Err(not_empty().with_objects(&owned));
+        }
         let shared: String = self.rows(SHARED_STATE, &[]).await?[0].get(0);
         let foreign = self.foreign_objects(public.oid).await?;
         Ok((public, shared, foreign))
@@ -502,12 +541,21 @@ impl Postgres {
     }
 
     /// A replay that never finished left its marker: clean scratch up when
-    /// nothing in it has another owner, inside the caller's transaction,
-    /// and say so. Without the marker scratch is never cleaned.
+    /// nothing in it has another owner and no other session of the scratch
+    /// role is connected, inside the caller's transaction, and say so.
+    /// Without the marker scratch is never cleaned.
     pub(super) async fn recover_leftovers(&self) -> Result<Option<Value>> {
         let Some(marker) = self.read_marker().await? else {
             return Ok(None);
         };
+        // The lock no longer says whether that replay still runs: one of its
+        // migrations may have released it. Its session would still be here.
+        if self.rows(OTHER_SESSIONS, &[]).await?[0].get::<_, bool>(0) {
+            return Err(Diagnostic::new(
+                "DB_SCRATCH_BUSY",
+                &format!("Scratch holds NTNT's marker of replay {}, started {}, and another session of the scratch role is still connected to scratch, so that replay may still be running. Nothing in scratch was changed.", marker.id, marker.started_at),
+            ));
+        }
         let foreign = self.foreign_objects(marker.public.oid).await?;
         if !foreign.is_empty() {
             return Err(not_empty().with_objects(&foreign));

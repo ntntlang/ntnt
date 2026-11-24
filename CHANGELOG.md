@@ -35,13 +35,18 @@
   `DB_SCRATCH_NOT_EMPTY` as before (#430).
 - `ntnt db` (PostgreSQL): plans, statuses and verifies on one scratch database
   are serialized by an advisory lock; a second one waits up to
-  `migrator_wait_seconds`, then fails with `DB_SCRATCH_BUSY` (#430).
+  `migrator_wait_seconds`, then fails with `DB_SCRATCH_BUSY`. A migration that
+  releases that lock is refused, and a killed replay's leftovers are not cleaned
+  up while another session of the scratch role is connected (`DB_SCRATCH_BUSY`)
+  (#430).
 - `ntnt db` (PostgreSQL): replay refuses, before they commit, changes cleanup
   cannot undo: database and role settings, database-level grants, comments and
   connection limits, passwords, objects given to another role and a session
   left as another role (`DB_REPLAY_UNSUPPORTED`). Scratch now also requires
   that its role hold no privileges on objects it does not own, other than on
-  `public`, and `track_counts` on (`DB_SCRATCH_UNSAFE`) (#430).
+  `public`, and `track_counts` on (`DB_SCRATCH_UNSAFE`), and that it own nothing
+  in scratch but `public` before replay, such as a large object or a
+  publication (`DB_SCRATCH_NOT_EMPTY`) (#430).
 - `ntnt db` (PostgreSQL): `capabilities.operations.transactional_script_replay`
   is now `per_migration_commits_on_scratch` (was `rollback_only_scratch`).
   Capabilities feed no digest, so saved plans, plan digests and fingerprints of
