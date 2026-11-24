@@ -27,6 +27,33 @@
   composite's attribute) whose constraint calls one or a volatile function,
   and a view that converts values to such a domain or uses such an operator
   (#430).
+- `ntnt db` (PostgreSQL): a check that compares a column with an operator
+  the application would resolve differently, such as `email = 'a@b'` on a
+  `citext` column (checks resolve operators with `search_path=pg_catalog`, so
+  it compared case-sensitive text and could pass where the application's
+  comparison fails), is refused with `DB_CHECK_UNSUPPORTED` naming the check,
+  table, column, type and operator before any check runs, and `plan` lists it
+  in `plan.check_warnings` (#456).
+- `ntnt db` (PostgreSQL): a check that reads a view calling a builtin that
+  writes or takes locks (`nextval`, `setval`, advisory locks and the other
+  builtins PostgreSQL marks parallel unsafe) is refused with
+  `DB_CHECK_UNSUPPORTED` naming the check, view and function before it runs;
+  `random()`, `clock_timestamp()` and `gen_random_uuid()` stay allowed (#456).
+- `ntnt db` (PostgreSQL): a statement that uses an enum value added by
+  `ALTER TYPE ... ADD VALUE` in the same transaction fails with
+  `DB_ENUM_VALUE_UNCOMMITTED` naming the migration and statements, in replay
+  and in `migrate`, instead of an opaque `DB_POSTGRES` SQLSTATE 55P04 (#456).
+
+### Changed
+
+- `ntnt db` (PostgreSQL): the `capabilities.inspection` keys of the JSON
+  reports changed, with `format_version` still 1:
+  `custom_types_external_dependencies_non_sql_routines` (`unknown`) is
+  replaced by `enums_domains_composite_types_operators_exclusion_constraints`
+  (`definition_fingerprints`) and
+  `range_and_base_types_external_dependencies_non_sql_routines` (`unknown`),
+  and `managed_schema_extensions` changed from `version` to
+  `version_covers_members` (#430).
 
 ## 0.6.4
 
