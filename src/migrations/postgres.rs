@@ -52,6 +52,35 @@ fn driver_error(e: &tokio_postgres::Error) -> Diagnostic {
         ),
     }
 }
+/// SQLSTATE 55P04: a statement used an enum value that `ALTER TYPE ... ADD
+/// VALUE` added in the same transaction. Names the statement from the
+/// error's position, when PostgreSQL gives one, and the statements of
+/// `script` that add enum values; the server's text is not shown.
+fn new_enum_value(e: &tokio_postgres::Error, script: &str) -> Diagnostic {
+    let statement = e
+        .as_db_error()
+        .and_then(|db| match db.position() {
+            Some(tokio_postgres::error::ErrorPosition::Original(at)) => Some(*at as usize),
+            _ => None,
+        })
+        .and_then(|at| super::analysis::statement_at(script, at));
+    let uses = statement.map_or("A statement".to_owned(), |n| format!("Statement {n}"));
+    let added = match super::analysis::enum_value_additions(script).as_slice() {
+        [] => String::new(),
+        [n] => format!(" This migration adds an enum value in statement {n}."),
+        many => format!(
+            " This migration adds enum values in statements {}.",
+            many.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    Diagnostic::new(
+        "DB_ENUM_VALUE_UNCOMMITTED",
+        &format!("{uses} uses an enum value that ALTER TYPE ... ADD VALUE added in the same transaction (SQLSTATE 55P04).{added} PostgreSQL cannot use an enum value in the transaction that added it."),
+    )
+}
 fn deadline_error() -> Diagnostic {
     Diagnostic::new(
         "DB_TIMEOUT",
@@ -1291,11 +1320,19 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         ))
         .await?;
         // Do not split on semicolons: PostgreSQL receives the captured full script.
-        bounded_for(
+        match tokio::time::timeout(
             limit + SERVER_LIMIT_MARGIN,
             self.client.batch_execute(script),
         )
         .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) if e.code().map(|c| c.code()) == Some("55P04") => {
+                Err(new_enum_value(&e, script))
+            }
+            Ok(Err(e)) => Err(driver_error(&e)),
+            Err(_) => Err(deadline_error()),
+        }
         .map_err(|mut d| {
             d.source = Some(migration.name.clone());
             d

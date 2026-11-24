@@ -2366,6 +2366,56 @@ pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
     out
 }
 
+/// The number of the statement of `sql` (as `statements` counts them) that
+/// holds 1-based character `position`, which is how PostgreSQL reports
+/// where in a script an error is.
+pub(crate) fn statement_at(sql: &str, position: usize) -> Option<usize> {
+    use sqlparser::tokenizer::Token;
+    // The tokenizer reports lines and columns, counted in characters.
+    let (mut line, mut column) = (1u64, 1u64);
+    for c in sql.chars().take(position.checked_sub(1)?) {
+        if c == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    statements(sql)?
+        .iter()
+        .enumerate()
+        .filter(|(_, tokens)| {
+            tokens.iter().any(|t| {
+                !matches!(t.token, Token::Whitespace(_))
+                    && (t.span.start.line, t.span.start.column) <= (line, column)
+            })
+        })
+        .map(|(index, _)| index + 1)
+        .last()
+}
+
+/// The statements of `sql` that add a value to an enum
+/// (`ALTER TYPE ... ADD VALUE`), by number.
+pub(crate) fn enum_value_additions(sql: &str) -> Vec<usize> {
+    use sqlparser::tokenizer::Token;
+    statements(sql)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .filter(|(_, tokens)| {
+            let t: Vec<&Token> = tokens
+                .iter()
+                .map(|t| &t.token)
+                .filter(|t| !matches!(t, Token::Whitespace(_)))
+                .collect();
+            keyword(t.first(), "ALTER")
+                && keyword(t.get(1), "TYPE")
+                && (2..t.len()).any(|i| keyword(t.get(i), "ADD") && keyword(t.get(i + 1), "VALUE"))
+        })
+        .map(|(index, _)| index + 1)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2420,6 +2470,20 @@ mod tests {
         }
     }
 
+    /// #456: PostgreSQL's error position names the statement it is in;
+    /// `ALTER TYPE ... ADD VALUE` statements are found by number.
+    #[test]
+    fn statements_are_found_by_position_and_by_added_enum_values() {
+        let sql = "-- seed\nALTER TYPE app.s ADD VALUE 'c';\nALTER TABLE app.t ALTER COLUMN s SET DEFAULT 'c'; SELECT 'c'::app.s;\nALTER TYPE app.s ADD VALUE IF NOT EXISTS 'd' AFTER 'c'; ALTER TYPE app.s RENAME VALUE 'a' TO 'b'";
+        assert_eq!(enum_value_additions(sql), [1, 4]);
+        let at = |needle: &str| sql.find(needle).unwrap() + 1;
+        assert_eq!(statement_at(sql, 1), None);
+        assert_eq!(statement_at(sql, at("ALTER TYPE")), Some(1));
+        assert_eq!(statement_at(sql, at("'c'; SELECT")), Some(2));
+        assert_eq!(statement_at(sql, at("'c'::app.s")), Some(3));
+        assert_eq!(statement_at(sql, at("RENAME")), Some(5));
+        assert!(enum_value_additions("ALTER TABLE app.t ADD VALUE int").is_empty());
+    }
     /// #456 review: a check cannot convert a value to a type by name, so it
     /// never converts one to a domain itself (`check_purity` relies on that).
     #[test]
