@@ -2,7 +2,19 @@
 
 ## Unreleased
 
-No changes recorded since 0.6.4.
+### Fixed
+
+- `ntnt db` (PostgreSQL): a `requires`, `ensures` or adoption check that reads a
+  table whose row-level security applies to the migration role, such as one with
+  `FORCE ROW LEVEL SECURITY`, is listed in `plan.check_warnings`
+  (`CHECK_ROW_SECURITY`), and `migrate` refuses it with `DB_CHECK_ROW_SECURITY`,
+  naming the check, its phase and the table, and saying the role needs
+  `BYPASSRLS`. It used to fail with a bare SQLSTATE 42501 after `plan` passed
+  (#430).
+- `ntnt db` (PostgreSQL): creating an untrusted extension such as `postgres_fdw`
+  fails with `DB_EXTENSION_PRIVILEGE`, naming the statement and the extension and
+  explaining that roles that are not superusers can create only trusted
+  extensions. It used to fail with a bare SQLSTATE 42501 (#430).
 
 ## 0.6.4
 

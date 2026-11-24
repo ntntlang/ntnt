@@ -474,6 +474,40 @@ Not supported: arbitrary functions/routines, casts, aliases/joins, SELECT INTO, 
 
 `ensures` are transition checks, not permanent invariants: `verify` does not re-execute historical postconditions. Use database constraints for lasting concurrency/future-write enforcement and ordinary native/Intent tests for business behavior. Intent IDs remain traceability, not proof. The SQLite-only `sqlite_rebuild` field below is the sole supported adapter-mode metadata. Other execution/transaction modes remain rejected.
 
+### Checks and row-level security
+
+PostgreSQL checks read with `row_security=off`, as inspection does, so that no
+row-level security policy can silently filter what a check sees. PostgreSQL then
+refuses a read that a policy would affect (SQLSTATE 42501) instead of filtering
+it. A check therefore cannot read a table where row-level security applies to the
+migration role: one with `FORCE ROW LEVEL SECURITY`, which applies its policies to
+its owner too, or one with row-level security that the role does not own. A view
+the role owns reads its tables as the role, so the same holds for tables a check
+reads through such a view. The unprivileged owner role this guide uses does not
+bypass row-level security; a role with `BYPASSRLS`, or a superuser, does.
+
+`plan` looks for such checks at the state each will run in (pending migrations'
+`requires` and `ensures`, or the `adoption_checks` of an adoption plan) and lists
+them in `plan.check_warnings`, with code `CHECK_ROW_SECURITY`, the migration
+(`source`, `manifest` for adoption checks), `phase`, `check` and `relation`. The
+human plan prints each under its migration:
+
+```text
+Pending "0001_tenants.sql" (...): hazards [...]; unknowns [...]
+  Warning "CHECK_ROW_SECURITY" on "app.tenants" ("ensures" check "slugs_present"): "Check slugs_present ([ensures]) reads app.tenants (FORCE ROW LEVEL SECURITY), where row-level security applies to the migration role, ..."
+```
+
+The warning does not block the plan. `migrate` tests each check with PostgreSQL's
+`row_security_active()` before running it and refuses one that would read such a
+table with `DB_CHECK_ROW_SECURITY`, naming the check, its phase and each table
+(`objects` holds their catalog keys). The check does not run and its migration's
+transaction rolls back. To run the check, have a superuser give the migration role
+`BYPASSRLS` (`ALTER ROLE app_owner BYPASSRLS`), then plan, review and approve
+again: the role's attributes are part of the plan's target binding. The scratch
+role may then have `BYPASSRLS` too. Otherwise, change the check so that it reads
+no such table. A plan without such checks has no `check_warnings`, so its digest
+is the one earlier releases computed.
+
 Files use `<positive-decimal-u64>_<ASCII-name>.sql`; names contain letters, digits, `_` or `-`. Ordering is numeric; `01` and `0001` are the same ID and cannot coexist. Gaps are allowed. Sidecars must have the exact SQL stem. The directory contains only SQL and matching TOML files, apart from entries it ignores: names that start with `.` (`.gitkeep`, `.DS_Store`, editor swap files and lock links, macOS `._` files) and `README` or `README.<ext>` with one extension (`README.md`, `readme.txt`) in any letter case. Ignored entries are never read and are not part of a plan's identity. Every other entry, `*.SQL` files and editor backups such as `0001_initial.sql~` included, is refused by name. Orphan sidecars, duplicate IDs, invalid UTF-8, unsafe paths, symlinks, hard links, directories in place of files and nonregular inputs are rejected.
 
 Each refusal names the entry relative to the project, in its message and `source`
@@ -537,7 +571,7 @@ PostgreSQL scratch must:
 
 Identity discovery uses `pg_control_system()` and catalog metadata. Missing permission to establish identity fails closed. Server administrators and the PostgreSQL installation are trusted; this is not protection against a hostile superuser modifying PostgreSQL's own catalogs or concurrent administrators changing scratch after validation. Use an exclusively disposable fixture, preferably network-isolated. Restored/cloned clusters sharing identity can be conservatively rejected.
 
-Each migration runs with normal row-level security and ends as its own commit would: deferred constraints are checked and attributed to that migration, then `INITIALLY DEFERRED` constraints are restored for the next one. Inspection and checks still read with `row_security=off`.
+Each migration runs with normal row-level security and ends as its own commit would: deferred constraints are checked and attributed to that migration, then `INITIALLY DEFERRED` constraints are restored for the next one. Inspection and checks still read with `row_security=off`, so a check cannot read a table whose row-level security applies to the migration role, such as one with `FORCE ROW LEVEL SECURITY`, unless that role has `BYPASSRLS`. `plan` warns about such checks and `migrate` refuses them by name; see [Checks and row-level security](#checks-and-row-level-security).
 
 Replay owns a dedicated physical connection and a **rollback-only outer transaction**, not a pool handle. It creates the managed scratch schema only after isolation/emptiness checks, replays captured scripts through the native execution primitive, captures the applied-prefix/candidate catalogs, and explicitly rolls back. Success and failure tests verify no scratch schema survives. The authorized per-migration executor reuses that exact captured-SQL primitive. Catalog derivation deliberately skips transition contracts: an empty replay cannot establish data-dependent production assertions. Fresh/populated native rehearsal tests invoke the same `migrate` executor on disposable fixtures with representative rows; they are not a second application-level runner or a claim about production data.
 
@@ -578,6 +612,32 @@ Pending "0002_outside.sql" (...): hazards ["AUTHORIZATION_CHANGE",...,"OUTSIDE_M
 ```
 
 These are review prompts like the other hazards: the plan stays `requires_review`, `migrate` runs the statements as written, and an applied migration is not flagged again. Statements that only read or write rows, unqualified names and text inside `DO` or function bodies (quoted or `BEGIN ATOMIC ... END`) are not flagged; statements on `_ntnt` and system schemas are refused instead. A plan saved by an earlier build whose pending migrations are flagged no longer matches its migrations' analysis; plan it again.
+
+### Extensions
+
+A migration may create an extension, for example
+`CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA app`. Replay runs it as the scratch
+role and `migrate` as the target role, and neither is a superuser. PostgreSQL lets
+a role that is not a superuser create only **trusted** extensions (the `trusted`
+column of `pg_available_extension_versions`; `pg_trgm`, `citext`, `hstore`,
+`pgcrypto`, `uuid-ossp` and `btree_gist` are some), and only with `CREATE`
+privilege on the database, which its owner has. An **untrusted** extension, such as
+`postgres_fdw`, `dblink`, `file_fdw` or `pg_stat_statements`, needs a superuser.
+Creating one fails with `DB_EXTENSION_PRIVILEGE` instead of a bare SQLSTATE 42501.
+The diagnostic names each `CREATE EXTENSION` statement and extension that the
+refusal explains (an extension created in a `DO` block, or installed by `CASCADE`
+as a requirement, is explained without a name), and says what to do. An
+extension's objects must also stay within
+[inspection coverage](#inspection-coverage-and-drift).
+
+NTNT does not yet support an extension that a superuser must install. Installing
+one out of band does not help today: on the target, an extension outside the
+managed scope is reported in `catalog.uncovered` (`DB_COVERAGE_INCOMPLETE`), one in
+the managed schema of a target without a ledger makes `status` report
+`DB_UNRECOGNIZED_HISTORY`, and scratch may hold no extension but `plpgsql`
+(`DB_SCRATCH_NOT_EMPTY`). Use a trusted extension where one serves, or keep the
+untrusted extension out of the databases NTNT manages. #430 tracks support for
+extensions that a superuser installs in both the target and scratch.
 
 ### Concurrent index builds
 

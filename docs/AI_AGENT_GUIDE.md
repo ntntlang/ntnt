@@ -1741,6 +1741,13 @@ and zero executed SQL assertions is `not_run`, not a business-verification pass.
 replaying a migration produced them, names that migration in `source`. SQLite
 covers partial and expression indexes by definition, like PostgreSQL.
 Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
+On PostgreSQL, checks read with `row_security=off`: `plan.check_warnings`
+(`CHECK_ROW_SECURITY`) lists checks that would read a `FORCE ROW LEVEL SECURITY`
+table as a migration role without `BYPASSRLS`, which `migrate` refuses with
+`DB_CHECK_ROW_SECURITY`. Migrations can create only trusted extensions; an
+untrusted one such as `postgres_fdw` fails with `DB_EXTENSION_PRIVILEGE`. See
+[Checks and row-level security](DATABASE_MIGRATIONS.md#checks-and-row-level-security)
+and [Extensions](DATABASE_MIGRATIONS.md#extensions).
 
 `ntnt db migrate --database app --target development --plan review.json --json`
 (and `ntnt db reconcile` with the same plan after an interrupted
