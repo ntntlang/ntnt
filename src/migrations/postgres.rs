@@ -146,12 +146,18 @@ pub(crate) trait RelationalAdapter {
 /// relation's catalog key and why, for the first 20. `walk` follows each
 /// column's type, starting at its top level (`runs` false: comparing with a
 /// literal converts it to a domain's base type), and each type a view's
-/// rules convert to (`runs` true). Below an array's elements, a range's
+/// rules convert to (`runs` true): the types they depend on, and the
+/// `RETURNING` types of SQL/JSON expressions, which no dependency records. Below an array's elements, a range's
 /// bounds or a composite's attributes, a type's input runs (`runs` true), and
 /// then a domain's constraints run, and so do those of the types they
 /// convert to. pg_depend never records a builtin (pinned) function, so what
 /// a domain's constraint calls is read from its stored expression; an
-/// operator is followed to its function. A top-level composite is counted
+/// operator is followed to its function, and to its negator's and
+/// commutator's, which the planner may use instead. A view that calls a
+/// builtin converting values to a type given at run time
+/// (`pg_input_is_valid`, `json_populate_record`, a type's input function)
+/// counts while some domain's constraints call such code, since no
+/// dependency says which type it reaches. A top-level composite is counted
 /// too, though PostgreSQL 16-18 reject a literal compared with one (as an
 /// anonymous record) before any input runs. "The history wrote" means
 /// outside `pg_catalog` and not installed by an extension in the scope.
@@ -167,6 +173,10 @@ walk(rel, col, top, typ, runs) AS (
    UNION ALL
    SELECT r.ev_class, NULL, d.refobjid, d.refobjid, true FROM pg_catalog.pg_rewrite r
     JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_type'::pg_catalog.regclass
+    WHERE r.ev_class IN (SELECT rel FROM reach)
+   UNION ALL
+   SELECT r.ev_class, NULL, m[1]::oid, m[1]::oid, true FROM pg_catalog.pg_rewrite r
+    CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':typid (\d+)', 'g') m
     WHERE r.ev_class IN (SELECT rel FROM reach))
   UNION
   SELECT w.rel, w.col, w.top, x.typ, w.runs OR x.below FROM walk w JOIN pg_catalog.pg_type t ON t.oid=w.typ
@@ -179,31 +189,60 @@ walk(rel, col, top, typ, runs) AS (
     UNION ALL SELECT d.refobjid, true FROM pg_catalog.pg_constraint k
      JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_type'::pg_catalog.regclass
      WHERE w.runs AND k.contypid=t.oid) x(typ, below)),
+-- Operators a view's rules or a domain's constraints use, with the
+-- negators and commutators the planner may put in their place.
+used(kind, owner, root, op) AS (
+  (SELECT 'v', r.ev_class, d.refobjid, d.refobjid FROM pg_catalog.pg_rewrite r
+    JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
+    WHERE r.ev_class IN (SELECT rel FROM reach)
+   UNION ALL
+   SELECT 'd', k.contypid, d.refobjid, d.refobjid FROM pg_catalog.pg_constraint k
+    JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
+    WHERE k.contypid<>0)
+  UNION
+  SELECT u.kind, u.owner, u.root, x.op FROM used u JOIN pg_catalog.pg_operator o ON o.oid=u.op
+  CROSS JOIN LATERAL (VALUES (o.oprnegate), (o.oprcom)) x(op) WHERE x.op<>0),
+-- What each domain's constraints call. pg_depend records no builtin
+-- function, so calls are read from the stored expression.
 calls(dom, fn) AS (
   SELECT k.contypid, m[1]::oid FROM pg_catalog.pg_constraint k CROSS JOIN LATERAL pg_catalog.regexp_matches(k.conbin::text, ':(?:funcid|opfuncid) (\d+)', 'g') m WHERE k.contypid<>0
   UNION ALL
-  SELECT k.contypid, o.oprcode FROM pg_catalog.pg_constraint k
-   JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
-   JOIN pg_catalog.pg_operator o ON o.oid=d.refobjid WHERE k.contypid<>0),
-found(rel, what, fn) AS (
-  SELECT w.rel, CASE WHEN w.col IS NULL THEN 'converts values to '||pg_catalog.format_type(w.top,NULL)||', which runs'
-    ELSE 'has column '||pg_catalog.quote_ident(w.col)||' of type '||pg_catalog.format_type(w.top,NULL)||', and converting a literal to that type runs' END
-    ||' the constraints of domain '||pg_catalog.format_type(w.typ,NULL)||', which call ', c.fn
-  FROM walk w JOIN pg_catalog.pg_type t ON t.oid=w.typ AND t.typtype='d' JOIN calls c ON c.dom=t.oid WHERE w.runs
-  UNION ALL
-  SELECT r.ev_class, 'uses operator '||o.oid::pg_catalog.regoperator::text||', whose function is ', o.oprcode FROM pg_catalog.pg_rewrite r
-   JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
-   JOIN pg_catalog.pg_operator o ON o.oid=d.refobjid WHERE r.ev_class IN (SELECT rel FROM reach)),
-named(rel, what, fn, volatile, authored) AS (
-  SELECT f.rel, f.what, p.oid, p.provolatile='v', pn.nspname<>'pg_catalog' AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend e JOIN pg_catalog.pg_extension x ON x.oid=e.refobjid
+  SELECT u.owner, o.oprcode FROM used u JOIN pg_catalog.pg_operator o ON o.oid=u.op WHERE u.kind='d'),
+-- A routine the history wrote (outside pg_catalog, not an extension's in
+-- the scope) or a volatile function.
+unsafe(fn, why) AS (
+  SELECT p.oid, CASE WHEN pn.nspname<>'pg_catalog' AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend e JOIN pg_catalog.pg_extension x ON x.oid=e.refobjid
     JOIN pg_catalog.pg_namespace xn ON xn.oid=x.extnamespace WHERE e.classid='pg_catalog.pg_proc'::pg_catalog.regclass AND e.objid=p.oid
     AND e.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND e.deptype='e' AND xn.nspname=ANY($2))
-  FROM found f JOIN pg_catalog.pg_proc p ON p.oid=f.fn JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace WHERE p.provolatile='v' OR pn.nspname<>'pg_catalog')
+    THEN ' (a routine the history wrote)' WHEN p.provolatile='v' THEN ' (a volatile function)' END
+  FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
+  WHERE p.oid IN (SELECT fn FROM calls UNION SELECT o.oprcode FROM used u JOIN pg_catalog.pg_operator o ON o.oid=u.op)),
+-- Builtins that convert values to a type given at run time (by name, as an
+-- OID or as a record argument), which no dependency records: they can reach
+-- any domain, so they count while some domain's constraints call one of
+-- the functions above.
+dynamic(fn) AS (
+  SELECT p.oid FROM pg_catalog.pg_proc p WHERE p.pronamespace='pg_catalog'::pg_catalog.regnamespace
+  AND p.proname=ANY('{pg_input_is_valid,pg_input_error_info,json_populate_record,json_populate_recordset,jsonb_populate_record,jsonb_populate_recordset,jsonb_populate_record_valid,record_in,record_recv,domain_in,domain_recv,array_in,array_recv,range_in,range_recv,multirange_in,multirange_recv}'::text[])
+  AND EXISTS(SELECT 1 FROM calls c JOIN unsafe u ON u.fn=c.fn WHERE u.why IS NOT NULL)),
+why(fn, txt) AS (
+  SELECT fn, fn::pg_catalog.regprocedure::text||why FROM unsafe WHERE why IS NOT NULL
+  UNION ALL
+  SELECT fn, fn::pg_catalog.regprocedure::text||' (which converts values to a type given at run time, while domain constraints here call such functions)' FROM dynamic),
+found(rel, what) AS (
+  SELECT w.rel, CASE WHEN w.col IS NULL THEN 'converts values to '||pg_catalog.format_type(w.top,NULL)||', which runs'
+    ELSE 'has column '||pg_catalog.quote_ident(w.col)||' of type '||pg_catalog.format_type(w.top,NULL)||', and converting a literal to that type runs' END
+    ||' the constraints of domain '||pg_catalog.format_type(w.typ,NULL)||', which call '||y.txt
+  FROM walk w JOIN pg_catalog.pg_type t ON t.oid=w.typ AND t.typtype='d' JOIN calls c ON c.dom=t.oid JOIN why y ON y.fn=c.fn WHERE w.runs
+  UNION ALL
+  SELECT u.owner, 'uses operator '||u.root::pg_catalog.regoperator::text||CASE WHEN u.op<>u.root THEN ', which the planner may replace with '||u.op::pg_catalog.regoperator::text ELSE '' END
+    ||', whose function is '||y.txt FROM used u JOIN pg_catalog.pg_operator o ON o.oid=u.op JOIN why y ON y.fn=o.oprcode WHERE u.kind='v'
+  UNION ALL
+  SELECT r.ev_class, 'calls '||y.txt FROM pg_catalog.pg_rewrite r CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':(?:funcid|opfuncid) (\d+)', 'g') m
+   JOIN dynamic d ON d.fn=m[1]::oid JOIN why y ON y.fn=d.fn WHERE r.ev_class IN (SELECT rel FROM reach))
 SELECT DISTINCT CASE WHEN rn.nspname=$1 THEN '' ELSE pg_catalog.quote_ident(rn.nspname)||'.' END||'relation:'||rc.relname,
-  CASE WHEN rc.relkind='v' THEN 'view ' ELSE 'table ' END||pg_catalog.quote_ident(rn.nspname)||'.'||pg_catalog.quote_ident(rc.relname)||' '||n.what
-  ||n.fn::pg_catalog.regprocedure::text||CASE WHEN n.authored THEN ' (a routine the history wrote)' ELSE ' (a volatile function)' END
-FROM named n JOIN pg_catalog.pg_class rc ON rc.oid=n.rel JOIN pg_catalog.pg_namespace rn ON rn.oid=rc.relnamespace
-WHERE n.authored OR n.volatile
+  CASE WHEN rc.relkind='v' THEN 'view ' ELSE 'table ' END||pg_catalog.quote_ident(rn.nspname)||'.'||pg_catalog.quote_ident(rc.relname)||' '||f.what
+FROM found f JOIN pg_catalog.pg_class rc ON rc.oid=f.rel JOIN pg_catalog.pg_namespace rn ON rn.oid=rc.relnamespace
 ORDER BY 1, 2 LIMIT 20"#;
 
 impl Postgres {
