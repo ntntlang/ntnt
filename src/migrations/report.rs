@@ -6,7 +6,7 @@ use super::model::{Catalog, History, HistoryEntry};
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
-/// A scratch replay's result and its rollback's, combined: a failed replay
+/// A scratch replay's result and its cleanup's, combined: a failed replay
 /// stays the reported cause, and a cleanup that also failed comes back
 /// separately to be reported after it, never instead of it.
 fn replay_outcome(work: Result<()>, cleanup: Result<()>) -> (Result<()>, Option<Diagnostic>) {
@@ -562,7 +562,9 @@ struct Replayed {
 /// that made it. Each state is inspected once and fingerprinted only for a
 /// plan; the catalog itself is kept only at `reference` and, for a plan, at
 /// the end. Each state's inspection includes the objects the history has
-/// created outside the managed scope by then, as replay finds them.
+/// created outside the managed scope by then, as replay finds them. On
+/// PostgreSQL each migration runs, is inspected and commits in its own
+/// transaction, as on the target; a state counts once it has committed.
 async fn replay_prefix(
     scratch: &Adapter,
     inputs: &CapturedInputs,
@@ -574,6 +576,7 @@ async fn replay_prefix(
     let mut digests = CatalogDigests::default();
     for index in 0..=count {
         let migration = index.checked_sub(1).map(|i| &inputs.migrations[i]);
+        scratch.begin_replay_step().await?;
         if let Some(migration) = migration {
             // Configured limits size work on the target's data. Replay
             // runs on an empty database and keeps the default limit. A
@@ -641,6 +644,7 @@ async fn replay_prefix(
             d.source = Some(migration.name.clone());
             return Err(d);
         }
+        scratch.finish_replay_step(migration).await?;
         replayed.fingerprints.extend(fingerprint);
         if index == reference {
             replayed.expected = catalog.clone();
@@ -835,9 +839,17 @@ async fn inspect_observed(
             .await?;
             let work = async {
                 let scratch_identity = scratch
-                    .prepare_scratch(&identity, &scratch_config.endpoint, &inputs.config.schema)
+                    .prepare_scratch(
+                        &identity,
+                        &scratch_config.endpoint,
+                        &inputs.config.schema,
+                        inputs.limits().migrator_wait(),
+                    )
                     .await?;
                 report["scratch"] = json!({"identity":scratch_identity,"disposable":true});
+                if let Some(recovered) = scratch.scratch_recovered() {
+                    report["scratch"]["recovered"] = recovered;
+                }
                 let count = if let Some(action) = &adoption {
                     action.count
                 } else if command == "plan" {
@@ -855,7 +867,7 @@ async fn inspect_observed(
                 .await
             }
             .await;
-            let cleanup = scratch.rollback().await;
+            let cleanup = scratch.cleanup_scratch().await;
             report["scratch"]["cleanup"] = json!(if cleanup.is_ok() { "pass" } else { "unknown" });
             if cleanup.is_err() {
                 replayed.expected = None;
@@ -1085,7 +1097,12 @@ mod tests {
         .await
         .unwrap();
         scratch
-            .prepare_scratch(&identity, scratch_endpoint, "main")
+            .prepare_scratch(
+                &identity,
+                scratch_endpoint,
+                "main",
+                std::time::Duration::from_secs(1),
+            )
             .await
             .unwrap();
         (identity, scratch)
@@ -1122,7 +1139,12 @@ mod tests {
             // status and verify replay the same states without fingerprinting them.
             let scratch_endpoint = &inputs.config.scratch.as_ref().unwrap().endpoint;
             scratch
-                .prepare_scratch(&identity, scratch_endpoint, "main")
+                .prepare_scratch(
+                    &identity,
+                    scratch_endpoint,
+                    "main",
+                    std::time::Duration::from_secs(1),
+                )
                 .await
                 .unwrap();
             let mut replayed = Replayed::default();
@@ -1383,7 +1405,12 @@ mod tests {
                     scratch.rollback().await.unwrap();
                     let scratch_endpoint = &inputs.config.scratch.as_ref().unwrap().endpoint;
                     scratch
-                        .prepare_scratch(&identity, scratch_endpoint, "main")
+                        .prepare_scratch(
+                            &identity,
+                            scratch_endpoint,
+                            "main",
+                            std::time::Duration::from_secs(1),
+                        )
                         .await
                         .unwrap();
                 }

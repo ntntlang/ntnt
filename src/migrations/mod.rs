@@ -50,10 +50,13 @@ impl Diagnostic {
             "DB_SQLITE_RECOVERY_REQUIRED" => "If a writer is active, wait for it to finish and retry inspection. Otherwise rerun migrate with the same approved plan to recover and reconcile under ownership; do not delete the journal or make inspection writable.",
             "DB_REFERENCE_UNAVAILABLE" => "Configure [databases.<name>.scratch] for the selected database with a distinct disposable database and secret, then rerun inspection.",
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
+            "DB_SCRATCH_BUSY" => "Another plan, status or verify is replaying on the same PostgreSQL scratch database. Rerun once it has finished, or raise migrator_wait_seconds in [databases.<name>.limits] to wait longer.",
+            "DB_SCRATCH_UNSAFE" => "Fix the scratch database or role as the message says: revoke the privileges its objects field names from the scratch role, or turn track_counts back on. Give scratch a dedicated unprivileged role that owns only the scratch database. Nothing was run.",
+            "DB_SCRATCH_CLEANUP" => "Rerun plan, status or verify: they clean up a scratch database that holds NTNT's replay marker (schema _ntnt_replay) when the scratch role owns everything in it. If that refuses with DB_SCRATCH_NOT_EMPTY, drop what the scratch database holds, or recreate it, as its administrator. The target was not changed.",
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and other non-transactional statements from migration files. The one supported non-transactional migration is a lone named CREATE INDEX CONCURRENTLY without checks.",
             "DB_COVERAGE_INCOMPLETE" => "Its objects field lists each catalog object outside supported inspection; when replaying a migration produced them, its source field names that migration (the target's own uncovered objects are also in catalog.uncovered). Change or remove those objects to stay within the coverage in docs/DATABASE_MIGRATIONS.md, or obtain manual evidence; do not interpret this result as no drift.",
             "DB_CATALOG_AMBIGUOUS" => "Two catalog objects share the key its objects field names, or catalog metadata was missing; when replaying a migration produced them, its source field names that migration. Rename one of the objects (or drop the one that is not needed), or obtain manual evidence; do not interpret this result as no drift.",
-            "DB_OUTSIDE_SCOPE" => "Remove the named statements from the migration that source names. The _ntnt schema holds NTNT's migration ledger, and pg_catalog, information_schema and the other pg_* schemas belong to PostgreSQL: migrations may not create, change, drop, grant or revoke on them, or put _ntnt on the search_path (pg_temp is allowed). Statements on other schemas, such as public, are allowed. See docs/DATABASE_MIGRATIONS.md#managed-scope.",
+            "DB_OUTSIDE_SCOPE" => "Remove the named statements from the migration that source names. The _ntnt schema holds NTNT's migration ledger, _ntnt_replay marks a replay in scratch, and pg_catalog, information_schema and the other pg_* schemas belong to PostgreSQL: migrations may not create, change, drop, grant or revoke on them, or put _ntnt on the search_path (pg_temp is allowed). Statements on other schemas, such as public, are allowed. See docs/DATABASE_MIGRATIONS.md#managed-scope.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
             "DB_TARGET_CHANGED" => "Another session changed the target while it was being inspected, for example a concurrent migrate. Rerun the command once that work has finished.",
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
@@ -776,8 +779,13 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     }
                 }
                 // Inspection keeps the default bounds: its replay runs on an
-                // empty scratch database, not the target's large tables.
-                let deadline = inventory::Limits::default().total_deadline();
+                // empty scratch database, not the target's large tables. On
+                // PostgreSQL it may first wait for another replay of the same
+                // scratch database (#430), up to the migrator wait.
+                let mut deadline = inventory::Limits::default().total_deadline();
+                if inputs.config.engine == "postgresql" {
+                    deadline += inputs.limits().migrator_wait();
+                }
                 database_runtime(deadline, report::inspect(inputs, command, adopt_through))
             })
             .unwrap_or_else(|d| report::failure(command, d))

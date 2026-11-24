@@ -9,6 +9,8 @@ use std::time::Duration;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::{Client, Config, NoTls, Row};
 
+mod scratch;
+
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Apply the per-exchange deadline and expose only SQLSTATE, never server error payloads.
 /// The owning adapter must discard its dedicated connection after cancellation/errors.
@@ -21,6 +23,10 @@ pub(crate) async fn bounded<T>(
 /// limit (see `inventory::Limits`); the client deadline sits this far above
 /// it, so PostgreSQL reports the timeout before the client gives up.
 const SERVER_LIMIT_MARGIN: Duration = Duration::from_secs(5);
+/// The settings of the transaction each migration runs in, on the target
+/// (`begin_migration`) and in scratch replay (`begin_replay_step`), after
+/// `synchronous_commit`.
+const MIGRATION_TRANSACTION: &str = "SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces=''; SET LOCAL lock_timeout='1s';";
 /// Transaction settings NTNT relies on while inspecting, replaying and
 /// executing. Reapplied after each migration's RESET ALL.
 const MIGRATION_SETTINGS: &str = "SET LOCAL synchronous_commit=on; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces=''; SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout=5000;";
@@ -70,13 +76,24 @@ pub(crate) struct Postgres {
     transport: Value,
     /// Set once `prepare_scratch` validated this session as scratch.
     scratch: std::sync::OnceLock<Box<ScratchScope>>,
+    /// What a scratch session's replay set up (see `scratch`), boxed so
+    /// that `Adapter`'s variants stay alike in size.
+    replay: Box<scratch::Replay>,
 }
 /// What a prepared scratch database held outside system schemas: the
-/// managed schema and `public`. Objects that appear outside the managed
-/// scope later are the replayed history's (`outside_objects`).
+/// managed schema, `public` and NTNT's replay marker. Objects that appear
+/// outside the managed scope later are the replayed history's
+/// (`outside_objects`).
 struct ScratchScope {
     /// The schemas scratch was prepared with; the history did not create them.
     schemas: Vec<String>,
+    /// The committed replay marker, as each replayed migration must leave it.
+    marker: scratch::Marker,
+    /// Shared state the scratch role could change (`scratch::SHARED_STATE`),
+    /// as each replayed migration must leave it.
+    shared: String,
+    /// A replay that never finished, whose leftovers prepare cleaned up.
+    recovered: Option<Value>,
 }
 /// The managed scope: the managed schema first, then the schemas the
 /// history creates.
@@ -99,7 +116,7 @@ fn protected_schema(migration: &Migration, message: &str, mut objects: Vec<Strin
     };
     let mut d = Diagnostic::new(
         "DB_OUTSIDE_SCOPE",
-        &format!("{message} The _ntnt schema holds NTNT's migration ledger, and the pg_* and information_schema schemas belong to PostgreSQL, so migrations may not act on them.{count}"),
+        &format!("{message} The _ntnt schema holds NTNT's migration ledger, _ntnt_replay marks a replay in scratch, and the pg_* and information_schema schemas belong to PostgreSQL, so migrations may not act on them.{count}"),
     )
     .with_objects(&objects);
     d.source = Some(migration.name.clone());
@@ -329,6 +346,7 @@ impl Postgres {
             task,
             transport,
             scratch: std::sync::OnceLock::new(),
+            replay: Box::default(),
         })
     }
     pub async fn batch(&self, sql: &str) -> Result<()> {
@@ -598,7 +616,10 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     /// within one second fails the attempt instead of queueing application
     /// queries behind it; the caller retries the whole transaction.
     pub async fn begin_migration(&self, _schema: &str) -> Result<()> {
-        self.batch("BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE; SET LOCAL synchronous_commit=on; SET LOCAL search_path=pg_catalog; SET LOCAL row_security=off; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces=''; SET LOCAL lock_timeout='1s';").await
+        self.batch(&format!(
+            "BEGIN ISOLATION LEVEL READ COMMITTED READ WRITE; SET LOCAL synchronous_commit=on; {MIGRATION_TRANSACTION}"
+        ))
+        .await
     }
 
     /// Tables read by a migration's checks are locked in SHARE mode before the
@@ -826,14 +847,20 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         Ok(())
     }
 
-    /// Validate isolation, compatible settings and restricted ownership before creating scope.
-    /// On success a rollback-only transaction remains open. The caller must roll back on
-    /// every success/error exit or discard the session; no reset/adoption is performed.
+    /// Validate isolation, compatible settings and restricted ownership, then
+    /// commit NTNT's replay marker and the managed schema (see `scratch`).
+    /// From the replay lock on, which waits up to `wait` for another replay
+    /// of this scratch database, the caller must end with `cleanup_scratch`
+    /// on every success/error exit, or discard the session. A marker that an
+    /// unfinished replay left is cleaned up first when nothing in scratch
+    /// has another owner (`scratch_recovered` says so); anything else
+    /// nonempty is refused, and never reset or adopted.
     pub async fn prepare_scratch(
         &self,
         target: &Identity,
         endpoint: &Endpoint,
         schema: &str,
+        wait: Duration,
     ) -> Result<Identity> {
         self.begin_readonly().await?;
         let identity = self.identity(endpoint).await?;
@@ -861,7 +888,51 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 r["role"] == target.role.as_str()
                     && (r["bypassrls"] == true || r["superuser"] == true)
             });
+        let _ = self.replay.bypass_rls.set(target_bypasses_rls);
+        // Two replays of one scratch database never interleave: the second
+        // waits here, before it reads what scratch holds.
+        self.lock_scratch(wait).await?;
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
+        // Cleaned up in this transaction, so a refusal below keeps the
+        // leftovers, and their marker, as they were.
+        let recovered = self.recover_leftovers().await?;
+        self.check_empty(target_bypasses_rls).await?;
+        let (public, shared) = self.scratch_baseline().await?;
+        self.check_cleanable(public.oid).await?;
+        self.create_marker(&public).await?;
+        // `public` already exists (and was just verified empty); any other
+        // managed schema is created and committed with the marker.
+        if schema != "public" {
+            self.batch(&format!("CREATE SCHEMA \"{schema}\";")).await?;
+        }
+        // Scratch holds nothing else, so whatever appears outside the managed
+        // scope from here on is the replayed history's (`outside_objects`).
+        // It has no _ntnt either: a replayed migration that creates one is
+        // refused (see execute_captured).
+        let schemas = self
+            .rows("SELECT n.nspname::text FROM pg_catalog.pg_namespace n WHERE n.nspname<>'information_schema' AND NOT starts_with(n.nspname,'pg_') ORDER BY 1", &[])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let marker = self.own_marker().await?;
+        self.batch("COMMIT").await?;
+        self.scratch
+            .set(Box::new(ScratchScope {
+                schemas,
+                marker,
+                shared,
+                recovered,
+            }))
+            .map_err(|_| {
+                Diagnostic::new("DB_SCRATCH_NOT_EMPTY", "Scratch was already prepared.")
+            })?;
+        Ok(identity)
+    }
+    /// The emptiness check of `prepare_scratch`, which cleanup runs again:
+    /// an unprivileged, non-member owner role (`bypass_rls` as the target's
+    /// role) and nothing but the empty stock `public` and system objects.
+    async fn check_empty(&self, bypass_rls: bool) -> Result<()> {
         let r=bounded(self.client.query_one(r#"
 SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $1))
  AND d.datdba=r.oid AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=r.oid)
@@ -873,44 +944,22 @@ SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication O
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public')
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public')
 FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user AND d.datname=pg_catalog.current_database()
-"#,&[&target_bypasses_rls])).await?;
+"#,&[&bypass_rls])).await?;
         if !r.get::<_, bool>(0) {
-            return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions or default grants."));
+            return Err(scratch::not_empty());
         }
-        let public = self.catalog("public", &[], &[], &endpoint.role).await?;
+        let public = self.catalog("public", &[], &[], "").await?;
         if public.objects.len() != 1
             || !public.objects.contains_key("schema:public")
             || !public.uncovered.is_empty()
         {
             return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch public namespace contains unsupported objects or cannot be fully inspected."));
         }
-        // `public` already exists (and was just verified empty); any other
-        // managed schema is created inside this rollback-only transaction.
-        let create = if schema == "public" {
-            String::new()
-        } else {
-            format!("CREATE SCHEMA \"{schema}\"; ")
-        };
-        self.batch(&format!(
-            "{create}SET LOCAL search_path=pg_catalog,\"{schema}\";"
-        ))
-        .await?;
-        // Scratch holds nothing else, so whatever appears outside the managed
-        // scope from here on is the replayed history's (`outside_objects`).
-        // It has no _ntnt either: a replayed migration that creates one is
-        // refused (see execute_captured).
-        let schemas = self
-            .rows("SELECT n.nspname::text FROM pg_catalog.pg_namespace n WHERE n.nspname<>'information_schema' AND NOT starts_with(n.nspname,'pg_') ORDER BY 1", &[])
-            .await?
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
-        self.scratch
-            .set(Box::new(ScratchScope { schemas }))
-            .map_err(|_| {
-                Diagnostic::new("DB_SCRATCH_NOT_EMPTY", "Scratch was already prepared.")
-            })?;
-        Ok(identity)
+        Ok(())
+    }
+    /// The replay whose leftovers `prepare_scratch` cleaned up, if any.
+    pub fn scratch_recovered(&self) -> Option<Value> {
+        self.scratch.get().and_then(|s| s.recovered.clone())
     }
     /// In a prepared scratch database: what the replayed history created
     /// outside the managed scope (`schema` and the `extra` schemas the history
@@ -1085,7 +1134,8 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     }
 
     /// Shared execution primitive: consumes captured bytes only, within a caller-
-    /// owned transaction. Replay and authorized migration use exactly this primitive.
+    /// owned transaction. Replay and authorized migration use exactly this
+    /// primitive, each migration in its own transaction that commits.
     /// `limit` bounds each statement and its deferred checks; the whole script
     /// gets `SERVER_LIMIT_MARGIN` more on the client. `extra` are the schemas
     /// the history creates, which belong to the managed scope.
@@ -1134,18 +1184,6 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
                 protected.into_iter().map(|(_, name)| name).collect(),
             ));
         }
-        // Replay runs several migrations in one transaction. If an earlier one
-        // ran here, constraint modes can only be restored when same-named
-        // constraints agree on their default: SET CONSTRAINTS name affects all.
-        let continues = self
-            .rows("SELECT coalesce(pg_catalog.current_setting('ntnt.migration_boundary', true), '') = 'on'", &[])
-            .await?[0]
-            .get::<_, bool>(0);
-        if continues && self.mixed_deferral().await? {
-            let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", "Constraints sharing a name in one schema have different INITIALLY DEFERRED defaults, so replay cannot reproduce this migration's fresh-transaction constraint modes. Give the constraints distinct names.");
-            d.source = Some(migration.name.clone());
-            return Err(d);
-        }
         // Migration SQL may call application routines; that is reviewed SQL.
         // A custom implicit/assignment cast planted elsewhere could instead run
         // unreviewed code during ordinary DDL coercion, so it still blocks.
@@ -1176,10 +1214,9 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             d.source = Some(migration.name.clone());
             d
         })?;
-        // End each migration as its own commit would: fire deferred constraint
-        // checks now, attributed to this migration. Replay runs many migrations
-        // in one transaction, and pending trigger events would otherwise block
-        // the next migration's ALTER TABLE.
+        // Fire deferred constraint checks now, attributed to this migration,
+        // rather than at the commit that follows it (on the target and in
+        // scratch replay alike).
         bounded_for(
             limit + SERVER_LIMIT_MARGIN,
             self.client.batch_execute("SET CONSTRAINTS ALL IMMEDIATE"),
@@ -1193,24 +1230,8 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         // its plain SETs would carry into the next migration's session. Drop
         // both here so every migration starts from the connection's settings,
         // in replay and on the target alike, then restore NTNT's own.
-        self.batch(&format!(
-            "RESET ALL; {MIGRATION_SETTINGS} SET LOCAL ntnt.migration_boundary='on';"
-        ))
-        .await?;
-        // PostgreSQL has no "reset to default" for constraint modes. Restore
-        // INITIALLY DEFERRED constraints so the next migration starts as a
-        // new transaction would. Names with mixed defaults are refused when
-        // the next migration starts (see above).
-        let deferred: Vec<String> = self
-            .rows("SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(k.conname) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace n ON n.oid=k.connamespace GROUP BY n.nspname,k.conname HAVING pg_catalog.bool_and(k.condeferred) ORDER BY 1", &[])
-            .await?
-            .iter()
-            .map(|r| r.get(0))
-            .collect();
-        if !deferred.is_empty() {
-            self.batch(&format!("SET CONSTRAINTS {} DEFERRED", deferred.join(",")))
-                .await?;
-        }
+        self.batch(&format!("RESET ALL; {MIGRATION_SETTINGS}"))
+            .await?;
         // Scratch was prepared without _ntnt. One a replayed migration created
         // (in a DO block, say) would let later statements that resolve there
         // replay while they act on the target's ledger.
@@ -1229,14 +1250,12 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
                 vec!["schema:_ntnt".into()],
             ));
         }
+        // The migration commits on scratch once it is inspected: refuse now
+        // what cleanup could not undo (see `scratch`).
+        if let Some(scope) = self.scratch.get() {
+            self.refuse_lasting_effects(migration, scope).await?;
+        }
         Ok(())
-    }
-
-    async fn mixed_deferral(&self) -> Result<bool> {
-        Ok(self
-            .rows("SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_constraint GROUP BY connamespace,conname HAVING pg_catalog.bool_or(condeferred) <> pg_catalog.bool_and(condeferred))", &[])
-            .await?[0]
-            .get(0))
     }
 }
 
@@ -1310,7 +1329,7 @@ fn canonical_roles(value: &mut Value, role: &str) {
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
-            "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"lone_named_create_index_concurrently", "baseline_adoption":"reviewed_prefix_checkpoint"},
+            "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"per_migration_commits_on_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"lone_named_create_index_concurrently", "baseline_adoption":"reviewed_prefix_checkpoint"},
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "enums_domains_composite_types_operators_exclusion_constraints":"definition_fingerprints", "managed_schema_extensions":"version_covers_members", "range_and_base_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }

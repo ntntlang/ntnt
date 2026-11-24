@@ -1459,10 +1459,15 @@ fn folded(value: &str, quoted: bool) -> String {
     }
 }
 
-/// Schema names PostgreSQL or NTNT reserve. A history that creates one never
-/// brings it into the managed scope.
+/// Schema names PostgreSQL or NTNT reserve: NTNT's ledger, `_ntnt`, and
+/// its replay marker in scratch, `_ntnt_replay`. A history that creates one
+/// never brings it into the managed scope.
 fn reserved_schema(name: &str) -> bool {
-    name.starts_with("pg_") || name == "information_schema" || name == "_ntnt"
+    name.starts_with("pg_") || name == "information_schema" || ntnt_schema(name)
+}
+/// The schemas NTNT itself uses: `_ntnt` and `_ntnt_replay`.
+fn ntnt_schema(name: &str) -> bool {
+    name == "_ntnt" || name == "_ntnt_replay"
 }
 
 /// One script's top-level `CREATE SCHEMA <name>` names and `ALTER SCHEMA <a>
@@ -1663,7 +1668,8 @@ fn targets(statement: &Statement) -> Option<Vec<(String, String)>> {
 }
 
 /// Schemas a migration may never act on: `_ntnt`, which holds NTNT's
-/// ledger, and PostgreSQL's system schemas (`pg_catalog`,
+/// ledger, `_ntnt_replay`, which marks a replay in scratch, and PostgreSQL's
+/// system schemas (`pg_catalog`,
 /// `information_schema`, `pg_toast` and other `pg_*` names). `pg_temp`, the
 /// session's own temporary schema, is not one.
 fn protected_schema(name: &str) -> bool {
@@ -2000,7 +2006,7 @@ pub(crate) fn protected_targets(sql: &str) -> Vec<(usize, String)> {
         .into_iter()
         .filter(|(_, schema, _, via)| match via {
             Via::Name => protected_schema(schema),
-            Via::SearchPath | Via::Token => schema == "_ntnt",
+            Via::SearchPath | Via::Token => ntnt_schema(schema),
         })
         .map(|(number, _, written, _)| (number, written))
         .collect()
@@ -2664,6 +2670,13 @@ mod tests {
             ("SET LOCAL search_path TO app, _ntnt", vec![(1, "_ntnt")]),
             ("SET search_path = '_ntnt'", vec![(1, "_ntnt")]),
             ("SET LOCAL SCHEMA '_ntnt'", vec![(1, "_ntnt")]),
+            // NTNT's replay marker in scratch (#430).
+            ("CREATE SCHEMA _ntnt_replay", vec![(1, "_ntnt_replay")]),
+            (
+                "DROP TABLE _ntnt_replay.replay_v1",
+                vec![(1, "_ntnt_replay.replay_v1")],
+            ),
+            ("SET search_path = _ntnt_replay", vec![(1, "_ntnt_replay")]),
             (
                 "SELECT set_config('search_path', 'app, \"_ntnt\"', true)",
                 vec![(1, "_ntnt")],
