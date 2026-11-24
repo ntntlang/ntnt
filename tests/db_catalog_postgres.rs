@@ -1943,3 +1943,535 @@ CREATE VIEW app.recent AS SELECT id, contact FROM app.orders WHERE contact <> 'x
     assert_eq!(r["assertions"]["executed"], 3, "{r}");
     assert!(!ran, "app.valid ran: {r}");
 }
+
+// #430: PostgreSQL replay commits each migration on scratch, in a transaction
+// set up as the target's, then cleans scratch up. These tests drive the real
+// CLI against the fixture's scratch database.
+
+/// A superuser session on `f`'s scratch database.
+fn scratch_admin(f: &Fixture) -> Client {
+    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.dbname(&f.scratch);
+    config.connect(NoTls).unwrap()
+}
+
+/// `public`'s owner, privileges and comment, in a scratch database.
+const PUBLIC_STATE: &str = "SELECT pg_get_userbyid(nspowner)||' '||coalesce(nspacl::text,'-')||' '||coalesce(obj_description(oid,'pg_namespace'),'-') FROM pg_namespace WHERE nspname='public'";
+
+fn public_state(f: &Fixture) -> String {
+    scratch_admin(f)
+        .query_one(PUBLIC_STATE, &[])
+        .unwrap()
+        .get(0)
+}
+
+/// What `f`'s scratch holds beyond the empty stock database it was: the
+/// emptiness check's conditions (no schemas but `public`, nothing in it, no
+/// extensions but plpgsql, no event triggers or default privileges), large
+/// objects, publications, casts, database and role settings, privileges and
+/// comments, and a `public` that differs from `public_before`. Empty when
+/// scratch is clean.
+fn scratch_leftovers(f: &Fixture, public_before: &str) -> Vec<String> {
+    let sql = format!(
+        r#"SELECT x FROM (
+ SELECT 'schema '||nspname AS x FROM pg_namespace WHERE nspname NOT IN ('public','information_schema') AND nspname NOT LIKE 'pg\_%'
+ UNION ALL SELECT 'relation public.'||c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'routine public.'||p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'type public.'||t.typname FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'extension '||extname FROM pg_extension WHERE extname<>'plpgsql'
+ UNION ALL SELECT 'event trigger '||evtname FROM pg_event_trigger
+ UNION ALL SELECT 'default privileges '||oid FROM pg_default_acl
+ UNION ALL SELECT 'large object '||oid FROM pg_largeobject_metadata
+ UNION ALL SELECT 'publication '||pubname FROM pg_publication
+ UNION ALL SELECT 'cast '||castsource::regtype||' AS '||casttarget::regtype FROM pg_cast WHERE oid>=16384
+ UNION ALL SELECT 'setting '||array_to_string(s.setconfig, ',') FROM pg_db_role_setting s
+   WHERE s.setdatabase=(SELECT oid FROM pg_database WHERE datname=current_database()) OR s.setrole=(SELECT datdba FROM pg_database WHERE datname=current_database())
+ UNION ALL SELECT 'database '||coalesce(datacl::text,'-')||' '||datconnlimit||' '||coalesce(shobj_description(oid,'pg_database'),'-') FROM pg_database
+   WHERE datname=current_database() AND (datacl IS NOT NULL OR datconnlimit<>-1 OR shobj_description(oid,'pg_database') IS NOT NULL)
+ UNION ALL SELECT 'public '||state FROM ({PUBLIC_STATE}) p(state) WHERE state IS DISTINCT FROM $1
+ UNION ALL SELECT 'no public' WHERE NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='public')
+) q ORDER BY 1"#
+    );
+    scratch_admin(f)
+        .query(&sql, &[&public_before])
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect()
+}
+
+/// Run `plan` with `--out name`, approve and migrate it, then verify.
+fn plan_migrate_verify(f: &Fixture, name: &str) {
+    let plan = f.plan(name);
+    let applied = f.apply(name, plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let verify = f.command("verify");
+    assert_eq!(verify["outcome"], "pass", "{verify}");
+}
+
+/// Add `limits` to the fixture's manifest.
+fn with_limits(f: &Fixture, limits: &str) {
+    let path = f.root.path().join("ntnt.toml");
+    let manifest = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        path,
+        format!("{manifest}\n[databases.app.limits]\n{limits}\n"),
+    )
+    .unwrap();
+}
+
+fn spawn_plan(f: &Fixture) -> std::process::Child {
+    f.process("plan")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+fn report(child: std::process::Child) -> Value {
+    let output = child.wait_with_output().unwrap();
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+}
+
+/// Poll `query` (one boolean) on `c` until it holds. Fail with the child's
+/// output if the child exits first; the deadline only bounds a hang.
+fn wait_for(c: &mut Client, query: &str, child: &mut std::process::Child, what: &str) {
+    let start = std::time::Instant::now();
+    loop {
+        if c.query_one(query, &[]).unwrap().get::<_, bool>(0) {
+            return;
+        }
+        if child.try_wait().unwrap().is_some() {
+            panic!("{what}: the plan exited first: {}", report_of(child));
+        }
+        if start.elapsed() > LOCK_WAIT_DEADLINE {
+            let _ = child.kill();
+            panic!("{what}: not reached within {LOCK_WAIT_DEADLINE:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// What an exited child wrote.
+fn report_of(child: &mut std::process::Child) -> String {
+    use std::io::Read;
+    let mut out = String::new();
+    if let Some(mut s) = child.stdout.take() {
+        let _ = s.read_to_string(&mut out);
+    }
+    if let Some(mut s) = child.stderr.take() {
+        let _ = s.read_to_string(&mut out);
+    }
+    out
+}
+
+/// #430 (x_evo_enum): a value `ALTER TYPE ... ADD VALUE` adds in one
+/// migration can be used by the next on every supported major. PostgreSQL
+/// 16 forbids using it in the transaction that added it, which used to be
+/// the whole replay. A migration that adds a value and uses it fails at
+/// plan with what the target raises, SQLSTATE 55P04, also on 17 and 18,
+/// where a type created in the same transaction used to hide it.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn an_enum_value_added_by_one_migration_can_be_used_by_the_next() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql(
+        "0001_orders.sql",
+        "CREATE TYPE app.order_status AS ENUM ('pending', 'paid', 'shipped');\nCREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DEFAULT 'pending');",
+    );
+    f.sql(
+        "0002_refunded.sql",
+        "ALTER TYPE app.order_status ADD VALUE 'refunded';",
+    );
+    plan_migrate_verify(&f, "plan-1.json");
+    let same = "ALTER TYPE app.order_status ADD VALUE 'archived' AFTER 'shipped';\nALTER TABLE app.orders ALTER COLUMN status SET DEFAULT 'archived';";
+    f.sql("0003_archived_default.sql", same);
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_POSTGRES").unwrap_or_else(|| panic!("{r}"));
+    assert!(
+        d["message"].as_str().unwrap().contains("SQLSTATE 55P04"),
+        "{d}"
+    );
+    assert_eq!(d["source"], "0003_archived_default.sql", "{d}");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    // The target refuses the same script in a migration's transaction.
+    let mut target = f.target();
+    let mut tx = target.transaction().unwrap();
+    let error = tx.batch_execute(same).unwrap_err();
+    assert_eq!(error.code().map(|c| c.code()), Some("55P04"), "{error}");
+    drop(tx);
+    std::fs::remove_file(f.root.path().join("migrations/0003_archived_default.sql")).unwrap();
+    f.sql(
+        "0003_archived.sql",
+        "ALTER TYPE app.order_status ADD VALUE 'archived' AFTER 'shipped';",
+    );
+    f.sql(
+        "0004_archived_default.sql",
+        "ALTER TABLE app.orders ALTER COLUMN status SET DEFAULT 'archived';",
+    );
+    plan_migrate_verify(&f, "plan-2.json");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// #430: a deferred constraint a migration violates fails that migration at
+/// plan, as its commit fails on the target.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_deferred_constraint_violation_fails_at_plan() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    let create = "CREATE TABLE app.codes (code text, CONSTRAINT codes_unique UNIQUE (code) DEFERRABLE INITIALLY DEFERRED);";
+    let seed = "INSERT INTO app.codes VALUES ('a'), ('a');";
+    f.sql("0001_codes.sql", create);
+    f.sql("0002_seed.sql", seed);
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_POSTGRES").unwrap_or_else(|| panic!("{r}"));
+    assert!(
+        d["message"].as_str().unwrap().contains("SQLSTATE 23505"),
+        "{d}"
+    );
+    assert_eq!(d["source"], "0002_seed.sql", "{d}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    let mut target = f.target();
+    target.batch_execute(create).unwrap();
+    let error = target
+        .batch_execute(&format!("BEGIN; {seed} COMMIT"))
+        .unwrap_err();
+    assert_eq!(error.code().map(|c| c.code()), Some("23505"), "{error}");
+}
+
+/// #430: whatever a plan's outcome, scratch is as empty afterwards as before:
+/// after success, after an error in a later migration, a refusal or a
+/// coverage failure, with objects of the kinds a history can create as the
+/// scratch role (in schemas it creates and in `public`), and after changes
+/// to `public` itself, which cleanup restores, renamed or dropped included.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn scratch_is_empty_after_every_plan() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int PRIMARY KEY);");
+    for (sql, expected) in [
+        (
+            "CREATE TYPE app.mood AS ENUM ('ok'); CREATE DOMAIN app.positive AS int CHECK (VALUE > 0);
+             CREATE TYPE app.pair AS (a int, b text); CREATE SEQUENCE app.s; SELECT nextval('app.s');
+             CREATE FUNCTION app.f() RETURNS int LANGUAGE sql AS 'SELECT 1';
+             ALTER TABLE app.t ENABLE ROW LEVEL SECURITY; CREATE POLICY p ON app.t USING (true);
+             CREATE EXTENSION citext WITH SCHEMA app; CREATE EXTENSION pg_trgm WITH SCHEMA app;
+             CREATE EXTENSION btree_gist WITH SCHEMA app;
+             CREATE TABLE public.audit (id int, mood app.mood);",
+            Some("pass"),
+        ),
+        ("CREATE TABLE app.u (id int); SELECT 1/0;", Some("DB_POSTGRES")),
+        (
+            "DO $$ BEGIN EXECUTE 'CREATE SCHEMA _ntnt'; END $$;",
+            Some("DB_OUTSIDE_SCOPE"),
+        ),
+        (
+            "CREATE TYPE app.span AS RANGE (subtype = int4);",
+            Some("DB_COVERAGE_INCOMPLETE"),
+        ),
+        (
+            "CREATE TYPE app.pair AS (a int, b text); CREATE CAST (app.pair AS text) WITH INOUT;
+             SELECT pg_catalog.lo_create(0); CREATE PUBLICATION ntnt_replay_pub FOR TABLE app.t;
+             ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO PUBLIC;
+             CREATE TEMPORARY TABLE scratch_notes (id int) ON COMMIT PRESERVE ROWS;",
+            None,
+        ),
+        (
+            "GRANT CREATE ON SCHEMA public TO PUBLIC; COMMENT ON SCHEMA public IS 'changed by a migration';
+             CREATE TABLE public.notes (id int);",
+            Some("pass"),
+        ),
+        (
+            "ALTER SCHEMA public RENAME TO old_public; CREATE SCHEMA public; CREATE TABLE public.fresh (id int);",
+            None,
+        ),
+        ("DROP SCHEMA public;", None),
+        (
+            "ALTER SCHEMA public OWNER TO CURRENT_USER; CREATE TABLE public.mine (id int);",
+            None,
+        ),
+    ] {
+        f.sql("0002_case.sql", sql);
+        let r = f.command("plan");
+        match expected {
+            Some("pass") => assert_eq!(r["outcome"], "pass", "{sql}: {r}"),
+            Some(code) => assert!(has_code(&r, code), "{sql}: {r}"),
+            None => {}
+        }
+        assert_eq!(r["scratch"]["cleanup"], "pass", "{sql}: {r}");
+        assert_eq!(
+            scratch_leftovers(&f, &public),
+            Vec::<String>::new(),
+            "{sql}: {r}"
+        );
+    }
+}
+
+/// #430: a replayed migration commits on scratch, so a change cleanup could
+/// not undo is refused before it commits: settings, privileges, comments
+/// and connection limits of the scratch database or role, a new password,
+/// an object given to another role, a session left acting as another role,
+/// and NTNT's replay marker. Scratch keeps its settings, so the next plan
+/// still matches the target.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn changes_that_outlive_scratch_objects_are_refused_before_commit() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
+    for (sql, code) in [
+        ("DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET timezone = ''Europe/Paris''', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
+        ("DO $$ BEGIN EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT 50', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
+        ("DO $$ BEGIN EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
+        ("DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS ''replayed''', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
+        ("DO $$ BEGIN EXECUTE 'ALTER ROLE CURRENT_USER SET work_mem = ''8MB'''; END $$;", "DB_REPLAY_UNSUPPORTED"),
+        ("DO $$ BEGIN EXECUTE format('ALTER ROLE CURRENT_USER IN DATABASE %I SET work_mem = ''8MB''', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
+        ("DO $$ BEGIN EXECUTE 'ALTER ROLE CURRENT_USER PASSWORD ''changed'''; END $$;", "DB_REPLAY_UNSUPPORTED"),
+        ("DO $$ BEGIN EXECUTE 'SET LOCAL ROLE pg_database_owner'; EXECUTE 'CREATE TABLE public.given (id int)'; EXECUTE 'RESET ROLE'; END $$;", "DB_REPLAY_UNSUPPORTED"),
+        ("ALTER DEFAULT PRIVILEGES FOR ROLE pg_database_owner GRANT SELECT ON TABLES TO PUBLIC;", "DB_REPLAY_UNSUPPORTED"),
+        ("DO $$ BEGIN EXECUTE 'SET ROLE pg_database_owner'; END $$;", "DB_REPLAY_UNSUPPORTED"),
+        ("DO $$ BEGIN EXECUTE 'UPDATE _ntnt_replay.replay_v1 SET public_comment = ''x'''; END $$;", "DB_OUTSIDE_SCOPE"),
+        ("DO $$ BEGIN EXECUTE 'DROP TABLE _ntnt_replay.replay_v1'; END $$;", "DB_OUTSIDE_SCOPE"),
+        ("DELETE FROM _ntnt_replay.replay_v1;", "DB_OUTSIDE_SCOPE"),
+    ] {
+        f.sql("0002_case.sql", sql);
+        let r = f.command("plan");
+        let d = diagnostic(&r, code).unwrap_or_else(|| panic!("{sql}: {r}"));
+        assert_eq!(d["source"], "0002_case.sql", "{sql}: {d}");
+        assert_eq!(r["scratch"]["cleanup"], "pass", "{sql}: {r}");
+        assert_eq!(
+            scratch_leftovers(&f, &public),
+            Vec::<String>::new(),
+            "{sql}: {r}"
+        );
+    }
+    std::fs::remove_file(f.root.path().join("migrations/0002_case.sql")).unwrap();
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+}
+
+/// #430: with `public` as the managed schema, as in Jarri's history, a
+/// migration may grant on it, comment on it or take it over; cleanup gives
+/// it back its owner, privileges and comment, so every plan starts from the
+/// same catalog and gets the same digest, and the plan migrates.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn public_is_restored_after_replay() {
+    let f = Fixture::with_schema("public");
+    let public = public_state(&f);
+    f.sql(
+        "0001_accounts.sql",
+        "CREATE TABLE accounts (id int PRIMARY KEY); GRANT CREATE ON SCHEMA public TO PUBLIC; COMMENT ON SCHEMA public IS 'accounts';",
+    );
+    f.sql(
+        "0002_owner.sql",
+        "ALTER SCHEMA public OWNER TO CURRENT_USER;",
+    );
+    let first = f.command("plan");
+    assert_eq!(first["outcome"], "pass", "{first}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    assert_eq!(first["plan_digest"], f.command("plan")["plan_digest"]);
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    plan_migrate_verify(&f, "plan.json");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// Run a plan whose 0002 waits for advisory lock 4242, which this holds,
+/// once 0001 has committed on scratch; then kill it, as a crash would, and
+/// end its backend.
+fn crash_during_replay(f: &Fixture) {
+    let mut holder = scratch_admin(f);
+    holder
+        .batch_execute("SELECT pg_advisory_lock(4242)")
+        .unwrap();
+    let mut child = spawn_plan(f);
+    let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND NOT granted)";
+    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    let pid: i32 = holder
+        .query_one("SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND NOT granted", &[])
+        .unwrap()
+        .get(0);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    holder
+        .execute("SELECT pg_terminate_backend($1)", &[&pid])
+        .unwrap();
+    let start = std::time::Instant::now();
+    while holder
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1)",
+            &[&pid],
+        )
+        .unwrap()
+        .get::<_, bool>(0)
+    {
+        assert!(
+            start.elapsed() < LOCK_WAIT_DEADLINE,
+            "backend {pid} did not end"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    holder
+        .batch_execute("SELECT pg_advisory_unlock(4242)")
+        .unwrap();
+}
+
+/// #430: a replay that never cleaned up (its process died between
+/// migrations) leaves committed migrations and NTNT's marker in scratch.
+/// The next plan cleans them up, passes and says so. A scratch with the
+/// marker and an object of another role, or with objects and no marker, is
+/// refused as before and keeps everything.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn leftovers_of_an_unfinished_replay_are_cleaned_only_with_the_marker() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql(
+        "0001_types.sql",
+        "CREATE TYPE app.mood AS ENUM ('ok'); CREATE TABLE app.t (id int, m app.mood); CREATE EXTENSION citext WITH SCHEMA app; GRANT CREATE ON SCHEMA public TO PUBLIC;",
+    );
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    let mut scratch = scratch_admin(&f);
+    let left = |c: &mut Client| -> (bool, bool) {
+        let r = c
+            .query_one(
+                "SELECT to_regnamespace('_ntnt_replay') IS NOT NULL, to_regclass('app.t') IS NOT NULL",
+                &[],
+            )
+            .unwrap();
+        (r.get(0), r.get(1))
+    };
+    assert_eq!(left(&mut scratch), (true, true), "the crash left no marker");
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+
+    // A marker and an object another role owns: refused, nothing dropped.
+    crash_during_replay(&f);
+    scratch
+        .batch_execute("CREATE TABLE public.foreign_owned (id int)")
+        .unwrap();
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_NOT_EMPTY").unwrap_or_else(|| panic!("{r}"));
+    assert!(
+        names(&d["objects"])
+            .iter()
+            .any(|o| o.contains("foreign_owned")),
+        "{d}"
+    );
+    assert!(r["scratch"]["recovered"].is_null(), "{r}");
+    assert_eq!(left(&mut scratch), (true, true));
+    assert!(scratch
+        .query_one(
+            "SELECT to_regclass('public.foreign_owned') IS NOT NULL",
+            &[]
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+    scratch
+        .batch_execute("DROP TABLE public.foreign_owned")
+        .unwrap();
+    assert_eq!(f.command("plan")["outcome"], "pass");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+
+    // Objects without NTNT's marker are never dropped.
+    let mut owner = Client::connect(&f.scratch_url, NoTls).unwrap();
+    owner
+        .batch_execute("CREATE SCHEMA leftover; CREATE TABLE leftover.t (id int)")
+        .unwrap();
+    let r = f.command("plan");
+    assert!(has_code(&r, "DB_SCRATCH_NOT_EMPTY"), "{r}");
+    assert!(r["scratch"]["recovered"].is_null(), "{r}");
+    assert!(owner
+        .query_one("SELECT to_regclass('leftover.t') IS NOT NULL", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+}
+
+/// A plan waiting for the replay lock, `pg_advisory_lock(1853124212, 430)`.
+const REPLAY_LOCK_WAITER: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1853124212 AND objid=430 AND objsubid=2 AND NOT granted)";
+
+/// #430: a plan waits for the replay lock before it reads scratch, so two
+/// replays of one scratch never interleave; past `migrator_wait_seconds`
+/// it fails with DB_SCRATCH_BUSY. Scratch is untouched either way.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_plan_waits_for_another_replay_of_its_scratch() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
+    with_limits(&f, "migrator_wait_seconds = 300");
+    let expected = f.command("plan");
+    assert_eq!(expected["outcome"], "pass", "{expected}");
+    let mut holder = scratch_admin(&f);
+    holder
+        .batch_execute("SELECT pg_advisory_lock(1853124212, 430)")
+        .unwrap();
+    let mut child = spawn_plan(&f);
+    wait_for(
+        &mut holder,
+        REPLAY_LOCK_WAITER,
+        &mut child,
+        "plan waiting for the replay lock",
+    );
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    holder
+        .batch_execute("SELECT pg_advisory_unlock(1853124212, 430)")
+        .unwrap();
+    let r = report(child);
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["plan_digest"], expected["plan_digest"]);
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+
+    let path = f.root.path().join("ntnt.toml");
+    let manifest = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        manifest.replace("migrator_wait_seconds = 300", "migrator_wait_seconds = 1"),
+    )
+    .unwrap();
+    holder
+        .batch_execute("SELECT pg_advisory_lock(1853124212, 430)")
+        .unwrap();
+    let r = f.command("plan");
+    assert!(has_code(&r, "DB_SCRATCH_BUSY"), "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// #430: two plans started together on one scratch both pass with the same
+/// digest, and every migration of each replay ran holding the replay lock.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn concurrent_plans_on_one_scratch_are_serialized() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    let holds_lock = "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l WHERE l.locktype = 'advisory' AND l.classid = 1853124212 AND l.objid = 430 AND l.objsubid = 2 AND l.pid = pg_catalog.pg_backend_pid() AND l.granted) THEN RAISE EXCEPTION 'replay without the replay lock'; END IF; END $$;";
+    f.sql(
+        "0001_base.sql",
+        &format!("{holds_lock} CREATE TABLE app.t (id int);"),
+    );
+    f.sql(
+        "0002_more.sql",
+        &format!("{holds_lock} ALTER TABLE app.t ADD COLUMN label text;"),
+    );
+    with_limits(&f, "migrator_wait_seconds = 300");
+    let (a, b) = (spawn_plan(&f), spawn_plan(&f));
+    let (a, b) = (report(a), report(b));
+    assert_eq!(a["outcome"], "pass", "{a}");
+    assert_eq!(b["outcome"], "pass", "{b}");
+    assert_eq!(a["plan_digest"], b["plan_digest"]);
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}

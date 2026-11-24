@@ -1224,9 +1224,8 @@ fn migration_scripts_run_with_normal_row_security() {
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn deferred_constraints_settle_at_each_migration_boundary() {
-    // Replay runs a whole history in one rollback-only transaction. Each
-    // migration must still end as its commit would: deferred checks fire, so
-    // the next migration can ALTER the table.
+    // Each migration ends as its commit would, in replay and on the target:
+    // deferred checks fire, so the next migration can ALTER the table.
     let f = Fixture::with_schema("public");
     f.sql(
         "0001_initial.sql",
@@ -1240,8 +1239,8 @@ fn deferred_constraints_settle_at_each_migration_boundary() {
          INSERT INTO tenants VALUES (1, 'internal');
          INSERT INTO plans VALUES ('internal');",
     );
-    // A later migration in the same replay still sees each constraint's own
-    // default: INITIALLY DEFERRED stays deferred without asking for it.
+    // A later migration still sees each constraint's own default: INITIALLY
+    // DEFERRED stays deferred without asking for it.
     f.sql(
         "0003_alter.sql",
         "ALTER TABLE tenants ADD COLUMN name TEXT;
@@ -1509,10 +1508,12 @@ fn settings_from_one_migration_do_not_reach_the_next() {
 
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
-fn same_named_constraints_with_mixed_deferral_are_reported() {
-    // SET CONSTRAINTS name affects every constraint with that name, so replay
-    // cannot restore one deferred and one immediate. Say so instead of
-    // planning a catalog the target might not produce.
+fn same_named_constraints_with_mixed_deferral_plan_and_migrate() {
+    // Replay used to run every migration in one transaction, where SET
+    // CONSTRAINTS name, which affects every constraint with that name, could
+    // not restore one deferred and one immediate, so it refused this history.
+    // Each migration now commits on scratch as on the target (#430), and each
+    // starts with every constraint's own default.
     let f = Fixture::new();
     f.sql(
         "0001_initial.sql",
@@ -1520,19 +1521,15 @@ fn same_named_constraints_with_mixed_deferral_are_reported() {
          CREATE TABLE app.c1(pid INTEGER, CONSTRAINT shared_fk FOREIGN KEY (pid) REFERENCES app.parent(id) DEFERRABLE INITIALLY DEFERRED);
          CREATE TABLE app.c2(pid INTEGER, CONSTRAINT shared_fk FOREIGN KEY (pid) REFERENCES app.parent(id) DEFERRABLE INITIALLY IMMEDIATE);",
     );
-    // A single migration needs no boundary between migrations.
     assert_eq!(f.command("plan")["outcome"], "pass");
-    f.sql("0002_next.sql", "ALTER TABLE app.c2 ADD COLUMN note TEXT;");
-    let r = f.command("plan");
-    assert!(code(&r, "DB_REPLAY_UNSUPPORTED"), "{r}");
-    assert!(
-        r["diagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|d| d["source"] == "0002_next.sql"),
-        "{r}"
+    f.sql(
+        "0002_next.sql",
+        "ALTER TABLE app.c2 ADD COLUMN note TEXT; INSERT INTO app.c1 VALUES (1); INSERT INTO app.parent VALUES (1);",
     );
+    let p = f.plan("plan.json");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
 }
 
 #[test]
