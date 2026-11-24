@@ -28,6 +28,22 @@
 //! the managed schema alone and `$3` empty, the queries return exactly what
 //! they did before either was added, so catalogs and plan digests of
 //! histories that stay in the managed schema are unchanged.
+// `DECLARED_OWNED`, with the declared extensions in parameter `$p`.
+macro_rules! declared_owned {
+    ($p:literal) => {
+        concat!(
+            r#"owned(classid, objid) AS (
+  SELECT d.classid, d.objid FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
+   WHERE d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extname=ANY("#,
+            $p,
+            r#"::text[])
+  UNION
+  SELECT d.classid, d.objid FROM owned o JOIN pg_catalog.pg_depend d ON d.refclassid=o.classid AND d.refobjid=o.objid
+   WHERE d.deptype IN ('i','a'))"#
+        )
+    };
+}
+
 pub(super) const QUERIES: &[(&str, &str)] = &[
     (
         "schema",
@@ -41,18 +57,24 @@ FROM pg_catalog.pg_namespace n WHERE n.nspname=$1 OR n.nspname=ANY($2) OR (cardi
     ),
     (
         "relation",
-        r#"
-SELECT c.relname::text, jsonb_build_object('kind',c.relkind,'owner',pg_get_userbyid(c.relowner),
+        concat!(
+            "\nWITH RECURSIVE ",
+            declared_owned!("$4"),
+            r#",
+owned_rel AS (SELECT o.objid FROM owned o WHERE o.classid='pg_catalog.pg_class'::pg_catalog.regclass)
+-- What the declared extensions ($4) own keeps its installer's owner and
+-- grants, which are not compared, as for an extension's routines and types.
+SELECT c.relname::text, jsonb_build_object('kind',c.relkind,'owner',CASE WHEN c.oid IN (SELECT objid FROM owned_rel) THEN NULL ELSE pg_get_userbyid(c.relowner) END,
  'persistence',c.relpersistence,'row_security',c.relrowsecurity,'force_row_security',c.relforcerowsecurity,
  'partition',c.relispartition,'replica_identity',c.relreplident,'access_method',am.amname,
  'options',c.reloptions,'tablespace',ts.spcname,'comment',obj_description(c.oid,'pg_class'),
  'partition_key',CASE WHEN c.relkind='p' THEN pg_get_partkeydef(c.oid) END,'partition_bound',pg_get_expr(c.relpartbound,c.oid),
  'partition_of',(SELECT pc.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_class pc ON pc.oid=h.inhparent WHERE h.inhrelid=c.oid AND c.relispartition),
- 'grants',CASE WHEN c.relkind IN ('i','I') THEN NULL ELSE (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
+ 'grants',CASE WHEN c.relkind IN ('i','I') OR c.oid IN (SELECT objid FROM owned_rel) THEN NULL ELSE (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
  FROM aclexplode(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 's'::"char" ELSE 'r'::"char" END,c.relowner))) a) END)
  -- A composite type's privileges and comment are its pg_type row's.
- ||CASE WHEN c.relkind='c' THEN (SELECT jsonb_build_object('grants',(SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
- FROM aclexplode(coalesce(ct.typacl,acldefault('T',ct.typowner))) a),
+ ||CASE WHEN c.relkind='c' THEN (SELECT jsonb_build_object('grants',CASE WHEN c.oid IN (SELECT objid FROM owned_rel) THEN NULL ELSE (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
+ FROM aclexplode(coalesce(ct.typacl,acldefault('T',ct.typowner))) a) END,
  'comment',obj_description(ct.oid,'pg_type')) FROM pg_catalog.pg_type ct WHERE ct.oid=c.reltype) ELSE '{}'::jsonb END,
  ((c.relkind='r' AND am.amname='heap') OR (c.relkind IN ('i','I') AND am.oid<16384) OR c.relkind IN ('p','v','S','c'))
  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_class ch ON ch.oid=h.inhrelid JOIN pg_catalog.pg_class pa ON pa.oid=h.inhparent
@@ -64,7 +86,8 @@ LEFT JOIN pg_catalog.pg_am am ON am.oid=c.relam LEFT JOIN pg_catalog.pg_tablespa
 -- An index follows its table.
 LEFT JOIN pg_catalog.pg_index x ON x.indexrelid=c.oid LEFT JOIN pg_catalog.pg_class xt ON xt.oid=x.indrelid
 WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||coalesce(xt.relname,c.relname)=ANY($3)) ORDER BY c.relname LIMIT 10001
-"#,
+"#
+        ),
     ),
     (
         "column",
@@ -280,22 +303,6 @@ WHERE $1::text IS NOT NULL
 
 /// The `QUERIES` that take `$4`, the declared extensions.
 pub(super) const WITH_DECLARED_EXTENSIONS: &[&str] = &["relation", "extension"];
-
-// `DECLARED_OWNED`, with the declared extensions in parameter `$p`.
-macro_rules! declared_owned {
-    ($p:literal) => {
-        concat!(
-            r#"owned(classid, objid) AS (
-  SELECT d.classid, d.objid FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
-   WHERE d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extname=ANY("#,
-            $p,
-            r#"::text[])
-  UNION
-  SELECT d.classid, d.objid FROM owned o JOIN pg_catalog.pg_depend d ON d.refclassid=o.classid AND d.refobjid=o.objid
-   WHERE d.deptype IN ('i','a'))"#
-        )
-    };
-}
 
 /// What the declared extensions (`$1`, text[]) own, as a `WITH RECURSIVE`
 /// element: `owned(classid, objid)`, their members (pg_depend `e`) and,
