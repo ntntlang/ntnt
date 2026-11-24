@@ -171,6 +171,14 @@ fn unqualified_read(name: &str, tables: &HashSet<String>) -> bool {
     tables.contains(&name.to_ascii_lowercase())
         || !(reserved(name) || internal(name) || eponymous(name))
 }
+/// The table that `ALTER TABLE ... ADD COLUMN` is changing, when `name` is
+/// the copy of it SQLite compiles the new column against.
+fn altered_copy(name: &str) -> Option<&str> {
+    name.get(..16)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("sqlite_altertab_"))
+        .map(|_| &name[16..])
+        .filter(|table| !table.is_empty())
+}
 
 /// SQLite's built-in SQL functions in the bundled SQLite 3.54 build, as its
 /// `pragma_function_list` reports them (`builtin` is 1): the core scalar,
@@ -349,6 +357,11 @@ fn authorize(
                 || (ctx.database_name.is_none()
                     && column_name.is_empty()
                     && unqualified_read(table_name, tables))
+                // The key column of the autoindex below.
+                || (schema_access
+                    && main
+                    && altered_copy(table_name)
+                        .is_some_and(|table| tables.contains(&table.to_ascii_lowercase())))
         }
         // The quick_check that pragma_quick_check runs, on a managed table.
         Pragma {
@@ -396,6 +409,24 @@ fn authorize(
                 && main
                 && ordinary(view_name)
                 && tables.contains(&view_name.to_ascii_lowercase())
+        }
+        // ALTER TABLE t ADD COLUMN compiles the new column against a copy of
+        // `t` named `sqlite_altertab_t`, never stored. A UNIQUE or PRIMARY
+        // KEY column asks for an autoindex on that copy, which reads the
+        // column, and SQLite then refuses the column itself ("Cannot add a
+        // UNIQUE column"), so its own error, not this autoindex, reaches the
+        // diagnostic (#427 F6).
+        CreateIndex {
+            index_name,
+            table_name,
+        } if altered_copy(table_name).is_some() => {
+            schema_access
+                && main
+                && altered_copy(table_name)
+                    .is_some_and(|table| tables.contains(&table.to_ascii_lowercase()))
+                && index_name
+                    .to_ascii_lowercase()
+                    .starts_with("sqlite_autoindex_sqlite_altertab_")
         }
         CreateIndex {
             index_name,
@@ -625,8 +656,11 @@ fn known_tables(conn: &Connection) -> Result<std::collections::HashSet<String>> 
 /// SQLite finds native statement boundaries (including trigger bodies and quoted
 /// semicolons). Refresh the resolved-relation allowlist after each statement, so
 /// a dropped name cannot fall through to an eponymous virtual table later.
-fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Result<()> {
+fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Result<Vec<String>> {
     let conn = &state.conn;
+    // Every table the script drops, for a COMMIT that its deferred foreign
+    // keys fail (`Sqlite::commit`).
+    let mut all_dropped = Vec::new();
     // A RAISE(ROLLBACK) undoes the transaction, and with it any trigger it
     // created, so the triggers a RAISE may come from are read before any
     // statement runs (review r1).
@@ -638,6 +672,7 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
         statement += 1;
         let number = statement;
         let mut failure = Failure::default();
+        let mut dropped = Vec::new();
         let result = (|| {
             let Some(mut statement) = batch.next().map_err(|e| failure.record(e))? else {
                 return Ok(false);
@@ -648,7 +683,7 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                     "Migration SQL cannot contain uncaptured bind parameters.",
                 ));
             }
-            let dropped = state.auth.take_dropped();
+            dropped = state.auth.take_dropped();
             if !dropped.is_empty() {
                 refuse_on_delete_drops(state, number, &dropped)?;
             }
@@ -658,8 +693,8 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
         })();
         drop(active);
         match result {
-            Ok(true) => {}
-            Ok(false) => return Ok(()),
+            Ok(true) => all_dropped.append(&mut dropped),
+            Ok(false) => return Ok(all_dropped),
             // SQLite reports a refused function as a generic error, so the
             // authorizer's record of what it refused decides the diagnostic.
             Err(mut error) => {
@@ -680,6 +715,20 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                     None if error.message.starts_with(FILE_SUBJECT) => error,
                     // SQLite interrupted the statement at its deadline.
                     None if error.code == "DB_TIMEOUT" => statement_limit(statement, limit, replay),
+                    // SQLite resolves a function an application registers on
+                    // its own connections as missing on ntnt's (#427 F4).
+                    None if failure.missing_function().is_some() => {
+                        let function = failure.missing_function().unwrap_or_default();
+                        let refused = format!("SQLite function `{function}`");
+                        let mut d = Diagnostic::new(
+                            "DB_SQL_UNSUPPORTED",
+                            &format!(
+                                "Statement {statement} uses {refused}, which SQLite migrations cannot use."
+                            ),
+                        );
+                        d.next_action = denial_advice(statement, &refused);
+                        d
+                    }
                     None => {
                         if let Some(text) = failure.raised.take() {
                             let created = (sql, statement);
@@ -691,7 +740,17 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                         }
                         error.message = format!("Statement {statement}: {}", error.message);
                         if failure.authoring() {
-                            error.next_action = statement_advice(statement, replay);
+                            error.next_action = failure
+                                .message
+                                .as_deref()
+                                .and_then(|message| add_column_advice(statement, message, replay))
+                                .or_else(|| {
+                                    (failure.code
+                                        == Some(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY))
+                                    .then(|| dropped_parent_advice(conn, Some(statement), &dropped))
+                                    .flatten()
+                                })
+                                .unwrap_or_else(|| statement_advice(statement, replay));
                         }
                         error
                     }
@@ -708,20 +767,31 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
 struct Failure {
     code: Option<i32>,
     raised: Option<String>,
+    /// SQLite's own message, only ever matched against the shapes
+    /// `sqlite_errors` shows, never shown itself.
+    message: Option<String>,
 }
 impl Failure {
     fn record(&mut self, error: rusqlite::Error) -> Diagnostic {
         match &error {
             rusqlite::Error::SqliteFailure(e, text) => {
                 self.code = Some(e.extended_code);
+                self.message = text.clone();
                 if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER {
                     self.raised = text.clone();
                 }
             }
-            rusqlite::Error::SqlInputError { error: e, .. } => self.code = Some(e.extended_code),
+            rusqlite::Error::SqlInputError { error: e, msg, .. } => {
+                self.code = Some(e.extended_code);
+                self.message = Some(msg.clone());
+            }
             _ => {}
         }
         sql_error(error)
+    }
+    /// The function SQLite found no definition of, by name.
+    fn missing_function(&self) -> Option<&str> {
+        super::sqlite_errors::missing_function(self.code?, self.message.as_deref()?)
     }
     /// An error in the statement's own SQL, or in the rows it writes, that a
     /// change to the migration (or to those rows) fixes.
@@ -786,6 +856,87 @@ fn statement_advice(number: usize, replay: bool) -> String {
         format!("Fix statement {number} of the migration named in source so that it succeeds when the history replays in order on an empty database, then rerun plan. Replay changed nothing on the target.")
     } else {
         format!("Nothing from this migration was committed: its transaction rolled back when statement {number} failed on the target, and progress shows what this run committed before it. If the target's data conflicts with the statement, correct that data and rerun migrate with the same plan; if the migration is wrong, change it, then plan, review and approve again.")
+    }
+}
+
+/// How statement `number`, failed on the target or in replay, ends.
+fn rolled_back(number: usize, replay: bool) -> String {
+    if replay {
+        "Then rerun plan. Replay changed nothing on the target.".to_owned()
+    } else {
+        format!("Nothing from this migration was committed: its transaction rolled back when statement {number} failed on the target, and progress shows what this run committed before it. Change the migration, then plan, review and approve again.")
+    }
+}
+
+/// What to do about statement `number`, an `ALTER TABLE ... ADD COLUMN`
+/// SQLite refused with `message`, by SQLite's rules for adding a column:
+/// it cannot add a UNIQUE or PRIMARY KEY column, and on a table that has
+/// rows it gives every row the default, so that default must be a
+/// constant, and not NULL for a NOT NULL column (#427 F6, F7).
+fn add_column_advice(number: usize, message: &str, replay: bool) -> Option<String> {
+    const REBUILD: &str = "rebuild the table with a `sqlite_rebuild` sidecar: create it again with the new column, copy its rows, drop the old table and rename the new one (docs/DATABASE_MIGRATIONS.md, Explicit one-table rebuild)";
+    let rows = if replay {
+        "The table has rows that the history inserted before this statement."
+    } else {
+        "Replay starts from empty tables, so the plan could not show this; the target's table has rows."
+    };
+    let advice = match message {
+        "Cannot add a UNIQUE column" => format!("SQLite's ALTER TABLE ... ADD COLUMN cannot add a UNIQUE column. In statement {number}, add the column without UNIQUE, then create a unique index on it in the same migration: `ALTER TABLE <table> ADD COLUMN <column> <type>;` followed by `CREATE UNIQUE INDEX <table>_<column>_key ON <table> (<column>);`. The index enforces what UNIQUE would, and like it allows any number of NULLs."),
+        "Cannot add a PRIMARY KEY column" => format!("SQLite's ALTER TABLE ... ADD COLUMN cannot add a PRIMARY KEY column. Instead of statement {number}, {REBUILD}."),
+        "Cannot add a column with non-constant default" => format!("SQLite's ALTER TABLE ... ADD COLUMN gives every existing row the new column's default, so on a table that has rows it accepts only a constant default (a literal or NULL), not CURRENT_TIMESTAMP, datetime('now'), randomblob() or another expression. {rows} In statement {number}, give the column a constant default and set the existing rows with an UPDATE in the same migration (`ALTER TABLE <table> ADD COLUMN <column> TEXT NOT NULL DEFAULT '';` then `UPDATE <table> SET <column> = CURRENT_TIMESTAMP;`); new rows then get the constant. To keep the expression as the default for new rows, {REBUILD}."),
+        "Cannot add a NOT NULL column with default value NULL" => format!("SQLite's ALTER TABLE ... ADD COLUMN cannot add a NOT NULL column without a default to a table that has rows: each row would hold NULL. {rows} In statement {number}, give the column a constant default (`ALTER TABLE <table> ADD COLUMN <column> <type> NOT NULL DEFAULT <constant>`) and set the rows that need another value with an UPDATE in the same migration, or {REBUILD}, filling the column as the rows are copied."),
+        "Cannot add a REFERENCES column with non-NULL default value" => format!("With foreign keys enforced, SQLite's ALTER TABLE ... ADD COLUMN cannot add a REFERENCES column with a non-NULL default to a table that has rows. {rows} In statement {number}, add the column without a default and set it with an UPDATE in the same migration, or {REBUILD}."),
+        _ => return None,
+    };
+    Some(format!("{advice} {}", rolled_back(number, replay)))
+}
+
+/// What to do when a migration that dropped `dropped` failed a foreign key:
+/// statement `number` (an immediate key), or its COMMIT (`None`, a deferred
+/// key). SQLite deletes every row of a dropped table first, so on a target
+/// with rows a drop breaks each reference to them, and a deferred key
+/// counts those until COMMIT even when a replacement renamed to the old
+/// name holds the same rows (#427 F1). `None` if no other table references
+/// a dropped one.
+fn dropped_parent_advice(
+    conn: &Connection,
+    number: Option<usize>,
+    dropped: &[String],
+) -> Option<String> {
+    let parents: Vec<(&String, Vec<String>)> = dropped
+        .iter()
+        .filter_map(|table| {
+            let children = referencing_tables(conn, table).ok()?;
+            (!children.is_empty()).then_some((table, children))
+        })
+        .collect();
+    let (table, _) = parents.first()?;
+    let named = list(
+        &parents
+            .iter()
+            .map(|(table, children)| {
+                let children: Vec<String> = children.iter().map(|c| format!("`{c}`")).collect();
+                format!(
+                    "table `{table}`, which {} reference{}",
+                    list(&children),
+                    if children.len() == 1 { "s" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+    let sidecar = format!("If the migration rebuilds `{table}` (creates its replacement, copies the rows, drops it and renames the replacement), add a `sqlite_rebuild = \"{table}\"` sidecar (docs/DATABASE_MIGRATIONS.md, Explicit one-table rebuild): it runs the migration with foreign-key enforcement off, then checks every foreign key, the row counts and the other definitions. To retire `{table}` instead, first remove the foreign keys that reference it, or delete the rows that do, earlier in the migration or in an earlier one.");
+    Some(match number {
+        Some(number) => format!("Statement {number} drops {named}. SQLite deletes every row of a dropped table first, so the drop fails while rows reference it; replay starts from empty tables, so the plan could not show this. {sidecar} Nothing from this migration was committed: its transaction rolled back when statement {number} failed on the target, and progress shows what this run committed before it. Change the migration, then plan, review and approve again."),
+        None => format!("The migration dropped {named} with a deferred foreign key. SQLite deletes every row of a dropped table first and counts each reference that breaks until COMMIT, even when a replacement renamed to the old name holds the same rows, so COMMIT fails on a target with rows; replay starts from empty tables, so the plan could not show this. {sidecar} The COMMIT failed, so the migration was not committed; progress shows what reconciliation found. Change the migration, then plan, review and approve again."),
+    })
+}
+
+/// `a`, `a and b` or `a, b and c`.
+fn list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -903,6 +1054,24 @@ fn on_delete_children(conn: &Connection, table: &str) -> Result<Vec<(String, Str
         .query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(sql_error)?
         .collect::<rusqlite::Result<Vec<(String, String)>>>()
+        .map_err(sql_error)?;
+    Ok(children)
+}
+
+/// The other tables whose foreign keys reference `table`, in name order.
+fn referencing_tables(conn: &Connection, table: &str) -> Result<Vec<String>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT m.name FROM main.sqlite_schema AS m, \
+             pragma_foreign_key_list(m.name) AS f \
+             WHERE m.type = 'table' AND m.name <> ?1 COLLATE NOCASE \
+             AND f.\"table\" = ?1 COLLATE NOCASE ORDER BY m.name",
+        )
+        .map_err(sql_error)?;
+    let children = statement
+        .query_map([table], |row| row.get(0))
+        .map_err(sql_error)?
+        .collect::<rusqlite::Result<Vec<String>>>()
         .map_err(sql_error)?;
     Ok(children)
 }
@@ -1090,6 +1259,12 @@ struct State {
     auth: Authorizer,
     /// What earlier catalog inspections on this session can lend later ones.
     cache: Cache,
+    /// The migration `execute_captured` is running, for the rebuild guard's
+    /// advice.
+    migration_sql: Option<String>,
+    /// The migration whose transaction is open and the tables it dropped,
+    /// for a COMMIT that deferred foreign keys fail.
+    dropped: Option<(String, Vec<String>)>,
 }
 impl State {
     fn identity(&self) -> Result<Identity> {
@@ -1522,8 +1697,12 @@ fn adopt_layout(conn: &Connection, scratch: &Value, target: &Value) -> Result<bo
 /// table's column/constraint definition, but not silently retire other tables or
 /// named dependent objects. Row counts are a guard, not proof of business meaning.
 struct RebuildGuard {
+    /// The rebuilt table, as the schema spells it.
+    table: String,
     required: std::collections::BTreeMap<String, Value>,
     counts: std::collections::BTreeMap<String, i64>,
+    /// The table's AUTOINCREMENT counter (`sqlite_sequence`), if it has one.
+    sequence: Option<i64>,
 }
 impl RebuildGuard {
     fn counts(state: &State) -> Result<std::collections::BTreeMap<String, i64>> {
@@ -1547,6 +1726,24 @@ impl RebuildGuard {
         }
         Ok(counts)
     }
+    /// The AUTOINCREMENT counter SQLite keeps for `table`, which it looks up
+    /// by the table's exact name.
+    fn sequence(state: &State, table: &str) -> Result<Option<i64>> {
+        let present = integer(
+            &state.conn,
+            "SELECT count(*) FROM main.sqlite_schema WHERE type='table' AND name='sqlite_sequence'",
+        )? != 0;
+        if !present {
+            return Ok(None);
+        }
+        Ok(rows(
+            &state.conn,
+            "SELECT max(seq) FROM main.sqlite_sequence WHERE name = ?1 AND typeof(seq) = 'integer'",
+            &[&table],
+        )?
+        .first()
+        .and_then(|row| row[0].as_i64()))
+    }
     fn capture(state: &mut State, table: &str) -> Result<Self> {
         let catalog = state.catalog()?;
         if !catalog.uncovered.is_empty() {
@@ -1565,9 +1762,10 @@ impl RebuildGuard {
                     "DB_REBUILD_GUARD",
                     "sqlite_rebuild must name an existing ordinary table.",
                 )
-            })?;
-        let table_key = format!("table:{}", quote(selected));
-        let column_prefix = format!("column:{}.", quote(selected));
+            })?
+            .clone();
+        let table_key = format!("table:{}", quote(&selected));
+        let column_prefix = format!("column:{}.", quote(&selected));
         let required = catalog
             .objects
             .into_iter()
@@ -1577,21 +1775,195 @@ impl RebuildGuard {
                     && !key.starts_with("index:\"sqlite_autoindex_")
             })
             .collect();
-        Ok(Self { required, counts })
+        let sequence = Self::sequence(state, &selected)?;
+        Ok(Self {
+            table: selected,
+            required,
+            counts,
+            sequence,
+        })
     }
+    /// Refuse a rebuild that did not keep what it must, naming each rule it
+    /// broke and the object: names and row counts, never row values (F2).
     fn verify(self, state: &mut State) -> Result<()> {
         let catalog = state.catalog()?;
-        if !catalog.uncovered.is_empty()
-            || self
-                .required
-                .iter()
-                .any(|(key, value)| catalog.objects.get(key) != Some(value))
-            || self.counts != Self::counts(state)?
-        {
-            return Err(Diagnostic::new("DB_REBUILD_GUARD","SQLite rebuild must preserve existing table row counts, other table definitions, and named indexes/triggers/views. Split deliberate retirements into separately reviewed migrations; row values suppressed."));
+        let counts = Self::counts(state)?;
+        let table = &self.table;
+        let mut broken = Vec::new();
+        let mut objects = Vec::new();
+        let (mut rows, mut definitions, mut stored, mut tables) = (false, false, false, false);
+        for (name, before) in &self.counts {
+            match counts.get(name) {
+                None => broken.push(format!("table `{name}` is missing")),
+                Some(after) if after != before => broken.push(format!(
+                    "the row count of table `{name}` changed from {before} to {after}"
+                )),
+                Some(_) => continue,
+            }
+            rows = true;
+            objects.push(format!("table:{}", quote(name)));
         }
-        Ok(())
+        for name in counts
+            .keys()
+            .filter(|name| !self.counts.contains_key(*name))
+        {
+            broken.push(format!("table `{name}` is new"));
+            rows = true;
+            objects.push(format!("table:{}", quote(name)));
+        }
+        for (key, value) in &self.required {
+            match catalog.objects.get(key) {
+                None => broken.push(format!("{} is missing", subject(key))),
+                Some(now) if now != value => {
+                    // Only the definition hash differs: the stored SQL text.
+                    let text =
+                        now.as_object()
+                            .zip(value.as_object())
+                            .is_some_and(|(now, before)| {
+                                now.iter().all(|(field, v)| {
+                                    field == "definition" || before.get(field) == Some(v)
+                                }) && now.len() == before.len()
+                            });
+                    stored |= text;
+                    broken.push(if text {
+                        format!(
+                            "{} has another stored SQL text than before the rebuild",
+                            subject(key)
+                        )
+                    } else {
+                        format!(
+                            "{} differs from its definition before the rebuild",
+                            subject(key)
+                        )
+                    });
+                }
+                Some(_) => continue,
+            }
+            // Another table, or one of its columns.
+            if key.starts_with("table:") || key.starts_with("column:") {
+                tables = true;
+            } else {
+                definitions = true;
+            }
+            objects.push(key.clone());
+        }
+        // AUTOINCREMENT never reuses an id (F3). The counter follows the
+        // table's name, so a rebuild that copies the rows into a new table
+        // starts it again from the highest id copied, unless the migration
+        // copies it. A rebuilt table without AUTOINCREMENT has no counter.
+        let rebuilt = counts.keys().find(|name| name.eq_ignore_ascii_case(table));
+        let mut sequence = None;
+        if let (Some(before), Some(rebuilt)) = (self.sequence, rebuilt) {
+            let after = Self::sequence(state, rebuilt)?;
+            if after.is_none_or(|after| after < before)
+                && (after.is_some() || autoincrement(state, rebuilt)?)
+            {
+                broken.push(match after {
+                    Some(after) => format!("the AUTOINCREMENT counter of table `{rebuilt}` went back from {before} to {after} (sqlite_sequence), so SQLite would give new rows the ids of deleted ones"),
+                    None => format!("table `{rebuilt}` lost its AUTOINCREMENT counter (sqlite_sequence held {before} for it and now holds none), so SQLite would give new rows the ids of deleted ones"),
+                });
+                sequence = Some((rebuilt.clone(), after.is_some()));
+                objects.push(format!("table:{}", quote(rebuilt)));
+            }
+        }
+        if !catalog.uncovered.is_empty() {
+            broken.push("the rebuilt catalog has objects outside supported coverage".to_owned());
+            objects.extend(catalog.uncovered.iter().cloned());
+        }
+        if broken.is_empty() {
+            return Ok(());
+        }
+        const SHOWN: usize = 8;
+        let more = broken.len().saturating_sub(SHOWN);
+        broken.truncate(SHOWN);
+        let mut message = format!(
+            "The rebuild of table `{table}` did not keep what a rebuild must: {}{}.",
+            broken.join("; "),
+            if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            }
+        );
+        if stored {
+            message.push_str(" SQLite compares the stored SQL text of a definition, so whitespace and quoting must match the original.");
+        }
+        message.push_str(" Row values suppressed.");
+        let mut advice = Vec::new();
+        if rows {
+            advice.push(format!("Copy every row of `{table}` into its replacement, keep every other table and its rows, and leave no new table behind; make other data changes in a separate migration without the sidecar."));
+        }
+        if tables {
+            advice.push(format!("Leave the other tables as they were. SQLite rewrites the foreign keys of other tables that reference a table it renames, so create the replacement under a new name and rename it to `{table}` after dropping the old table, never rename the old table first; change other tables in a separate migration without the sidecar."));
+        }
+        if definitions {
+            advice.push("Recreate each index, trigger and view the message names after the rename, with the CREATE statement it had before, copied exactly from the target's `SELECT sql FROM sqlite_master WHERE name = '<name>'`; only the rebuilt table, its columns and its autoindexes may change. Change or retire another object in a separate migration without the sidecar.".to_owned());
+        }
+        if let Some((rebuilt, row)) = sequence {
+            advice.push(if row {
+                format!("Before the DROP TABLE, copy the counter to the replacement table: `UPDATE sqlite_sequence SET seq = (SELECT seq FROM sqlite_sequence WHERE name='{}') WHERE name='{}';`.", literal(&rebuilt), literal(&replacement_name(state, &rebuilt)))
+            } else {
+                format!("Before the DROP TABLE, give the replacement table the counter, which it does not have yet because no row was copied into it: `INSERT INTO sqlite_sequence (name, seq) SELECT '{}', seq FROM sqlite_sequence WHERE name='{}';`.", literal(&replacement_name(state, &rebuilt)), literal(&rebuilt))
+            });
+        }
+        if !catalog.uncovered.is_empty() {
+            advice.push("Keep the rebuilt catalog within the coverage in docs/DATABASE_MIGRATIONS.md, Supported SQL and catalog coverage.".to_owned());
+        }
+        advice.push("Nothing from this migration was committed. Then plan again (docs/DATABASE_MIGRATIONS.md, Explicit one-table rebuild).".to_owned());
+        let mut d = Diagnostic::new("DB_REBUILD_GUARD", &message);
+        d.next_action = advice.join(" ");
+        let mut seen = HashSet::new();
+        objects.retain(|key| seen.insert(key.clone()));
+        Err(d.with_objects(&objects))
     }
+}
+
+/// `index `name``, `column `t.c``, ..., for the catalog key of an object.
+fn subject(key: &str) -> String {
+    let Some((kind, quoted)) = key.split_once(':') else {
+        return format!("`{key}`");
+    };
+    let name = quoted
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .map_or_else(
+            || quoted.to_owned(),
+            |inner| {
+                inner
+                    .split("\".\"")
+                    .map(|part| part.replace("\"\"", "\""))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            },
+        );
+    format!("{kind} `{name}`")
+}
+
+/// `name` inside a SQL string literal.
+fn literal(name: &str) -> String {
+    name.replace('\'', "''")
+}
+
+/// Whether table `name`'s stored definition declares AUTOINCREMENT.
+fn autoincrement(state: &State, name: &str) -> Result<bool> {
+    Ok(rows(
+        &state.conn,
+        "SELECT sql FROM main.sqlite_schema WHERE type='table' AND name=?1",
+        &[&name],
+    )?
+    .first()
+    .and_then(|row| row[0].as_str())
+    .is_some_and(super::analysis::sqlite_autoincrement))
+}
+
+/// The table the migration renamed to `table`, which held the copied rows
+/// before the rename, or a placeholder when the guard cannot tell.
+fn replacement_name(state: &State, table: &str) -> String {
+    state
+        .migration_sql
+        .as_deref()
+        .and_then(|sql| super::analysis::sqlite_renamed_to(sql, table))
+        .unwrap_or_else(|| "<replacement table>".to_owned())
 }
 
 pub(super) struct Sqlite {
@@ -1647,7 +2019,7 @@ impl Sqlite {
             conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML,false).map_err(sql_error)?;
             conn.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON; PRAGMA ignore_check_constraints=OFF; PRAGMA legacy_alter_table=OFF; PRAGMA synchronous=FULL;").map_err(sql_error)?;
             let auth=Authorizer::install(&mut conn)?;
-            Ok::<_,Diagnostic>(State{conn,file,writable,auth,cache:Cache::default()})
+            Ok::<_,Diagnostic>(State{conn,file,writable,auth,cache:Cache::default(),migration_sql:None,dropped:None})
         })).await.map_err(|_|Diagnostic::new("DB_TIMEOUT","SQLite connection deadline exceeded."))?
             .map_err(|_|Diagnostic::new("DB_RUNTIME","SQLite connection worker failed."))?
             .map_err(|d| attribute(&faults, d, execute))?;
@@ -1730,6 +2102,7 @@ impl Sqlite {
                     "SQLite inspection session cannot migrate.",
                 ));
             }
+            s.dropped = None;
             s.conn.execute_batch("BEGIN IMMEDIATE").map_err(sql_error)
         })
         .await
@@ -1738,6 +2111,7 @@ impl Sqlite {
     /// `BEGIN IMMEDIATE`) there is nothing to undo, which is not a failure.
     pub async fn rollback(&self) -> Result<()> {
         self.run(|s| {
+            s.dropped = None;
             if s.conn.is_autocommit() {
                 return Ok(());
             }
@@ -1746,8 +2120,25 @@ impl Sqlite {
         .await
     }
     pub async fn commit(&self) -> Result<()> {
-        self.run(|s| s.conn.execute_batch("COMMIT").map_err(sql_error))
-            .await
+        self.run(|s| {
+            let dropped = s.dropped.take();
+            s.conn.execute_batch("COMMIT").map_err(|error| {
+                let foreign_key = matches!(&error, rusqlite::Error::SqliteFailure(e, _)
+                    if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY);
+                let mut d = sql_error(error);
+                // Deferred foreign keys fail at COMMIT, after a migration
+                // dropped a table that other tables reference (F1).
+                if let (true, Some((source, tables))) = (foreign_key, dropped) {
+                    if let Some(advice) = dropped_parent_advice(&s.conn, None, &tables) {
+                        d.message = format!("SQLite could not commit the migration: {}", d.message);
+                        d.next_action = advice;
+                        d.source = Some(source);
+                    }
+                }
+                d
+            })
+        })
+        .await
     }
     pub async fn catalog(&self) -> Result<Catalog> {
         self.run(|s| s.catalog()).await
@@ -1904,8 +2295,10 @@ impl Sqlite {
                     ));
                 }
             }
+            s.migration_sql = Some(migration.sql.clone());
             let outcome = (|| {
-                execute_script(s, &migration.sql, limit, replay)?;
+                let dropped = execute_script(s, &migration.sql, limit, replay)?;
+                s.dropped = Some((migration.name.clone(), dropped));
                 s.history(None)?;
                 s.foreign_keys()?;
                 if let Some(guard) = guard {

@@ -846,6 +846,66 @@ pub(crate) fn sqlite_created_raise_messages(sql: &str, count: usize) -> Vec<Stri
         .collect()
 }
 
+/// Whether the SQLite `CREATE TABLE` statement `sql` declares AUTOINCREMENT.
+pub(crate) fn sqlite_autoincrement(sql: &str) -> bool {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql)
+        .tokenize()
+        .is_ok_and(|tokens| {
+            tokens.iter().any(|t| {
+                matches!(t, Token::Word(w) if w.quote_style.is_none()
+                    && w.value.eq_ignore_ascii_case("AUTOINCREMENT"))
+            })
+        })
+}
+
+/// The table that an `ALTER TABLE <name> RENAME TO <table>` statement of the
+/// SQLite migration `sql` renames to `table` (the last such statement): the
+/// replacement table of a rebuild.
+pub(crate) fn sqlite_renamed_to(sql: &str, table: &str) -> Option<String> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let tokens = Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql)
+        .tokenize_with_location()
+        .ok()?;
+    let keyword = |token: &Token, k: &str| matches!(token, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(k));
+    let name = |token: &Token| match token {
+        Token::Word(w) => Some(w.value.clone()),
+        _ => None,
+    };
+    sqlite_statements(&tokens)
+        .ranges
+        .iter()
+        .rev()
+        .find_map(|range| {
+            let words: Vec<&Token> = tokens[range.clone()]
+                .iter()
+                .map(|t| &t.token)
+                .filter(|t| !matches!(t, Token::Whitespace(_)))
+                .collect();
+            let [alter, kind, rest @ ..] = words.as_slice() else {
+                return None;
+            };
+            if !(keyword(alter, "ALTER") && keyword(kind, "TABLE")) {
+                return None;
+            }
+            // `main.<name>`: the schema is the only one a migration has.
+            let rest = match rest {
+                [_, Token::Period, rest @ ..] => rest,
+                rest => rest,
+            };
+            match rest {
+                [from, rename, to, new, ..]
+                    if keyword(rename, "RENAME")
+                        && keyword(to, "TO")
+                        && name(new).is_some_and(|new| new.eq_ignore_ascii_case(table)) =>
+                {
+                    name(from)
+                }
+                _ => None,
+            }
+        })
+}
+
 /// The messages of the RAISEs in `tokens` whose message is one string
 /// literal: text the SQL spells out, never one computed from a row.
 fn raise_literals<'a>(

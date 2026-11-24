@@ -246,6 +246,16 @@ fn error(message: &str) -> Option<String> {
     None
 }
 
+/// The function a `no such function: <name>` failure names, when the name
+/// is a plain identifier: one SQLite does not define, such as a function an
+/// application registers on its own connections (#427 F4).
+pub(super) fn missing_function(code: i32, message: &str) -> Option<&str> {
+    (code == rusqlite::ffi::SQLITE_ERROR)
+        .then(|| message.strip_prefix("no such function: "))
+        .flatten()
+        .filter(|function| identifier(function))
+}
+
 /// A plain SQL name: ASCII letters, digits, `_` and `$`, not starting with
 /// a digit. A literal never has this shape.
 fn identifier(text: &str) -> bool {
