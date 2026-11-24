@@ -554,15 +554,16 @@ struct Replayed {
     /// managed scope, at any step, by catalog key. The target is inspected
     /// for these (`outside` in `catalog`), and a plan records them.
     outside: std::collections::BTreeSet<String>,
-    /// For plans: each pending check that will read a table where
-    /// row-level security applies to the migration role (`Probe`).
+    /// For plans: what will stop a pending check, found at the state it
+    /// runs in (`CheckProbe`), in probe order.
     check_warnings: Vec<Value>,
 }
 
-/// A check migrate will run, examined in replay at the state it runs in
-/// for tables where row-level security applies to the migration role,
-/// which a check cannot read (#430).
-struct Probe<'a> {
+/// A check this plan's migrate will run, examined in replay at the state it
+/// runs in for what would stop it: hazards (`Postgres::check_hazards`,
+/// #456) and tables where row-level security applies to the migration role,
+/// which a check cannot read (`Postgres::row_security_blocked`, #430).
+struct CheckProbe<'a> {
     /// Migrations applied when the check runs: those before its migration
     /// for `requires`, through it for `ensures`, the adopted prefix for
     /// adoption checks.
@@ -570,31 +571,40 @@ struct Probe<'a> {
     source: &'a str,
     phase: &'static str,
     name: &'a str,
-    /// The managed-schema tables the check names.
+    sql: &'a str,
+    /// The managed-schema tables the check names, when row-level security
+    /// can apply to the target role; otherwise none.
     tables: Vec<String>,
 }
 
-/// The checks this plan's migrate will run, as `Probe`s. Only asked for
-/// when row-level security can apply to the target role: scratch may then
-/// not bypass it either, and its role owns what replay creates as the
-/// target role owns what migrate creates, so PostgreSQL answers in scratch
-/// as it will on the target. `applied` migrations already ran there.
-fn row_security_probes<'a>(
+/// The checks this plan's migrate will run, as `CheckProbe`s. `applied`
+/// migrations already ran on the target. Tables are named only when
+/// `row_security` can apply to the target role: scratch may then not
+/// bypass it either, and its role owns what replay creates as the target
+/// role owns what migrate creates, so PostgreSQL answers in scratch as it
+/// will on the target.
+fn check_probes<'a>(
     inputs: &'a CapturedInputs,
     applied: usize,
     adoption: Option<&super::adoption::Adoption>,
-) -> Vec<Probe<'a>> {
+    row_security: bool,
+) -> Vec<CheckProbe<'a>> {
     let schema = &inputs.config.schema;
-    let probe = |state, source, phase, name, sql: &str| Probe {
+    let probe = |state, source, phase, name, sql: &'a str| CheckProbe {
         state,
         source,
         phase,
         name,
-        tables: super::analysis::check_tables(sql, schema)
-            .into_iter()
-            .filter(|(s, _)| s == schema)
-            .map(|(_, table)| table)
-            .collect(),
+        sql,
+        tables: if row_security {
+            super::analysis::check_tables(sql, schema)
+                .into_iter()
+                .filter(|(s, _)| s == schema)
+                .map(|(_, table)| table)
+                .collect()
+        } else {
+            vec![]
+        },
     };
     let mut probes = vec![];
     if let Some(action) = adoption {
@@ -611,7 +621,6 @@ fn row_security_probes<'a>(
             }
         }
     }
-    probes.retain(|p| !p.tables.is_empty());
     probes
 }
 
@@ -627,7 +636,7 @@ async fn replay_prefix(
     inputs: &CapturedInputs,
     role: &str,
     (count, reference, plan): (usize, usize, bool),
-    probes: &[Probe<'_>],
+    probes: &[CheckProbe<'_>],
     replayed: &mut Replayed,
 ) -> Result<()> {
     let (schema, extra) = (&inputs.config.schema, &inputs.history_schemas);
@@ -643,6 +652,7 @@ async fn replay_prefix(
                 .execute_captured(
                     migration,
                     schema,
+                    extra,
                     super::inventory::Limits::default().statement(),
                 )
                 .await?;
@@ -658,18 +668,33 @@ async fn replay_prefix(
         };
         replayed.outside.extend(outside.iter().cloned());
         let keep = index == reference || (plan && index == count);
+        // Two objects sharing a catalog key exist only in the replayed
+        // catalog too: name the migration that made them.
+        let attribute = |mut d: Diagnostic| {
+            if d.code == "DB_CATALOG_AMBIGUOUS" {
+                d.source = migration.map(|m| m.name.clone());
+            }
+            d
+        };
         let (uncovered, catalog, fingerprint) = if keep {
-            let catalog = scratch.catalog(schema, extra, &outside, role).await?;
+            let catalog = scratch
+                .catalog(schema, extra, &outside, role)
+                .await
+                .map_err(attribute)?;
             let fingerprint = plan.then(|| digests.digest(&catalog));
             (catalog.uncovered.clone(), Some(catalog), fingerprint)
         } else if plan {
             let (uncovered, fingerprint) = scratch
                 .fingerprint(schema, extra, &outside, role, &mut digests)
-                .await?;
+                .await
+                .map_err(attribute)?;
             (uncovered, None, Some(fingerprint))
         } else {
             (
-                scratch.coverage(schema, extra, &outside, role).await?,
+                scratch
+                    .coverage(schema, extra, &outside, role)
+                    .await
+                    .map_err(attribute)?,
                 None,
                 None,
             )
@@ -686,14 +711,27 @@ async fn replay_prefix(
             return Err(d);
         }
         for probe in probes.iter().filter(|p| p.state == index) {
-            for blocked in scratch.row_security_blocked(schema, &probe.tables).await? {
-                replayed.check_warnings.push(super::row_security_warning(
-                    probe.source,
-                    probe.name,
-                    probe.phase,
-                    &blocked,
-                ));
-            }
+            // In the order migrate meets them: a hazard refuses the check
+            // before any check of its phase runs, row-level security right
+            // before the check itself.
+            let mut findings: Vec<super::CheckFinding> = scratch
+                .check_hazards(schema, probe.sql)
+                .await?
+                .into_iter()
+                .map(super::CheckFinding::Hazard)
+                .collect();
+            findings.extend(
+                scratch
+                    .row_security_blocked(schema, &probe.tables)
+                    .await?
+                    .into_iter()
+                    .map(super::CheckFinding::RowSecurity),
+            );
+            replayed
+                .check_warnings
+                .extend(findings.iter().map(|finding| {
+                    super::check_warning(probe.source, probe.name, probe.phase, finding)
+                }));
         }
         replayed.fingerprints.extend(fingerprint);
         if index == reference {
@@ -872,8 +910,13 @@ async fn inspect_observed(
     // catalog is final (below).
     let coverage_at = report["diagnostics"].as_array().map_or(0, Vec::len);
     let mut replayed = Replayed::default();
-    let probes = if command == "plan" && identity.row_security_applies() {
-        row_security_probes(inputs, applied, adoption.as_ref())
+    let probes = if command == "plan" {
+        check_probes(
+            inputs,
+            applied,
+            adoption.as_ref(),
+            identity.row_security_applies(),
+        )
     } else {
         vec![]
     };
@@ -1038,9 +1081,8 @@ async fn inspect_observed(
         if let Some(action) = adoption {
             plan["action"] = json!(action);
         }
-        // For the reviewer: checks migrate will refuse because row-level
-        // security applies to the migration role. Absent when there are
-        // none, so other plans keep their digests.
+        // For the reviewer: checks migrate will refuse (#456, #430). Absent
+        // when there are none, so other plans keep their digests.
         if !check_warnings.is_empty() {
             plan["check_warnings"] = json!(check_warnings);
         }
@@ -1458,6 +1500,7 @@ mod tests {
                     .execute_captured(
                         migration,
                         "main",
+                        &[],
                         super::super::inventory::Limits::default().statement(),
                     )
                     .await;

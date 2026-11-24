@@ -34,6 +34,77 @@ pub struct Diagnostic {
     pub next_action: String,
 }
 
+/// What stops a check from running as written (#456), found before any
+/// check of its phase runs (`Postgres::check_hazards`).
+pub(super) enum CheckHazard {
+    /// The check compares `column` of `relation` (catalog key `key`) with
+    /// `operator_name`, and `operator` (`app.=(app.citext,app.citext)`)
+    /// takes `base_type`, the column's type or a type in its domain
+    /// base-type chain: the application would use it, but checks resolve
+    /// operators with search_path=pg_catalog, where it is not visible.
+    Operator {
+        key: String,
+        relation: String,
+        column: String,
+        operator_name: &'static str,
+        column_type: String,
+        base_type: String,
+        operator: String,
+    },
+    /// The check reads `view` (catalog key `key`), directly or through other
+    /// views, and it calls `function`, a builtin that writes or takes locks.
+    ViewWrites {
+        key: String,
+        view: String,
+        function: String,
+    },
+}
+
+impl CheckHazard {
+    fn key(&self) -> &str {
+        match self {
+            Self::Operator { key, .. } | Self::ViewWrites { key, .. } => key,
+        }
+    }
+    fn relation(&self) -> &str {
+        match self {
+            Self::Operator { relation, .. } => relation,
+            Self::ViewWrites { view, .. } => view,
+        }
+    }
+    /// What the check does, after its name.
+    fn describe(&self) -> String {
+        match self {
+            Self::Operator {
+                relation,
+                column,
+                operator_name,
+                column_type,
+                base_type,
+                operator,
+                ..
+            } => {
+                let typ = if column_type == base_type {
+                    format!("type {column_type}")
+                } else {
+                    format!("type {column_type}, a domain over {base_type}")
+                };
+                format!("compares column {column} of {relation} ({typ}) with {operator_name}. The application's {operator_name} there is {operator}, but checks resolve operators with search_path=pg_catalog, where it is not visible, so the check would compare with another operator (citext, for example, would compare as case-sensitive text) or fail")
+            }
+            Self::ViewWrites { view, function, .. } => format!(
+                "reads view {view}, which calls {function}, a builtin that writes or takes locks; checks must not change anything"
+            ),
+        }
+    }
+    /// How to write the check so that it can run.
+    fn remedy(&self) -> &'static str {
+        match self {
+            Self::Operator { .. } => "Do the comparison in a view that a migration creates (a view keeps the operator chosen when it is created) and check the view, for example SELECT NOT EXISTS (SELECT 1 FROM app.admin_accounts); or use count(*) or IS NULL forms, which compare no value.",
+            Self::ViewWrites { .. } => "Read the view's underlying tables in the check instead.",
+        }
+    }
+}
+
 /// A relation a check would read where row-level security applies to the
 /// migration role, so the check cannot read it (#430).
 pub(super) struct RowSecurity {
@@ -55,6 +126,31 @@ fn check_label(name: &str, phase: &str) -> String {
         "adoption" => format!("{name} (adoption_checks)"),
         phase => format!("{name} ([{phase}])"),
     }
+}
+
+/// `DB_CHECK_UNSUPPORTED`: check `name` of `phase` has `hazards` (#456), so
+/// it is refused before any check of its phase runs.
+pub(super) fn check_hazard_refusal(name: &str, phase: &str, hazards: &[CheckHazard]) -> Diagnostic {
+    let mut objects: Vec<String> = hazards.iter().map(|h| h.key().to_owned()).collect();
+    objects.sort();
+    objects.dedup();
+    let what: Vec<String> = hazards.iter().map(CheckHazard::describe).collect();
+    let mut d = Diagnostic::new(
+        "DB_CHECK_UNSUPPORTED",
+        &format!(
+            "Check {} {}. No check of this phase ran.",
+            check_label(name, phase),
+            what.join("; it also ")
+        ),
+    )
+    .with_objects(&objects);
+    let mut remedies: Vec<&str> = hazards.iter().map(CheckHazard::remedy).collect();
+    remedies.dedup();
+    d.next_action = format!(
+        "{} Then plan, review and approve again. The refused check's migration rolled back; progress shows each migration's state. See docs/DATABASE_MIGRATIONS.md, Immutable SQL inventory.",
+        remedies.join(" ")
+    );
+    d
 }
 
 /// `blocked` in words, each with why row-level security applies to the role.
@@ -110,33 +206,65 @@ pub(super) fn row_security_refusal(
     d
 }
 
-/// A plan's warning that check `name` of `phase` in `source` will read
-/// `blocked`, where row-level security applies to the migration role, so
-/// migrate will refuse it with `DB_CHECK_ROW_SECURITY` (#430).
-pub(super) fn row_security_warning(
+/// What a plan warns of in a pending check that migrate will refuse: a
+/// hazard (#456), refused before any check of its phase runs, or a table
+/// where row-level security applies to the migration role (#430), refused
+/// right before the check runs.
+pub(super) enum CheckFinding {
+    Hazard(CheckHazard),
+    RowSecurity(RowSecurity),
+}
+
+/// A `plan.check_warnings` entry: check `name` of `phase` in `source` (a
+/// migration file, or `manifest` for adoption checks) has `finding`, so
+/// migrate will refuse it. Every entry has `code`, `source`, `phase`,
+/// `check`, `relation` and `message`; `CHECK_ROW_SECURITY` adds `forced`.
+pub(super) fn check_warning(
     source: &str,
     name: &str,
     phase: &str,
-    blocked: &RowSecurity,
+    finding: &CheckFinding,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "code": "CHECK_ROW_SECURITY",
+    let label = check_label(name, phase);
+    let (code, relation, message) = match finding {
+        CheckFinding::Hazard(hazard) => (
+            match hazard {
+                CheckHazard::Operator { .. } => "CHECK_OPERATOR_MISMATCH",
+                CheckHazard::ViewWrites { .. } => "CHECK_VIEW_WRITES",
+            },
+            hazard.relation(),
+            format!(
+                "Check {label} {}. migrate will refuse this check (DB_CHECK_UNSUPPORTED) before any check of its phase runs and roll its migration back. {}",
+                hazard.describe(),
+                hazard.remedy()
+            ),
+        ),
+        CheckFinding::RowSecurity(blocked) => (
+            "CHECK_ROW_SECURITY",
+            blocked.relation.as_str(),
+            format!(
+                "Check {label} reads {}, where row-level security applies to the migration role, which does not bypass it. Checks read with row_security=off, so {} (DB_CHECK_ROW_SECURITY) and roll its migration back. Give the migration role BYPASSRLS, or change the check, then plan again.",
+                row_security_relations(std::slice::from_ref(blocked)),
+                if blocked.direct {
+                    "migrate will refuse this check"
+                } else {
+                    "PostgreSQL will refuse the check's read of that table, if the view reads it, and migrate will fail the check"
+                }
+            ),
+        ),
+    };
+    let mut warning = serde_json::json!({
+        "code": code,
         "source": source,
         "phase": phase,
         "check": name,
-        "relation": blocked.relation,
-        "forced": blocked.forced,
-        "message": format!(
-            "Check {} reads {}, where row-level security applies to the migration role, which does not bypass it. Checks read with row_security=off, so {} (DB_CHECK_ROW_SECURITY) and roll its migration back. Give the migration role BYPASSRLS, or change the check, then plan again.",
-            check_label(name, phase),
-            row_security_relations(std::slice::from_ref(blocked)),
-            if blocked.direct {
-                "migrate will refuse this check"
-            } else {
-                "PostgreSQL will refuse the check's read of that table, if the view reads it, and migrate will fail the check"
-            }
-        ),
-    })
+        "relation": relation,
+        "message": message,
+    });
+    if let CheckFinding::RowSecurity(blocked) = finding {
+        warning["forced"] = serde_json::json!(blocked.forced);
+    }
+    warning
 }
 
 /// A plan's `check_warnings` for the checks of `source` (a migration file,
@@ -170,7 +298,7 @@ impl Diagnostic {
             "DB_SCRATCH_COLLISION" | "DB_SCRATCH_CREDENTIALS" | "DB_SCRATCH_NOT_EMPTY" | "DB_SCRATCH_MISMATCH" => "Provision a separate empty engine-matching scratch database/file. PostgreSQL requires a separate unprivileged owner role. Do not reset the selected target.",
             "DB_REPLAY_UNSUPPORTED" => "Review the named migration's analysis.unknowns against docs/DATABASE_MIGRATIONS.md. Remove transaction control, role/session changes and other non-transactional statements from migration files. The one supported non-transactional migration is a lone named CREATE INDEX CONCURRENTLY without checks.",
             "DB_COVERAGE_INCOMPLETE" => "Its objects field lists each catalog object outside supported inspection; when replaying a migration produced them, its source field names that migration (the target's own uncovered objects are also in catalog.uncovered). Change or remove those objects to stay within the coverage in docs/DATABASE_MIGRATIONS.md, or obtain manual evidence; do not interpret this result as no drift.",
-            "DB_CATALOG_AMBIGUOUS" => "Inspect catalog.uncovered and object differences. Extend supported inspection or obtain manual evidence; do not interpret this result as no drift.",
+            "DB_CATALOG_AMBIGUOUS" => "Two catalog objects share the key its objects field names, or catalog metadata was missing; when replaying a migration produced them, its source field names that migration. Rename one of the objects (or drop the one that is not needed), or obtain manual evidence; do not interpret this result as no drift.",
             "DB_OUTSIDE_SCOPE" => "Remove the named statements from the migration that source names. The _ntnt schema holds NTNT's migration ledger, and pg_catalog, information_schema and the other pg_* schemas belong to PostgreSQL: migrations may not create, change, drop, grant or revoke on them, or put _ntnt on the search_path (pg_temp is allowed). Statements on other schemas, such as public, are allowed. See docs/DATABASE_MIGRATIONS.md#managed-scope.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
             "DB_TARGET_CHANGED" => "Another session changed the target while it was being inspected, for example a concurrent migrate. Rerun the command once that work has finished.",
@@ -188,6 +316,7 @@ impl Diagnostic {
             "DB_MIGRATION_EMPTY" => "Write the migration's SQL below its header comment, or delete the file if it is not needed yet. Nothing was run.",
             "DB_STATEMENT_LIMIT" => "Make the statement cheaper. For migrate on a target, raise statement_seconds in [databases.<name>.limits] (docs/DATABASE_MIGRATIONS.md, Time limits) and review a new plan, since the limit is part of the plan; replay's limit on the empty scratch database is fixed.",
             "DB_BUSY" => "Retry once the writer finishes: wait for the other connection's write transaction to end, or close the connection that set PRAGMA locking_mode=EXCLUSIVE (it keeps the lock until it closes), then rerun the same command. Nothing was committed by the operation that hit the lock; migrate, rerun with the same plan, skips any migration already committed.",
+            "DB_ENUM_VALUE_UNCOMMITTED" => "PostgreSQL cannot use an enum value in the transaction that added it, so put ALTER TYPE ... ADD VALUE in its own migration and use the value in a later one, then plan again. The failed migration's transaction was rolled back.",
             "DB_LOCK_CONFLICT" => "Another session held a conflicting lock; nothing was committed for this migration. Retry the same reviewed plan when application or migrator load allows.",
             "DB_TIMEOUT" => "Check endpoint availability and conflicting locks. Preserve committed progress; reconcile unknown migration outcomes with the same reviewed plan before any further SQL.",
             "DB_PLAN_STALE" | "DB_PLAN_INVALID" | "DB_LEDGER_SCOPE" | "DB_LEDGER_UNSAFE" => "Generate and review a new plan for the explicit target; a plan digest never grants authority.",

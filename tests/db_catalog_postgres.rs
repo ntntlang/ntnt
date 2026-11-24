@@ -1220,7 +1220,8 @@ GRANT SELECT ON app.account_emails TO PUBLIC;
 /// #420, so plans saved by earlier releases keep validating. The
 /// fingerprints were recorded with ntnt 0.6.4 before #420 (81a5ad0). They
 /// differ between PostgreSQL major versions (for example the default table
-/// privileges gained MAINTAIN in 17), never within one.
+/// privileges gained MAINTAIN in 17), never within one. #430 left them
+/// unchanged too: it covers kinds of objects this history does not use.
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn single_schema_catalog_fingerprints_are_unchanged() {
@@ -1334,4 +1335,909 @@ fn a_policy_calling_a_routine_outside_the_scope_is_uncovered() {
             .any(|o| o.as_str().unwrap().contains("t_read")),
         "{d}"
     );
+}
+
+/// A difference of `change` on `object` in a verify report.
+fn drifted(r: &Value, object: &str, change: &str) -> bool {
+    r["drift"]["differences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["object"] == object && d["change"] == change)
+}
+
+/// Plan, approve and migrate the history in `f`, then verify it.
+fn migrate_and_verify(f: &Fixture) -> Value {
+    let plan = f.plan("plan.json");
+    let applied = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    let clean = f.command("verify");
+    assert_eq!(clean["outcome"], "pass", "{clean}");
+    assert_eq!(
+        clean["catalog"]["uncovered"],
+        serde_json::json!([]),
+        "{clean}"
+    );
+    clean
+}
+
+/// #430 (pg-05): enums, domains and composite types, in the managed schema
+/// and in a schema the history creates, are compared by definition like
+/// tables. A history that uses them plans, migrates and verifies, columns of
+/// those types are covered, and an out-of-band change to a type is drift on
+/// that type.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn enums_domains_and_composite_types_are_compared_by_definition() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_types.sql",
+        "CREATE TYPE app.order_status AS ENUM ('pending', 'paid', 'shipped');
+CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DEFAULT 'pending', history app.order_status[]);
+CREATE DOMAIN app.email AS text CHECK (VALUE ~ '@');
+CREATE TABLE app.contacts (id int PRIMARY KEY, email app.email NOT NULL);
+CREATE TYPE app.address AS (street text, city text);
+CREATE TABLE app.places (id int PRIMARY KEY, addr app.address);
+CREATE SCHEMA billing;
+CREATE DOMAIN billing.cents AS bigint NOT NULL DEFAULT 0 CHECK (VALUE >= 0);
+CREATE TABLE app.invoices (id int PRIMARY KEY, total billing.cents);
+",
+    );
+    let clean = migrate_and_verify(&f);
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "type:order_status",
+        "type:email",
+        "relation:address",
+        "column:address.street",
+        "column:orders.status",
+        "column:orders.history",
+        "column:contacts.email",
+        "column:places.addr",
+        "billing.type:cents",
+        "column:invoices.total",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    // Enum labels are literals: reported by digest, as definitions are.
+    assert_eq!(
+        objects["type:order_status"]["labels"]["redacted"], true,
+        "{}",
+        objects["type:order_status"]
+    );
+    for (change, object, how) in [
+        (
+            "ALTER TYPE app.order_status ADD VALUE 'refunded'",
+            "type:order_status",
+            "changed",
+        ),
+        (
+            "ALTER DOMAIN app.email DROP CONSTRAINT email_check; ALTER DOMAIN app.email ADD CONSTRAINT email_check CHECK (VALUE ~ '@.')",
+            "type:email",
+            "changed",
+        ),
+        (
+            "ALTER DOMAIN billing.cents SET DEFAULT 1",
+            "billing.type:cents",
+            "changed",
+        ),
+        (
+            "ALTER TYPE app.address ADD ATTRIBUTE zip text",
+            "column:address.zip",
+            "unexpected",
+        ),
+        (
+            "REVOKE USAGE ON TYPE app.address FROM PUBLIC",
+            "relation:address",
+            "changed",
+        ),
+    ] {
+        f.target().batch_execute(change).unwrap();
+        let r = f.command("verify");
+        assert_eq!(r["outcome"], "fail", "{change}: {r}");
+        assert!(drifted(&r, object, how), "{change}: {}", r["drift"]);
+    }
+}
+
+/// #430 (pg-04): a trusted extension installed in the managed schema is
+/// covered by its name and version, and so are its members: types,
+/// operators, operator classes and families, aggregates and casts. Indexes
+/// and columns that use them are covered, citext's implicit casts do not
+/// stop later migrations, and changing the version out of band is drift.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn trusted_extensions_in_the_managed_schema_are_covered_by_version() {
+    let f = Fixture::new();
+    // The #430 repro, `SCHEMA` without `WITH` included.
+    f.sql(
+        "0001_trgm.sql",
+        "CREATE EXTENSION pg_trgm SCHEMA app;
+CREATE TABLE app.products (id int PRIMARY KEY, name text NOT NULL);
+CREATE INDEX products_name_trgm ON app.products USING gin (name app.gin_trgm_ops);
+",
+    );
+    f.sql(
+        "0002_citext.sql",
+        "CREATE EXTENSION citext WITH SCHEMA app VERSION '1.4';
+CREATE TABLE app.users (id int PRIMARY KEY, email app.citext NOT NULL UNIQUE);
+",
+    );
+    f.sql(
+        "0003_nick.sql",
+        "ALTER TABLE app.users ADD COLUMN nick app.citext;\n",
+    );
+    let clean = migrate_and_verify(&f);
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "extension:pg_trgm",
+        "extension:citext",
+        "type:gtrgm",
+        "type:citext",
+        "index:products_name_trgm",
+        "index:users_email_key",
+        "column:users.email",
+        "column:users.nick",
+        "routine:max(app.citext)",
+        "other:operator.%(text,text)",
+        "other:operator.=(app.citext,app.citext)",
+        "other:operator_class.gin_trgm_ops USING gin",
+        "other:operator_class.citext_ops USING btree",
+        "other:operator_class.citext_ops USING hash",
+        "other:operator_family.citext_ops USING btree",
+        "other:operator_family.citext_ops USING hash",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    // The installer owns the members; the extension's version covers them.
+    assert_eq!(objects["type:citext"]["extension"], "citext");
+    assert!(objects["type:citext"]["owner"].is_null());
+    f.target()
+        .batch_execute("ALTER EXTENSION citext UPDATE TO '1.5'")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "fail", "{r}");
+    assert!(drifted(&r, "extension:citext", "changed"), "{}", r["drift"]);
+}
+
+/// #430 (pg-03): an operator is keyed with its argument types, as a routine
+/// is, so overloads no longer collide. One whose function is covered is
+/// covered, and dropping an overload out of band is drift on that overload.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn overloaded_operators_have_distinct_keys() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_ops.sql",
+        "CREATE FUNCTION app.eqi(a int, b int) RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT a = b $$;
+CREATE FUNCTION app.eqt(a text, b text) RETURNS boolean LANGUAGE sql IMMUTABLE AS $$ SELECT a = b $$;
+CREATE OPERATOR app.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = app.eqi);
+CREATE OPERATOR app.=== (LEFTARG = text, RIGHTARG = text, FUNCTION = app.eqt);
+",
+    );
+    let clean = migrate_and_verify(&f);
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "other:operator.===(integer,integer)",
+        "other:operator.===(text,text)",
+    ] {
+        assert!(objects.contains_key(key), "{key}: {:?}", objects.keys());
+    }
+    f.target()
+        .batch_execute("DROP OPERATOR app.=== (text, text)")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "fail", "{r}");
+    assert!(
+        drifted(&r, "other:operator.===(text,text)", "missing"),
+        "{}",
+        r["drift"]
+    );
+    assert!(
+        !drifted(&r, "other:operator.===(integer,integer)", "missing"),
+        "{}",
+        r["drift"]
+    );
+}
+
+/// #430 (pg-03): objects that still share a catalog key (a database-wide
+/// default privilege and one in the managed schema, for the same role and
+/// object type) make inspection ambiguous. The diagnostic names the key and
+/// the migration that made them.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn colliding_catalog_keys_name_the_key_and_the_migration() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_acl.sql",
+        "CREATE TABLE app.t (id int);
+ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app GRANT SELECT ON TABLES TO PUBLIC;
+",
+    );
+    let r = f.command("plan");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_CATALOG_AMBIGUOUS").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["source"], "0001_acl.sql", "{d}");
+    let key = format!("other:default_acl.{}.r", f.scratch);
+    assert_eq!(names(&d["objects"]), [key.as_str()], "{d}");
+    assert!(
+        d["next_action"].as_str().unwrap().contains("objects field"),
+        "{d}"
+    );
+}
+
+/// #430 (pg-06): EXCLUDE constraints are covered, with built-in operator
+/// classes and with an extension's (btree_gist) installed in the managed
+/// schema, and dropping one out of band is drift.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn exclusion_constraints_are_covered() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_bookings.sql",
+        "CREATE TABLE app.bookings (id int PRIMARY KEY, room int NOT NULL, during tstzrange NOT NULL,
+  CONSTRAINT bookings_no_overlap EXCLUDE USING gist (during WITH &&));
+CREATE EXTENSION btree_gist WITH SCHEMA app;
+CREATE TABLE app.rooms (id int PRIMARY KEY, room int NOT NULL, during tstzrange NOT NULL,
+  CONSTRAINT rooms_no_overlap EXCLUDE USING gist (room WITH =, during WITH &&));
+",
+    );
+    let clean = migrate_and_verify(&f);
+    let objects = clean["catalog"]["objects"].as_object().unwrap();
+    for key in [
+        "constraint:bookings.bookings_no_overlap",
+        "constraint:rooms.rooms_no_overlap",
+    ] {
+        assert_eq!(objects[key]["kind"], "x", "{key}: {:?}", objects.keys());
+    }
+    f.target()
+        .batch_execute("ALTER TABLE app.bookings DROP CONSTRAINT bookings_no_overlap")
+        .unwrap();
+    let r = f.command("verify");
+    assert_eq!(r["outcome"], "fail", "{r}");
+    assert!(
+        drifted(&r, "constraint:bookings.bookings_no_overlap", "missing"),
+        "{}",
+        r["drift"]
+    );
+}
+
+/// What #430 leaves outside coverage is still named, with the migration
+/// that made it: a range type is uncovered, and a custom implicit cast that
+/// is not an extension's stops the next migration by name.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn range_types_and_custom_casts_are_refused_by_name() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_span.sql",
+        "CREATE TYPE app.span AS RANGE (subtype = int4);\n",
+    );
+    let r = f.command("plan");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let coverage = diagnostic(&r, "DB_COVERAGE_INCOMPLETE").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(coverage["source"], "0001_span.sql", "{coverage}");
+    assert!(
+        names(&coverage["objects"]).contains(&"type:span"),
+        "{coverage}"
+    );
+    f.sql(
+        "0001_span.sql",
+        "CREATE TYPE app.mood AS ENUM ('ok');
+CREATE FUNCTION app.mood_text(app.mood) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT 'x' $$;
+CREATE CAST (app.mood AS text) WITH FUNCTION app.mood_text(app.mood) AS IMPLICIT;
+",
+    );
+    f.sql("0002_next.sql", "CREATE TABLE app.t (id int);\n");
+    let r = f.command("plan");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let cast = diagnostic(&r, "DB_CHECK_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(cast["source"], "0002_next.sql", "{cast}");
+    assert_eq!(names(&cast["objects"]), ["cast:app.mood AS text"], "{cast}");
+}
+
+/// The same history with `public` as the managed schema, as many
+/// applications have. Recorded with the ntnt 0.6.4 release binary, before
+/// #430 changed the catalog queries.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn single_schema_catalog_fingerprints_are_unchanged_in_public() {
+    let mut f = Fixture::with_schema("public");
+    for (name, sql) in SINGLE_SCHEMA_HISTORY {
+        f.sql(name, &sql.replace("app.", "public."));
+    }
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let major = f
+        .admin
+        .query_one(
+            "SELECT current_setting('server_version_num')::int / 10000",
+            &[],
+        )
+        .unwrap()
+        .get::<_, i32>(0);
+    let empty = "66b18e7c326d3809ac2689e4e29d0f148deba1b3866af541cfdc416f8dbf7a1a";
+    let expected = match major {
+        16 => [
+            empty,
+            "84fc02b092c3138b2066703bfac35f3b192e87620b31b4ea43a5ec0abb8ac18c",
+            "75550a7d9fe10d0b536fe0a2dc72fa76baf7421d8596ee132a0aa3b1a2c215ec",
+        ],
+        17 => [
+            empty,
+            "fdb8c30aaa50a087cb0c2d2071a79675b6afd733b83ec69e9aa075d3dd3edb98",
+            "ebe510bef74dec28b5bd22bb3ba8db6ed07c9697992e4e3a4f410b6717b73db8",
+        ],
+        18 => [
+            empty,
+            "ac1a4983271ecb6d86b8593814d8e5ef5acb62dd945baf96498887ad501b6d8f",
+            "8420a1d8f099ea3ffcddb15d476b40615991713e2b8d8206e791fb143724a329",
+        ],
+        other => panic!("no recorded fingerprints for PostgreSQL {other}"),
+    };
+    assert_eq!(
+        r["plan"]["execution"]["prefix_fingerprints"],
+        serde_json::json!(expected),
+        "PostgreSQL {major}"
+    );
+}
+
+/// #430: checks, adoption checks included, may read tables whose columns
+/// use the types the history covers (an enum, a domain, a composite type,
+/// an extension's type in the managed schema), while citext's casts exist.
+/// They still run no routine the history wrote: comparing a domain's values
+/// does not evaluate its constraint, which here would advance a sequence.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_read_tables_with_columns_of_covered_types() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_types.sql",
+        "CREATE EXTENSION citext WITH SCHEMA app;
+CREATE SEQUENCE app.calls;
+CREATE FUNCTION app.valid(t text) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN position('@' in t) > 0; END $$;
+CREATE DOMAIN app.email AS text CHECK (app.valid(VALUE));
+CREATE TYPE app.order_status AS ENUM ('pending', 'paid');
+CREATE TYPE app.address AS (street text, city text);
+CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL, contact app.email, login app.citext, addr app.address);
+",
+    );
+    f.sql(
+        "0002_seed.sql",
+        "INSERT INTO app.orders VALUES (1, 'paid', 'a@b', 'A', ROW('x', 'y'));\n",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_seed.toml"),
+        "[ensures]\npaid = \"SELECT EXISTS (SELECT 1 FROM app.orders WHERE status = 'paid' AND contact = 'a@b' AND contact <> 'b' AND login IS NOT NULL AND addr IS NOT NULL)\"\n",
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+    // Only the seed INSERT coerced a value into the domain.
+    let calls: i64 = f
+        .target()
+        .query_one("SELECT last_value FROM app.calls", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(calls, 1);
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+/// The first migration of a #456 check-purity case: an authored function
+/// that also advances a sequence, and a domain whose constraint calls it. A
+/// sequence advance survives the rollback a refusal causes, so `is_called`
+/// shows whether the function ran.
+const CALLS_DOMAIN: &str = "CREATE SEQUENCE app.calls;
+CREATE FUNCTION app.valid(t text) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN position('@' in t) > 0; END $$;
+CREATE DOMAIN app.email AS text CHECK (app.valid(VALUE));
+";
+
+/// Migrates `setup` after `CALLS_DOMAIN`, then a second migration whose
+/// `ensures` holds `checks`. Returns the migrate report and whether
+/// `app.valid` ran.
+fn migrate_checks(setup: &str, checks: &[(&str, &str)]) -> (Value, bool) {
+    let f = Fixture::new();
+    f.sql("0001_types.sql", &format!("{CALLS_DOMAIN}{setup}"));
+    f.sql("0002_checked.sql", "CREATE TABLE app.marker (id int);\n");
+    let ensures: String = checks
+        .iter()
+        .map(|(name, sql)| format!("{name} = {sql:?}\n"))
+        .collect();
+    std::fs::write(
+        f.root.path().join("migrations/0002_checked.toml"),
+        format!("[ensures]\n{ensures}"),
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    let ran = f
+        .target()
+        .query_one("SELECT is_called FROM app.calls", &[])
+        .unwrap()
+        .get(0);
+    (r, ran)
+}
+
+/// #456 review: `check` is refused by name before it runs, the message
+/// holding each of `named`, and `app.valid` never ran.
+fn assert_check_refused(setup: &str, check: &str, named: &[&str]) {
+    let (r, ran) = migrate_checks(setup, &[("nested", check)]);
+    let d = diagnostic(&r, "DB_CHECK_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+    let message = d["message"].as_str().unwrap();
+    for name in named {
+        assert!(message.contains(name), "{name}: {d}");
+    }
+    assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0, "{r}");
+    assert!(!ran, "app.valid ran: {r}");
+}
+
+/// #456 review: comparing a column with a literal converts the literal to
+/// the column's type, and each element of an array goes through its type's
+/// input, domain constraints included. So a check that can read an array of
+/// a domain whose constraint calls a routine the history wrote is refused
+/// by name; so is one through a domain over that array, a constraint that
+/// calls a volatile builtin, and one that uses an operator the history
+/// wrote.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_arrays_of_domains_whose_constraints_call_history_code() {
+    assert_check_refused(
+        "CREATE TABLE app.orders (id int, emails app.email[]);\n",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE emails = '{a@b}')",
+        &[
+            "table app.orders has column emails of type app.email[]",
+            "domain app.email",
+            "app.valid(text) (a routine the history wrote)",
+        ],
+    );
+    assert_check_refused(
+        "CREATE DOMAIN app.emails AS app.email[];\nCREATE TABLE app.orders (id int, emails app.emails);\n",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE emails = '{a@b}')",
+        &["column emails of type app.emails", "domain app.email,"],
+    );
+    assert_check_refused(
+        "CREATE DOMAIN app.ticket AS text CHECK (nextval('app.calls') > 0);\nCREATE TABLE app.orders (id int, tickets app.ticket[]);\n",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE tickets = '{x}')",
+        &["domain app.ticket", "nextval(regclass) (a volatile function)"],
+    );
+    assert_check_refused(
+        "CREATE FUNCTION app.same(a int, b int) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN a = b; END $$;
+CREATE OPERATOR app.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = app.same);
+CREATE DOMAIN app.three AS int CHECK (VALUE OPERATOR(app.===) 3);
+CREATE TABLE app.orders (id int, threes app.three[]);
+",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE threes = '{3}')",
+        &["domain app.three", "app.same(integer,integer)"],
+    );
+}
+
+/// #456 review: a composite's attributes go through their types' input too.
+/// In an array a composite meets a literal like any element; as a column's
+/// top-level type it meets one as an anonymous record, which PostgreSQL
+/// rejects before any input runs, but the gate counts it anyway.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_composites_with_domains_whose_constraints_call_history_code() {
+    let contact = "CREATE TYPE app.contact AS (email app.email, name text);\n";
+    assert_check_refused(
+        &format!("{contact}CREATE TABLE app.orders (id int, contact app.contact);\n"),
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE contact IS NULL)",
+        &[
+            "column contact of type app.contact",
+            "domain app.email",
+            "app.valid(text)",
+        ],
+    );
+    assert_check_refused(
+        &format!("{contact}CREATE TABLE app.orders (id int, contacts app.contact[]);\n"),
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE contacts = '{\"(a@b,x)\"}')",
+        &["column contacts of type app.contact[]", "domain app.email"],
+    );
+}
+
+/// #456 review: a top-level domain over such a composite is refused too.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_domains_over_composites_with_such_domains() {
+    assert_check_refused(
+        "CREATE TYPE app.contact AS (email app.email, name text);
+CREATE DOMAIN app.known_contact AS app.contact CHECK (VALUE IS NOT NULL);
+CREATE TABLE app.orders (id int, contact app.known_contact);
+",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE contact IS NULL)",
+        &[
+            "column contact of type app.known_contact",
+            "domain app.email",
+        ],
+    );
+}
+
+/// #456 review: reading a view runs its conversions and operators. A view
+/// that converts values to a domain whose constraint calls a routine the
+/// history wrote, or that uses an operator the history wrote, is refused
+/// by name, though the view calls no such function itself.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_views_that_convert_to_such_domains_or_use_history_operators() {
+    let orders = "CREATE TABLE app.orders (id int, email text);\nINSERT INTO app.orders VALUES (1, 'a@b');\n";
+    assert_check_refused(
+        &format!("{orders}CREATE VIEW app.contacts AS SELECT id, email::app.email AS email FROM app.orders;\n"),
+        "SELECT EXISTS (SELECT 1 FROM app.contacts WHERE email IS NOT NULL)",
+        &[
+            "view app.contacts converts values to app.email",
+            "app.valid(text)",
+        ],
+    );
+    assert_check_refused(
+        &format!("{orders}CREATE FUNCTION app.same(a int, b int) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN a = b; END $$;
+CREATE OPERATOR app.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = app.same);
+CREATE VIEW app.firsts AS SELECT id FROM app.orders WHERE id OPERATOR(app.===) 1;
+"),
+        "SELECT EXISTS (SELECT 1 FROM app.firsts WHERE id IS NOT NULL)",
+        &[
+            "view app.firsts uses operator app.===(integer,integer)",
+            "app.same(integer,integer) (a routine the history wrote)",
+        ],
+    );
+    // The planner may put an operator's negator in its place.
+    assert_check_refused(
+        &format!("{orders}CREATE FUNCTION app.differ(a int, b int) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN a <> b; END $$;
+CREATE OPERATOR app.!== (LEFTARG = int, RIGHTARG = int, FUNCTION = app.differ);
+CREATE OPERATOR app.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = int4eq, NEGATOR = !==);
+CREATE VIEW app.others AS SELECT id FROM app.orders WHERE NOT (id OPERATOR(app.===) 2);
+"),
+        "SELECT EXISTS (SELECT 1 FROM app.others WHERE id IS NOT NULL)",
+        &["which the planner may replace with app.!==(integer,integer)", "app.differ(integer,integer)"],
+    );
+    // Builtins that convert to a type given at run time record no
+    // dependency on it.
+    assert_check_refused(
+        &format!("{orders}CREATE VIEW app.valid_emails AS SELECT id, pg_input_is_valid(email, 'app.email') AS ok FROM app.orders;\n"),
+        "SELECT EXISTS (SELECT 1 FROM app.valid_emails WHERE ok)",
+        &["view app.valid_emails calls pg_input_is_valid(text,text)"],
+    );
+    assert_check_refused(
+        "CREATE TABLE app.people (id int, email app.email);
+CREATE VIEW app.imports AS SELECT (json_populate_record(p, '{\"email\": \"a@b\"}')).email AS email FROM app.people p;
+",
+        "SELECT NOT EXISTS (SELECT 1 FROM app.imports WHERE email IS NULL)",
+        &["view app.imports calls json_populate_record(anyelement,json,boolean)"],
+    );
+}
+
+/// #456 review: what stays allowed. A literal compared with a column of a
+/// domain, or of a domain over it, is converted to the base type, so the
+/// constraint never runs, whatever it calls; a view may compare one too.
+/// An array of a domain whose constraint uses only builtins (a regular
+/// expression) is allowed: its elements' constraint runs and passes.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_run_with_plain_domains_and_builtin_only_nested_domains() {
+    let (r, ran) = migrate_checks(
+        "CREATE DOMAIN app.address AS text CHECK (VALUE ~ '@');
+CREATE DOMAIN app.primary_email AS app.email;
+CREATE TYPE app.copy AS (address app.address, name text);
+CREATE TABLE app.orders (id int, contact app.email, backup app.primary_email, cc app.address[], copies app.copy[]);
+CREATE VIEW app.recent AS SELECT id, contact FROM app.orders WHERE contact <> 'x';
+",
+        &[
+            (
+                "plain",
+                "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE contact = 'a@b' OR backup = 'c@d')",
+            ),
+            (
+                "regex",
+                "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE cc = '{a@b}' OR copies = '{\"(c@d,x)\"}')",
+            ),
+            (
+                "view",
+                "SELECT NOT EXISTS (SELECT 1 FROM app.recent WHERE contact = 'a@b')",
+            ),
+        ],
+    );
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 3, "{r}");
+    assert!(!ran, "app.valid ran: {r}");
+}
+
+/// #456: the data of the tester's j3 case, a citext column holding
+/// 'Admin@example.com', with a domain over citext, a citext array and an
+/// enum beside it.
+const CITEXT_USERS: &str = "CREATE EXTENSION citext WITH SCHEMA app;
+CREATE DOMAIN app.email AS app.citext;
+CREATE TYPE app.role AS ENUM ('admin', 'member');
+CREATE TABLE app.users (id int PRIMARY KEY, email app.citext NOT NULL UNIQUE, contact app.email, aliases app.citext[], role app.role NOT NULL DEFAULT 'member');
+INSERT INTO app.users VALUES (1, 'Admin@example.com', 'Admin@example.com', '{Admin@example.com}', 'admin');
+";
+
+/// Migrates `CITEXT_USERS` and `setup`, then a second migration whose
+/// `ensures` holds `checks`. Returns the plan and the migrate report.
+fn citext_checks(setup: &str, checks: &[(&str, &str)]) -> (Value, Value) {
+    let f = Fixture::new();
+    f.sql("0001_users.sql", &format!("{CITEXT_USERS}{setup}"));
+    f.sql("0002_checked.sql", "CREATE TABLE app.marker (id int);\n");
+    let ensures: String = checks
+        .iter()
+        .map(|(name, sql)| format!("{name} = {sql:?}\n"))
+        .collect();
+    std::fs::write(
+        f.root.path().join("migrations/0002_checked.toml"),
+        format!("[ensures]\n{ensures}"),
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    (plan, r)
+}
+
+/// #456: checks resolve operators with search_path=pg_catalog, so on the
+/// j3 data `email = 'admin@example.com'` compared case-sensitive text and
+/// passed where the application's citext `=` finds the account. Such a
+/// comparison is refused by name before any check runs, and `plan` warns:
+/// on a citext column, through a domain over citext as a scalar
+/// subquery's output, and on an enum the history gave its own `=`.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_comparisons_the_application_makes_with_another_operator() {
+    for (setup, check, named) in [
+        (
+            "",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.users WHERE email = 'admin@example.com')",
+            &[
+                "Check no_admin_account ([ensures]) compares column email of app.users (type app.citext) with =",
+                "app.=(app.citext,app.citext)",
+                "search_path=pg_catalog",
+            ][..],
+        ),
+        (
+            "",
+            "SELECT (SELECT contact FROM app.users WHERE id = 1) <> 'admin@example.com'",
+            &[
+                "compares column contact of app.users (type app.email, a domain over app.citext) with <>",
+                "app.<>(app.citext,app.citext)",
+            ][..],
+        ),
+        (
+            "CREATE FUNCTION app.role_eq(app.role, app.role) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1::text = $2::text';
+CREATE OPERATOR app.= (LEFTARG = app.role, RIGHTARG = app.role, FUNCTION = app.role_eq);
+",
+            "SELECT EXISTS (SELECT 1 FROM app.users WHERE role = 'admin')",
+            &["compares column role of app.users (type app.role) with =", "app.=(app.role,app.role)"][..],
+        ),
+    ] {
+        let (plan, r) = citext_checks(setup, &[("no_admin_account", check)]);
+        let warning = &plan["plan"]["check_warnings"][0];
+        assert_eq!(warning["code"], "CHECK_OPERATOR_MISMATCH", "{plan}");
+        assert_eq!(warning["source"], "0002_checked.sql", "{plan}");
+        assert_eq!(warning["check"], "no_admin_account", "{plan}");
+        assert_eq!(warning["relation"], "app.users", "{plan}");
+        let d = diagnostic(&r, "DB_CHECK_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+        for name in named {
+            assert!(d["message"].as_str().unwrap().contains(name), "{name}: {d}");
+        }
+        assert_eq!(d["objects"], serde_json::json!(["relation:users"]), "{d}");
+        assert_eq!(d["source"], "0002_checked.sql", "{d}");
+        assert!(
+            d["next_action"].as_str().unwrap().contains("in a view that a migration creates"),
+            "{d}"
+        );
+        assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+        assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+        assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0, "{r}");
+    }
+}
+
+/// #456: a comparison on a builtin-typed column of a table that also has
+/// citext columns, citext read with IS NULL, count(*) or GROUP BY, a citext
+/// array (whose `=` compares elements with citext's default operator class
+/// either way) and an enum compared with a literal all run, and pass.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_compare_builtin_columns_and_read_citext_without_comparing_it() {
+    let (plan, r) = citext_checks(
+        "",
+        &[
+            ("by_id", "SELECT EXISTS (SELECT 1 FROM app.users WHERE id = 1)"),
+            ("no_null_email", "SELECT NOT EXISTS (SELECT 1 FROM app.users WHERE email IS NULL)"),
+            ("one_user", "SELECT (SELECT count(*) FROM app.users) = 1"),
+            (
+                "unique_emails",
+                "SELECT NOT EXISTS (SELECT email FROM app.users GROUP BY email HAVING count(*) > 1)",
+            ),
+            (
+                "admin_alias",
+                "SELECT EXISTS (SELECT 1 FROM app.users WHERE aliases = '{admin@example.com}')",
+            ),
+            ("has_admin", "SELECT EXISTS (SELECT 1 FROM app.users WHERE role = 'admin')"),
+        ],
+    );
+    assert!(plan["plan"]["check_warnings"].is_null(), "{plan}");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 6, "{r}");
+}
+
+/// #456: the documented way to compare a citext column. A view a migration
+/// creates keeps citext's `=`, so a check of the view sees what the
+/// application sees and fails on the j3 data.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_view_keeps_the_application_operator_for_checks() {
+    let (plan, r) = citext_checks(
+        "CREATE VIEW app.admin_accounts AS SELECT id FROM app.users WHERE email = 'admin@example.com';\n",
+        &[("no_admin_account", "SELECT NOT EXISTS (SELECT 1 FROM app.admin_accounts)")],
+    );
+    assert!(plan["plan"]["check_warnings"].is_null(), "{plan}");
+    assert!(diagnostic(&r, "DB_CHECK_FAILED").is_some(), "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+    assert_eq!(r["assertions"]["checks"][0]["outcome"], "fail", "{r}");
+}
+
+/// #456: a check must not read a view, directly or through another view,
+/// that calls a builtin that writes or takes locks. pg_depend records no
+/// builtin, so the views' stored queries are read. The refusal names the
+/// check, the view and the function, and the sequence shows the check never
+/// ran: an advance survives the rollback.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_refuse_views_that_call_builtins_that_write_or_lock() {
+    for (views, named) in [
+        (
+            "CREATE VIEW app.next_ids AS SELECT pg_catalog.nextval('app.ids') AS id;\n",
+            &["Check ids ([ensures]) reads view app.next_ids, which calls nextval(regclass)"][..],
+        ),
+        (
+            "CREATE VIEW app.inner_ids AS SELECT pg_catalog.nextval('app.ids') AS id;
+CREATE VIEW app.next_ids AS SELECT id FROM app.inner_ids;
+",
+            &["reads view app.inner_ids, which calls nextval(regclass)"][..],
+        ),
+        (
+            "CREATE VIEW app.next_ids AS SELECT pg_catalog.pg_try_advisory_xact_lock(1) AS locked, pg_catalog.setval('app.ids', 5) AS id;\n",
+            &["pg_try_advisory_xact_lock(bigint)", "setval(regclass,bigint)"][..],
+        ),
+    ] {
+        let f = Fixture::new();
+        f.sql("0001_views.sql", &format!("CREATE SEQUENCE app.ids;\n{views}"));
+        f.sql("0002_checked.sql", "CREATE TABLE app.marker (id int);\n");
+        std::fs::write(
+            f.root.path().join("migrations/0002_checked.toml"),
+            "[ensures]\nids = \"SELECT (SELECT count(*) FROM app.next_ids) = 1\"\n",
+        )
+        .unwrap();
+        let plan = f.plan("plan.json");
+        assert_eq!(plan["plan"]["check_warnings"][0]["code"], "CHECK_VIEW_WRITES", "{plan}");
+        let r = f.apply("plan.json", plan["plan_digest"].as_str());
+        let d = diagnostic(&r, "DB_CHECK_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+        for name in named {
+            assert!(d["message"].as_str().unwrap().contains(name), "{name}: {d}");
+        }
+        assert!(d["next_action"].as_str().unwrap().contains("underlying tables"), "{d}");
+        assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+        assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0, "{r}");
+        let called: bool = f
+            .target()
+            .query_one("SELECT is_called FROM app.ids", &[])
+            .unwrap()
+            .get(0);
+        assert!(!called, "the check ran: {r}");
+    }
+}
+
+/// #456: volatile builtins that change nothing stay allowed in views checks
+/// read.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_read_views_that_call_volatile_builtins_that_change_nothing() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_views.sql",
+        "CREATE VIEW app.dice AS SELECT pg_catalog.random() AS r, pg_catalog.clock_timestamp() AS c, pg_catalog.now() AS t, pg_catalog.gen_random_uuid() AS u;\n",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0001_views.toml"),
+        "[ensures]\none_row = \"SELECT (SELECT count(*) FROM app.dice) = 1\"\n",
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    assert!(plan["plan"]["check_warnings"].is_null(), "{plan}");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+}
+
+fn server_version(f: &Fixture) -> i32 {
+    f.target()
+        .query_one("SELECT current_setting('server_version_num')::int", &[])
+        .unwrap()
+        .get(0)
+}
+
+/// #456: PostgreSQL cannot use an enum value in the transaction that added
+/// it (SQLSTATE 55P04). A migration that adds a value to an existing type
+/// and uses it fails with DB_ENUM_VALUE_UNCOMMITTED naming the migration
+/// and both statements: in `migrate` on PostgreSQL 17 and later, where
+/// replay accepts it because the type was created earlier in replay's
+/// transaction, and already in replay on 16.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn enum_values_used_in_the_transaction_that_added_them_are_named() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_orders.sql",
+        "CREATE TYPE app.order_status AS ENUM ('pending', 'paid');
+CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DEFAULT 'pending');
+",
+    );
+    f.sql(
+        "0002_archived.sql",
+        "ALTER TYPE app.order_status ADD VALUE 'archived';\nINSERT INTO app.orders VALUES (1, 'archived');\n",
+    );
+    let plan = f.command_args("plan", &["--out", "plan.json"]);
+    let r = if server_version(&f) < 170000 {
+        plan
+    } else {
+        assert_eq!(plan["outcome"], "pass", "{plan}");
+        let r = f.apply("plan.json", plan["plan_digest"].as_str());
+        assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+        assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+        r
+    };
+    let d = diagnostic(&r, "DB_ENUM_VALUE_UNCOMMITTED").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["source"], "0002_archived.sql", "{d}");
+    let message = d["message"].as_str().unwrap();
+    assert!(message.starts_with("Statement 2 uses an enum value that ALTER TYPE ... ADD VALUE added in the same transaction (SQLSTATE 55P04). This migration adds an enum value in statement 1."), "{d}");
+    assert!(
+        d["next_action"].as_str().unwrap().contains(
+            "put ALTER TYPE ... ADD VALUE in its own migration and use the value in a later one"
+        ),
+        "{d}"
+    );
+}
+
+/// #456: a value added in one migration and used in a later one migrates
+/// on PostgreSQL 17 and later. On 16, replay runs the whole history in one
+/// transaction, so it fails there with DB_ENUM_VALUE_UNCOMMITTED naming the
+/// later migration (replay that commits per migration changes this).
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn enum_values_added_by_an_earlier_migration() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_orders.sql",
+        "CREATE TYPE app.order_status AS ENUM ('pending', 'paid');
+CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DEFAULT 'pending');
+",
+    );
+    let first = f.plan("plan1.json");
+    let r = f.apply("plan1.json", first["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    f.sql(
+        "0002_archived.sql",
+        "ALTER TYPE app.order_status ADD VALUE 'archived';\n",
+    );
+    f.sql(
+        "0003_default.sql",
+        "ALTER TABLE app.orders ALTER COLUMN status SET DEFAULT 'archived';\n",
+    );
+    let plan = f.command_args("plan", &["--out", "plan2.json"]);
+    if server_version(&f) < 170000 {
+        let d = diagnostic(&plan, "DB_ENUM_VALUE_UNCOMMITTED").unwrap_or_else(|| panic!("{plan}"));
+        assert_eq!(d["source"], "0003_default.sql", "{d}");
+        assert!(
+            d["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("A statement uses an enum value"),
+            "{d}"
+        );
+    } else {
+        assert_eq!(plan["outcome"], "pass", "{plan}");
+        let r = f.apply("plan2.json", plan["plan_digest"].as_str());
+        assert_eq!(r["outcome"], "pass", "{r}");
+        assert_eq!(f.command("verify")["outcome"], "pass");
+    }
 }

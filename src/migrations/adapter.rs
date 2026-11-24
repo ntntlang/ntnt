@@ -188,10 +188,14 @@ impl Adapter {
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.build_concurrent_index(migration, schema, limit).await,
+            Self::Postgres(pg) => {
+                pg.build_concurrent_index(migration, schema, extra, limit)
+                    .await
+            }
             Self::Sqlite(_) => Err(Diagnostic::new(
                 "DB_REPLAY_UNSUPPORTED",
                 "SQLite has no concurrent index builds.",
@@ -294,14 +298,16 @@ impl Adapter {
     }
     /// `limit` bounds the migration on a target: each PostgreSQL statement, or
     /// the whole SQLite script. Scratch replay keeps SQLite's fixed bound.
+    /// `extra` are the schemas the history creates (PostgreSQL only).
     pub async fn execute_captured(
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.execute_captured(migration, schema, limit).await,
+            Self::Postgres(pg) => pg.execute_captured(migration, schema, extra, limit).await,
             Self::Sqlite(db) => db.execute_captured(migration, limit).await,
         }
     }
@@ -318,6 +324,16 @@ impl Adapter {
         match self {
             Self::Postgres(pg) => pg.check_purity(schema, extra, outside).await,
             Self::Sqlite(db) => db.check_purity().await,
+        }
+    }
+    /// PostgreSQL: what stops check `sql` from running as written
+    /// (`Postgres::check_hazards`). SQLite resolves no operators by search
+    /// path, and its authorizer already refuses every function a view could
+    /// call to write.
+    pub async fn check_hazards(&self, schema: &str, sql: &str) -> Result<Vec<super::CheckHazard>> {
+        match self {
+            Self::Postgres(pg) => pg.check_hazards(schema, sql).await,
+            Self::Sqlite(_) => Ok(vec![]),
         }
     }
     pub async fn check(&self, sql: &str, schema: &str) -> Result<()> {

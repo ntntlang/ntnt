@@ -126,6 +126,35 @@ fn driver_error(e: &tokio_postgres::Error) -> Diagnostic {
         ),
     }
 }
+/// SQLSTATE 55P04: a statement used an enum value that `ALTER TYPE ... ADD
+/// VALUE` added in the same transaction. Names the statement from the
+/// error's position, when PostgreSQL gives one, and the statements of
+/// `script` that add enum values; the server's text is not shown.
+fn new_enum_value(e: &tokio_postgres::Error, script: &str) -> Diagnostic {
+    let statement = e
+        .as_db_error()
+        .and_then(|db| match db.position() {
+            Some(tokio_postgres::error::ErrorPosition::Original(at)) => Some(*at as usize),
+            _ => None,
+        })
+        .and_then(|at| super::analysis::statement_at(script, at));
+    let uses = statement.map_or("A statement".to_owned(), |n| format!("Statement {n}"));
+    let added = match super::analysis::enum_value_additions(script).as_slice() {
+        [] => String::new(),
+        [n] => format!(" This migration adds an enum value in statement {n}."),
+        many => format!(
+            " This migration adds enum values in statements {}.",
+            many.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    Diagnostic::new(
+        "DB_ENUM_VALUE_UNCOMMITTED",
+        &format!("{uses} uses an enum value that ALTER TYPE ... ADD VALUE added in the same transaction (SQLSTATE 55P04).{added} PostgreSQL cannot use an enum value in the transaction that added it."),
+    )
+}
 fn deadline_error() -> Diagnostic {
     Diagnostic::new(
         "DB_TIMEOUT",
@@ -230,6 +259,169 @@ pub(crate) trait RelationalAdapter {
     ) -> Result<Catalog>;
     fn capabilities(version: i32) -> Value;
 }
+/// What reading the relations a check can reach could call through a
+/// conversion (see `Postgres::check_purity`): one row per finding, the
+/// relation's catalog key and why, for the first 20. `walk` follows each
+/// column's type, starting at its top level (`runs` false: comparing with a
+/// literal converts it to a domain's base type), and each type a view's
+/// rules convert to (`runs` true): the types they depend on, and the
+/// `RETURNING` types of SQL/JSON expressions, which no dependency records. Below an array's elements, a range's
+/// bounds or a composite's attributes, a type's input runs (`runs` true), and
+/// then a domain's constraints run, and so do those of the types they
+/// convert to. pg_depend never records a builtin (pinned) function, so what
+/// a domain's constraint calls is read from its stored expression; an
+/// operator is followed to its function, and to its negator's and
+/// commutator's, which the planner may use instead. A view that calls a
+/// builtin converting values to a type given at run time
+/// (`pg_input_is_valid`, `json_populate_record`, a type's input function)
+/// counts while some domain's constraints call such code, since no
+/// dependency says which type it reaches. A top-level composite is counted
+/// too, though PostgreSQL 16-18 reject a literal compared with one (as an
+/// anonymous record) before any input runs. "The history wrote" means
+/// outside `pg_catalog` and not installed by an extension in the scope.
+const CHECK_CONVERSION_CALLS: &str = r#"WITH RECURSIVE reach(rel) AS (
+  SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1
+  UNION
+  SELECT d.refobjid FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v'
+  JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
+  JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass),
+walk(rel, col, top, typ, runs) AS (
+  (SELECT a.attrelid, a.attname::text, a.atttypid, a.atttypid, false FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
+    WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind IN ('r','p','v') AND a.attnum>0 AND NOT a.attisdropped
+   UNION ALL
+   SELECT r.ev_class, NULL, d.refobjid, d.refobjid, true FROM pg_catalog.pg_rewrite r
+    JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_type'::pg_catalog.regclass
+    WHERE r.ev_class IN (SELECT rel FROM reach)
+   UNION ALL
+   SELECT r.ev_class, NULL, m[1]::oid, m[1]::oid, true FROM pg_catalog.pg_rewrite r
+    CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':typid (\d+)', 'g') m
+    WHERE r.ev_class IN (SELECT rel FROM reach))
+  UNION
+  SELECT w.rel, w.col, w.top, x.typ, w.runs OR x.below FROM walk w JOIN pg_catalog.pg_type t ON t.oid=w.typ
+  CROSS JOIN LATERAL (
+    SELECT t.typbasetype, false WHERE t.typtype='d'
+    UNION ALL SELECT t.typelem, true WHERE t.typelem<>0
+    UNION ALL SELECT a.atttypid, true FROM pg_catalog.pg_attribute a WHERE t.typrelid<>0 AND a.attrelid=t.typrelid AND a.attnum>0 AND NOT a.attisdropped
+    UNION ALL SELECT g.rngsubtype, true FROM pg_catalog.pg_range g WHERE g.rngtypid=t.oid
+    UNION ALL SELECT g.rngtypid, true FROM pg_catalog.pg_range g WHERE g.rngmultitypid=t.oid
+    UNION ALL SELECT d.refobjid, true FROM pg_catalog.pg_constraint k
+     JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_type'::pg_catalog.regclass
+     WHERE w.runs AND k.contypid=t.oid) x(typ, below)),
+-- Operators a view's rules or a domain's constraints use, with the
+-- negators and commutators the planner may put in their place.
+used(kind, owner, root, op) AS (
+  (SELECT 'v', r.ev_class, d.refobjid, d.refobjid FROM pg_catalog.pg_rewrite r
+    JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
+    WHERE r.ev_class IN (SELECT rel FROM reach)
+   UNION ALL
+   SELECT 'd', k.contypid, d.refobjid, d.refobjid FROM pg_catalog.pg_constraint k
+    JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
+    WHERE k.contypid<>0)
+  UNION
+  SELECT u.kind, u.owner, u.root, x.op FROM used u JOIN pg_catalog.pg_operator o ON o.oid=u.op
+  CROSS JOIN LATERAL (VALUES (o.oprnegate), (o.oprcom)) x(op) WHERE x.op<>0),
+-- What each domain's constraints call. pg_depend records no builtin
+-- function, so calls are read from the stored expression.
+calls(dom, fn) AS (
+  SELECT k.contypid, m[1]::oid FROM pg_catalog.pg_constraint k CROSS JOIN LATERAL pg_catalog.regexp_matches(k.conbin::text, ':(?:funcid|opfuncid) (\d+)', 'g') m WHERE k.contypid<>0
+  UNION ALL
+  SELECT u.owner, o.oprcode FROM used u JOIN pg_catalog.pg_operator o ON o.oid=u.op WHERE u.kind='d'),
+-- A routine the history wrote (outside pg_catalog, not an extension's in
+-- the scope) or a volatile function.
+unsafe(fn, why) AS (
+  SELECT p.oid, CASE WHEN pn.nspname<>'pg_catalog' AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend e JOIN pg_catalog.pg_extension x ON x.oid=e.refobjid
+    JOIN pg_catalog.pg_namespace xn ON xn.oid=x.extnamespace WHERE e.classid='pg_catalog.pg_proc'::pg_catalog.regclass AND e.objid=p.oid
+    AND e.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND e.deptype='e' AND xn.nspname=ANY($2))
+    THEN ' (a routine the history wrote)' WHEN p.provolatile='v' THEN ' (a volatile function)' END
+  FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
+  WHERE p.oid IN (SELECT fn FROM calls UNION SELECT o.oprcode FROM used u JOIN pg_catalog.pg_operator o ON o.oid=u.op)),
+-- Builtins that convert values to a type given at run time (by name, as an
+-- OID or as a record argument), which no dependency records: they can reach
+-- any domain, so they count while some domain's constraints call one of
+-- the functions above.
+dynamic(fn) AS (
+  SELECT p.oid FROM pg_catalog.pg_proc p WHERE p.pronamespace='pg_catalog'::pg_catalog.regnamespace
+  AND p.proname=ANY('{pg_input_is_valid,pg_input_error_info,json_populate_record,json_populate_recordset,jsonb_populate_record,jsonb_populate_recordset,jsonb_populate_record_valid,record_in,record_recv,domain_in,domain_recv,array_in,array_recv,range_in,range_recv,multirange_in,multirange_recv}'::text[])
+  AND EXISTS(SELECT 1 FROM calls c JOIN unsafe u ON u.fn=c.fn WHERE u.why IS NOT NULL)),
+why(fn, txt) AS (
+  SELECT fn, fn::pg_catalog.regprocedure::text||why FROM unsafe WHERE why IS NOT NULL
+  UNION ALL
+  SELECT fn, fn::pg_catalog.regprocedure::text||' (which converts values to a type given at run time, while domain constraints here call such functions)' FROM dynamic),
+found(rel, what) AS (
+  SELECT w.rel, CASE WHEN w.col IS NULL THEN 'converts values to '||pg_catalog.format_type(w.top,NULL)||', which runs'
+    ELSE 'has column '||pg_catalog.quote_ident(w.col)||' of type '||pg_catalog.format_type(w.top,NULL)||', and converting a literal to that type runs' END
+    ||' the constraints of domain '||pg_catalog.format_type(w.typ,NULL)||', which call '||y.txt
+  FROM walk w JOIN pg_catalog.pg_type t ON t.oid=w.typ AND t.typtype='d' JOIN calls c ON c.dom=t.oid JOIN why y ON y.fn=c.fn WHERE w.runs
+  UNION ALL
+  SELECT u.owner, 'uses operator '||u.root::pg_catalog.regoperator::text||CASE WHEN u.op<>u.root THEN ', which the planner may replace with '||u.op::pg_catalog.regoperator::text ELSE '' END
+    ||', whose function is '||y.txt FROM used u JOIN pg_catalog.pg_operator o ON o.oid=u.op JOIN why y ON y.fn=o.oprcode WHERE u.kind='v'
+  UNION ALL
+  SELECT r.ev_class, 'calls '||y.txt FROM pg_catalog.pg_rewrite r CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':(?:funcid|opfuncid) (\d+)', 'g') m
+   JOIN dynamic d ON d.fn=m[1]::oid JOIN why y ON y.fn=d.fn WHERE r.ev_class IN (SELECT rel FROM reach))
+SELECT DISTINCT CASE WHEN rn.nspname=$1 THEN '' ELSE pg_catalog.quote_ident(rn.nspname)||'.' END||'relation:'||rc.relname,
+  CASE WHEN rc.relkind='v' THEN 'view ' ELSE 'table ' END||pg_catalog.quote_ident(rn.nspname)||'.'||pg_catalog.quote_ident(rc.relname)||' '||f.what
+FROM found f JOIN pg_catalog.pg_class rc ON rc.oid=f.rel JOIN pg_catalog.pg_namespace rn ON rn.oid=rc.relnamespace
+ORDER BY 1, 2 LIMIT 20"#;
+
+/// The column a check compares with an operator that the application would
+/// resolve to a different one (see `Postgres::check_hazards`): $1 names the
+/// column, $2/$3 the tables it can name, innermost first, $4/$5 every table
+/// the check reads (used only when none of $2/$3 has such a column), $6 is
+/// the managed schema and $7 the operator's name. One row per table: its
+/// catalog key, its name, the column's type, the type in its domain
+/// base-type chain the operator takes, and the operator.
+const CHECK_OPERATOR_HAZARDS: &str = r#"WITH RECURSIVE named(ord, rel) AS (
+  SELECT s.ord, c.oid FROM ROWS FROM (pg_catalog.unnest($2::text[]), pg_catalog.unnest($3::text[])) WITH ORDINALITY s(nsp, rel, ord)
+  JOIN pg_catalog.pg_namespace n ON n.nspname=s.nsp JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=s.rel),
+exact(rel, typ) AS (SELECT a.attrelid, a.atttypid FROM pg_catalog.pg_attribute a JOIN named ON named.rel=a.attrelid
+  WHERE a.attname=$1 AND a.attnum>0 AND NOT a.attisdropped ORDER BY named.ord LIMIT 1),
+cols(rel, typ) AS (SELECT rel, typ FROM exact
+  UNION ALL
+  SELECT a.attrelid, a.atttypid FROM ROWS FROM (pg_catalog.unnest($4::text[]), pg_catalog.unnest($5::text[])) t(nsp, rel)
+  JOIN pg_catalog.pg_namespace n ON n.nspname=t.nsp JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=t.rel
+  JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attname=$1 AND a.attnum>0 AND NOT a.attisdropped
+  WHERE NOT EXISTS (SELECT 1 FROM exact)),
+chain(rel, top, typ) AS (SELECT rel, typ, typ FROM cols
+  UNION ALL
+  SELECT ch.rel, ch.top, t.typbasetype FROM chain ch JOIN pg_catalog.pg_type t ON t.oid=ch.typ WHERE t.typtype='d')
+SELECT DISTINCT ON (rc.oid)
+  CASE WHEN rn.nspname=$6 THEN '' ELSE pg_catalog.quote_ident(rn.nspname)||'.' END||'relation:'||rc.relname,
+  pg_catalog.quote_ident(rn.nspname)||'.'||pg_catalog.quote_ident(rc.relname),
+  pg_catalog.format_type(ch.top, NULL), pg_catalog.format_type(ch.typ, NULL), o.oid::pg_catalog.regoperator::text
+FROM chain ch
+JOIN pg_catalog.pg_type t ON t.oid=ch.typ JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace
+JOIN pg_catalog.pg_operator o ON o.oprname=$7 AND o.oprkind='b' JOIN pg_catalog.pg_namespace okn ON okn.oid=o.oprnamespace
+JOIN pg_catalog.pg_type lt ON lt.oid=o.oprleft JOIN pg_catalog.pg_type rt ON rt.oid=o.oprright
+JOIN pg_catalog.pg_class rc ON rc.oid=ch.rel JOIN pg_catalog.pg_namespace rn ON rn.oid=rc.relnamespace
+WHERE tn.nspname<>'pg_catalog' AND okn.nspname<>'pg_catalog'
+  AND (ch.typ IN (o.oprleft, o.oprright) OR (lt.typtype='p' AND lt.typname LIKE 'any%') OR (rt.typtype='p' AND rt.typname LIKE 'any%'))
+ORDER BY rc.oid, (o.oprleft=ch.typ AND o.oprright=ch.typ) DESC, ch.typ IN (o.oprleft, o.oprright) DESC, o.oid"#;
+
+/// Views a check reads ($1/$2, the tables it names), directly or through
+/// other views, whose stored query calls a builtin that writes or takes
+/// locks: one PostgreSQL marks parallel unsafe (nextval, setval, set_config,
+/// txid_current, the lo_* functions and more), or an advisory-lock function
+/// or pg_notify, which it marks only parallel restricted. pg_depend never
+/// records a builtin (pinned) function, so calls are read from the rules'
+/// stored expressions. $3 is the managed schema. One row per view and
+/// function: the view's catalog key, its name and the function.
+const CHECK_VIEW_WRITES: &str = r#"WITH RECURSIVE reach(rel) AS (
+  SELECT c.oid FROM ROWS FROM (pg_catalog.unnest($1::text[]), pg_catalog.unnest($2::text[])) t(nsp, rel)
+  JOIN pg_catalog.pg_namespace n ON n.nspname=t.nsp JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=t.rel
+  UNION
+  SELECT d.refobjid FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v'
+  JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
+  JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass)
+SELECT DISTINCT CASE WHEN n.nspname=$3 THEN '' ELSE pg_catalog.quote_ident(n.nspname)||'.' END||'relation:'||v.relname,
+  pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(v.relname), p.oid::pg_catalog.regprocedure::text
+FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v' JOIN pg_catalog.pg_namespace n ON n.oid=v.relnamespace
+JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
+CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':(?:funcid|opfuncid) (\d+)', 'g') m
+JOIN pg_catalog.pg_proc p ON p.oid=m[1]::oid
+WHERE p.pronamespace='pg_catalog'::pg_catalog.regnamespace
+  AND (p.proparallel='u' OR p.proname ~ '^pg_(try_)?advisory_' OR p.proname='pg_notify')
+ORDER BY 1, 3 LIMIT 20"#;
+
 impl Postgres {
     /// Open a dedicated session after checking explicit host, role, database and transport.
     /// The initial connection is read-only by default. Every TLS sslmode requires TLS from
@@ -643,10 +835,16 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         // Index expressions coerce values like any DDL; see execute_captured.
-        self.reject_custom_casts().await?;
+        self.reject_custom_casts(&scope(schema, extra))
+            .await
+            .map_err(|mut d| {
+                d.source = Some(migration.name.clone());
+                d
+            })?;
         self.outside_transaction(&migration.sql, schema, limit)
             .await
             .map_err(|mut d| {
@@ -904,19 +1102,27 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             .map(|r| r.get(0))
             .collect())
     }
-    /// Reject unsupported live invocation paths before preparing any authored
-    /// check. Names alone and provolatile are not proofs: only builtin base types,
-    /// heap tables, builtin indexes/operators and the closed grammar are admitted.
-    /// Custom implicit/assignment casts are rejected database-wide, conservatively.
-    async fn reject_custom_casts(&self) -> Result<()> {
-        let safe = self
-            .rows("SELECT NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast WHERE oid>=16384 AND castcontext IN ('i','a'))", &[])
-            .await?;
-        if !safe[0].get::<_, bool>(0) {
+    /// Reject custom implicit/assignment casts database-wide before DDL:
+    /// ordinary coercion could run them without appearing in the reviewed
+    /// script. The casts of an extension installed in the managed `scope`
+    /// (citext's, say) are the extension's own code, which its version
+    /// covers like its routines and operators, so they are allowed.
+    async fn reject_custom_casts(&self, scope: &[String]) -> Result<()> {
+        let casts: Vec<String> = self
+            .rows("SELECT 'cast:'||pg_catalog.format_type(c.castsource,NULL)||' AS '||pg_catalog.format_type(c.casttarget,NULL) FROM pg_catalog.pg_cast c
+ WHERE c.oid>=16384 AND c.castcontext IN ('i','a') AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
+ WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=c.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND en.nspname=ANY($1))
+ ORDER BY 1 LIMIT 101", &[&scope])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        if !casts.is_empty() {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
-                "Custom implicit/assignment casts exist in this database; DDL coercions could run unreviewed code.",
-            ));
+                "Custom implicit/assignment casts exist in this database outside the extensions installed in the managed scope; DDL coercions could run unreviewed code. Drop the casts its objects field names, or make them explicit.",
+            )
+            .with_objects(&casts));
         }
         Ok(())
     }
@@ -926,6 +1132,25 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// schema's, and transitively every relation a view among them reads, in
     /// any schema. Objects no check can reach leave checks alone. `extra` and
     /// `outside` scope the coverage check, as in every inspection.
+    ///
+    /// A column's type may also be one in the managed scope, which the
+    /// coverage check has just found covered: an enum, a domain or composite
+    /// type over covered types, or an extension's type. Reading or comparing
+    /// such a value runs builtin code or the extension's own (covered by its
+    /// version), and so do the casts of an extension in the scope. A
+    /// domain's constraints run when a value is converted to the domain. The
+    /// check grammar writes no casts, but comparing a column with a literal
+    /// converts the literal to the column's type. For a domain that is its
+    /// base type, so the domain's own constraints never run. An array's
+    /// elements, a range's bounds and a composite's attributes, though, go
+    /// through their own types' input, domain constraints included.
+    /// `CHECK_CONVERSION_CALLS` refuses, by name, a reachable column whose
+    /// type holds such a domain below its top level (through a top-level
+    /// domain's base type too), and a reachable view that converts values to
+    /// a type holding one at any level or uses an operator, when the domain's
+    /// constraints or the operator call a routine the history wrote or a
+    /// volatile function. Plain domains and domains with builtin-only
+    /// constraints (a regular expression, say) stay allowed.
     pub async fn check_purity(
         &self,
         schema: &str,
@@ -951,23 +1176,109 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
           SELECT NOT EXISTS (
           SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
           WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind='r'
-          AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace WHERE t.oid=a.atttypid AND tn.nspname<>'pg_catalog'))
-          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast WHERE oid>=16384 AND castcontext IN ('i','a'))
-          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind NOT IN ('r','p','i','I','S','v'))
+          AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace WHERE t.oid=a.atttypid AND tn.nspname<>'pg_catalog' AND tn.nspname<>ALL($2)))
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast k WHERE k.oid>=16384 AND k.castcontext IN ('i','a') AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
+            WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND en.nspname=ANY($2)))
+          -- A composite type (relkind c) holds no rows to read.
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind NOT IN ('r','p','i','I','S','v','c'))
           -- A check may read a view, and through it what the view reads.
           -- Views may only use builtin non-volatile functions, so reading one
           -- cannot write or take advisory locks.
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class v
             JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid
             JOIN pg_catalog.pg_proc p ON d.refclassid='pg_catalog.pg_proc'::regclass AND p.oid=d.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
-            WHERE v.oid IN (SELECT rel FROM reach) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema]).await?;
+            WHERE v.oid IN (SELECT rel FROM reach) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema, &scope(schema, extra)]).await?;
         if !safe[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
                 "Live types, casts or view functions exceed the verified builtin contract subset.",
             ));
         }
+        let calls = self
+            .rows(CHECK_CONVERSION_CALLS, &[&schema, &scope(schema, extra)])
+            .await?;
+        if !calls.is_empty() {
+            let mut objects: Vec<String> = calls.iter().map(|r| r.get(0)).collect();
+            objects.dedup();
+            let mut reasons: Vec<String> = calls.iter().take(3).map(|r| r.get(1)).collect();
+            if calls.len() > 3 {
+                reasons.push("and more".into());
+            }
+            return Err(Diagnostic::new(
+                "DB_CHECK_UNSUPPORTED",
+                &format!(
+                    "Checks run no routine the history wrote and no volatile function, but the relations they can read could make them: {}. Give such a domain a constraint that uses only builtin non-volatile functions, or keep it at the top level of the column's type; a view must not convert values to it or use such an operator.",
+                    reasons.join("; ")
+                ),
+            )
+            .with_objects(&objects));
+        }
         Ok(())
+    }
+
+    /// What stops a check from running as written (#456), found from the
+    /// live catalog before any check of its phase runs.
+    ///
+    /// Checks resolve operators with search_path=pg_catalog, while the
+    /// application's search path reaches the managed schema. When a column
+    /// the check compares (`analysis::check_operands`) has a type, or a type
+    /// in its domain base-type chain, outside pg_catalog for which a binary
+    /// operator of that name exists outside pg_catalog (or one that takes a
+    /// polymorphic type), the application would use that operator and the
+    /// check would not: citext's `=` compares case-insensitively, but a check
+    /// would convert the column to text and compare with text's `=`. A view
+    /// keeps the operators chosen when a migration created it, and an enum,
+    /// domain, composite or array with no such operator resolves to the same
+    /// pg_catalog operator either way, so those stay allowed.
+    ///
+    /// A check also must not read a view, directly or through other views,
+    /// that calls a builtin that writes or takes locks (`CHECK_VIEW_WRITES`).
+    pub async fn check_hazards(&self, schema: &str, sql: &str) -> Result<Vec<super::CheckHazard>> {
+        let (schemas, tables): (Vec<String>, Vec<String>) =
+            super::analysis::check_tables(sql, schema)
+                .into_iter()
+                .unzip();
+        let mut found = vec![];
+        for operand in super::analysis::check_operands(sql, schema) {
+            let (named_schemas, named): (Vec<String>, Vec<String>) =
+                operand.tables.iter().cloned().unzip();
+            for row in self
+                .rows(
+                    CHECK_OPERATOR_HAZARDS,
+                    &[
+                        &operand.column,
+                        &named_schemas,
+                        &named,
+                        &schemas,
+                        &tables,
+                        &schema,
+                        &operand.operator,
+                    ],
+                )
+                .await?
+            {
+                found.push(super::CheckHazard::Operator {
+                    key: row.get(0),
+                    relation: row.get(1),
+                    column: operand.column.clone(),
+                    operator_name: operand.operator,
+                    column_type: row.get(2),
+                    base_type: row.get(3),
+                    operator: row.get(4),
+                });
+            }
+        }
+        for row in self
+            .rows(CHECK_VIEW_WRITES, &[&schemas, &tables, &schema])
+            .await?
+        {
+            found.push(super::CheckHazard::ViewWrites {
+                key: row.get(0),
+                view: row.get(1),
+                function: row.get(2),
+            });
+        }
+        Ok(found)
     }
 
     /// What a check naming `tables` of the managed schema would read where
@@ -1059,11 +1370,13 @@ forced: r.get(2),
     /// Shared execution primitive: consumes captured bytes only, within a caller-
     /// owned transaction. Replay and authorized migration use exactly this primitive.
     /// `limit` bounds each statement and its deferred checks; the whole script
-    /// gets `SERVER_LIMIT_MARGIN` more on the client.
+    /// gets `SERVER_LIMIT_MARGIN` more on the client. `extra` are the schemas
+    /// the history creates, which belong to the managed scope.
     pub async fn execute_captured(
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         // A lone CREATE INDEX CONCURRENTLY replays as the equivalent plain
@@ -1119,7 +1432,12 @@ forced: r.get(2),
         // Migration SQL may call application routines; that is reviewed SQL.
         // A custom implicit/assignment cast planted elsewhere could instead run
         // unreviewed code during ordinary DDL coercion, so it still blocks.
-        self.reject_custom_casts().await?;
+        self.reject_custom_casts(&scope(schema, extra))
+            .await
+            .map_err(|mut d| {
+                d.source = Some(migration.name.clone());
+                d
+            })?;
         // Creating an extension this role may not create fails with a bare
         // SQLSTATE 42501. Learn first which of the named ones are trusted,
         // so that the failure can say why (#430).
@@ -1161,7 +1479,13 @@ forced: r.get(2),
         bounded_classified(
             limit + SERVER_LIMIT_MARGIN,
             self.client.batch_execute(script),
-            |e| extension_privilege(e, &created, &facts, can_create),
+            |e| {
+                if e.code().map(|c| c.code()) == Some("55P04") {
+                    Some(new_enum_value(e, script))
+                } else {
+                    extension_privilege(e, &created, &facts, can_create)
+                }
+            },
         )
         .await
         .map_err(|mut d| {
@@ -1244,6 +1568,7 @@ fn protect_definitions(value: &mut Value) {
                 key.as_str(),
                 "definition"
                     | "default"
+                    | "labels"
                     | "using"
                     | "check"
                     | "comment"
@@ -1302,7 +1627,7 @@ impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
             "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"lone_named_create_index_concurrently", "baseline_adoption":"reviewed_prefix_checkpoint"},
-            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "managed_schema_extensions":"version", "custom_types_external_dependencies_non_sql_routines":"unknown"},
+            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "enums_domains_composite_types_operators_exclusion_constraints":"definition_fingerprints", "managed_schema_extensions":"version_covers_members", "range_and_base_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
     async fn catalog(
@@ -1332,12 +1657,14 @@ impl RelationalAdapter for Postgres {
                 if !supported {
                     catalog.uncovered.push(key.clone());
                 }
-                if catalog.objects.insert(key, value).is_some() {
+                if catalog.objects.contains_key(&key) {
                     return Err(Diagnostic::new(
                         "DB_CATALOG_AMBIGUOUS",
-                        "Catalog object keys collided; inspection is incomplete.",
-                    ));
+                        "Two catalog objects share one key; inspection is incomplete.",
+                    )
+                    .with_objects(&[key]));
                 }
+                catalog.objects.insert(key, value);
             }
         }
         if !catalog.objects.contains_key(&format!("schema:{schema}")) {

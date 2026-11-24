@@ -2278,9 +2278,270 @@ fn check_query(q: &Query, schema: &str, depth: usize) -> bool {
         .is_some_and(|ss| matches!(ss.as_slice(), [Statement::Query(expected)] if **expected==*q))
 }
 
+/// A column a check uses as an operand of a comparison or arithmetic
+/// operator (#456): an identifier, directly or as the single output of a
+/// scalar subquery. Checks write no qualified column names, so the column
+/// is the first of `tables` that has one of that name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CheckOperand {
+    /// The operator's PostgreSQL name: `=`, `<>`, `<`, `<=`, `>`, `>=`,
+    /// `+`, `-`, `*`, `/` or `%`.
+    pub operator: &'static str,
+    /// The column name, folded like PostgreSQL.
+    pub column: String,
+    /// The tables it can name, as (schema, table) folded like PostgreSQL:
+    /// its own query level's first, then each enclosing level's.
+    pub tables: Vec<(String, String)>,
+}
+
+/// The column operands of the operators a check uses (`CheckOperand`).
+/// Only valid for SQL that `contract_supported` accepts; other input
+/// yields none.
+pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
+    type Tables = Vec<(String, String)>;
+    fn folded(i: &Ident) -> String {
+        if i.quote_style.is_some() {
+            i.value.clone()
+        } else {
+            i.value.to_lowercase()
+        }
+    }
+    /// What a query level's columns can name: its table, then the
+    /// enclosing levels' tables.
+    fn level(s: &Select, outer: &[(String, String)]) -> Tables {
+        let mut tables = outer.to_vec();
+        if let [table] = s.from.as_slice() {
+            if let TableFactor::Table { name, .. } = &table.relation {
+                let ids: Vec<_> = name.0.iter().filter_map(|p| p.as_ident()).collect();
+                if let [schema, table] = ids.as_slice() {
+                    tables.insert(0, (folded(schema), folded(table)));
+                }
+            }
+        }
+        tables
+    }
+    fn operator(op: &BinaryOperator) -> Option<&'static str> {
+        Some(match op {
+            BinaryOperator::Eq => "=",
+            BinaryOperator::NotEq => "<>",
+            BinaryOperator::Lt => "<",
+            BinaryOperator::Gt => ">",
+            BinaryOperator::LtEq => "<=",
+            BinaryOperator::GtEq => ">=",
+            BinaryOperator::Plus => "+",
+            BinaryOperator::Minus => "-",
+            BinaryOperator::Multiply => "*",
+            BinaryOperator::Divide => "/",
+            BinaryOperator::Modulo => "%",
+            _ => return None,
+        })
+    }
+    fn column(e: &Expr, tables: &[(String, String)]) -> Option<(String, Tables)> {
+        match e {
+            Expr::Nested(e) => column(e, tables),
+            Expr::Identifier(i) => Some((folded(i), tables.to_vec())),
+            Expr::Subquery(q) => {
+                let SetExpr::Select(s) = &*q.body else {
+                    return None;
+                };
+                match s.projection.as_slice() {
+                    [SelectItem::UnnamedExpr(item)] => column(item, &level(s, tables)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    fn query(q: &Query, outer: &[(String, String)], out: &mut Vec<CheckOperand>) {
+        let SetExpr::Select(s) = &*q.body else { return };
+        let tables = level(s, outer);
+        for item in &s.projection {
+            if let SelectItem::UnnamedExpr(e) = item {
+                expr(e, &tables, out);
+            }
+        }
+        for e in s.selection.iter().chain(s.having.iter()) {
+            expr(e, &tables, out);
+        }
+    }
+    fn expr(e: &Expr, tables: &[(String, String)], out: &mut Vec<CheckOperand>) {
+        match e {
+            Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
+                query(subquery, tables, out)
+            }
+            Expr::Nested(e)
+            | Expr::IsNull(e)
+            | Expr::IsNotNull(e)
+            | Expr::UnaryOp { expr: e, .. } => expr(e, tables, out),
+            Expr::BinaryOp { left, op, right } => {
+                if let Some(operator) = operator(op) {
+                    for side in [left, right] {
+                        if let Some((column, tables)) = column(side, tables) {
+                            out.push(CheckOperand {
+                                operator,
+                                column,
+                                tables,
+                            });
+                        }
+                    }
+                }
+                expr(left, tables, out);
+                expr(right, tables, out);
+            }
+            _ => (),
+        }
+    }
+    let mut out = vec![];
+    if contract_supported(sql, schema) {
+        if let Some(statements) = parse(sql) {
+            if let [Statement::Query(q)] = statements.as_slice() {
+                query(q, &[], &mut out);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The number of the statement of `sql` (as `statements` counts them) that
+/// holds 1-based character `position`, which is how PostgreSQL reports
+/// where in a script an error is.
+pub(crate) fn statement_at(sql: &str, position: usize) -> Option<usize> {
+    use sqlparser::tokenizer::Token;
+    // The tokenizer reports lines and columns, counted in characters.
+    let (mut line, mut column) = (1u64, 1u64);
+    for c in sql.chars().take(position.checked_sub(1)?) {
+        if c == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    statements(sql)?
+        .iter()
+        .enumerate()
+        .filter(|(_, tokens)| {
+            tokens.iter().any(|t| {
+                !matches!(t.token, Token::Whitespace(_))
+                    && (t.span.start.line, t.span.start.column) <= (line, column)
+            })
+        })
+        .map(|(index, _)| index + 1)
+        .next_back()
+}
+
+/// The statements of `sql` that add a value to an enum
+/// (`ALTER TYPE ... ADD VALUE`), by number.
+pub(crate) fn enum_value_additions(sql: &str) -> Vec<usize> {
+    use sqlparser::tokenizer::Token;
+    statements(sql)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .filter(|(_, tokens)| {
+            let t: Vec<&Token> = tokens
+                .iter()
+                .map(|t| &t.token)
+                .filter(|t| !matches!(t, Token::Whitespace(_)))
+                .collect();
+            keyword(t.first(), "ALTER")
+                && keyword(t.get(1), "TYPE")
+                && (2..t.len()).any(|i| keyword(t.get(i), "ADD") && keyword(t.get(i + 1), "VALUE"))
+        })
+        .map(|(index, _)| index + 1)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// #456: the columns a check compares or computes with, each with the
+    /// tables it can name, innermost query level first. A scalar
+    /// subquery's single output counts as its column; IS NULL, count(*)
+    /// and GROUP BY compare nothing here.
+    #[test]
+    fn check_operands_name_compared_columns_and_their_tables() {
+        let t = |s: &str, n: &str| (s.to_owned(), n.to_owned());
+        let op = |operator, column: &str, tables: Vec<(String, String)>| CheckOperand {
+            operator,
+            column: column.into(),
+            tables,
+        };
+        assert_eq!(
+            check_operands(
+                "SELECT NOT EXISTS (SELECT 1 FROM app.users WHERE email = 'admin@example.com')",
+                "app"
+            ),
+            [op("=", "email", vec![t("app", "users")])]
+        );
+        assert_eq!(
+            check_operands(
+                "SELECT (SELECT \"Email\" FROM app.users WHERE id = 1) <> 'a'",
+                "app"
+            ),
+            [
+                op("<>", "Email", vec![t("app", "users")]),
+                op("=", "id", vec![t("app", "users")])
+            ]
+        );
+        assert_eq!(
+            check_operands(
+                "SELECT NOT EXISTS (SELECT 1 FROM app.orders WHERE NOT EXISTS (SELECT 1 FROM app.users WHERE ID = owner AND total + 1 > 2))",
+                "app"
+            ),
+            [
+                op("+", "total", vec![t("app", "users"), t("app", "orders")]),
+                op("=", "id", vec![t("app", "users"), t("app", "orders")]),
+                op("=", "owner", vec![t("app", "users"), t("app", "orders")]),
+            ]
+        );
+        for sql in [
+            "SELECT NOT EXISTS (SELECT 1 FROM app.users WHERE email IS NULL)",
+            "SELECT count(*) = 1 FROM app.users",
+            "SELECT NOT EXISTS (SELECT email FROM app.users GROUP BY email HAVING count(*) > 1)",
+            "SELECT true",
+            "SELECT email = 'a' FROM app.users; SELECT 1",
+        ] {
+            assert!(check_operands(sql, "app").is_empty(), "{sql}");
+        }
+    }
+
+    /// #456: PostgreSQL's error position names the statement it is in;
+    /// `ALTER TYPE ... ADD VALUE` statements are found by number.
+    #[test]
+    fn statements_are_found_by_position_and_by_added_enum_values() {
+        let sql = "-- seed\nALTER TYPE app.s ADD VALUE 'c';\nALTER TABLE app.t ALTER COLUMN s SET DEFAULT 'c'; SELECT 'c'::app.s;\nALTER TYPE app.s ADD VALUE IF NOT EXISTS 'd' AFTER 'c'; ALTER TYPE app.s RENAME VALUE 'a' TO 'b'";
+        assert_eq!(enum_value_additions(sql), [1, 4]);
+        let at = |needle: &str| sql.find(needle).unwrap() + 1;
+        assert_eq!(statement_at(sql, 1), None);
+        assert_eq!(statement_at(sql, at("ALTER TYPE")), Some(1));
+        assert_eq!(statement_at(sql, at("'c'; SELECT")), Some(2));
+        assert_eq!(statement_at(sql, at("'c'::app.s")), Some(3));
+        assert_eq!(statement_at(sql, at("RENAME")), Some(5));
+        assert!(enum_value_additions("ALTER TABLE app.t ADD VALUE int").is_empty());
+    }
+    /// #456 review: a check cannot convert a value to a type by name, so it
+    /// never converts one to a domain itself (`check_purity` relies on that).
+    #[test]
+    fn checks_cannot_write_casts_or_typed_literals() {
+        for sql in [
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email = 'a@b'::app.email)",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email = CAST('a@b' AS app.email))",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE emails = '{a@b}'::app.email[])",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email = app.email 'a@b')",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email::text = 'a@b')",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE TRY_CAST(email AS text) = 'a@b')",
+            "SELECT 'a@b'::app.email IS NOT NULL FROM app.t",
+        ] {
+            assert!(!contract_supported(sql, "app"), "{sql}");
+        }
+        assert!(contract_supported(
+            "SELECT NOT EXISTS (SELECT 1 FROM app.t WHERE email = 'a@b')",
+            "app"
+        ));
+    }
     #[test]
     fn contract_relations_require_the_managed_schema_at_every_query_level() {
         for sql in [
