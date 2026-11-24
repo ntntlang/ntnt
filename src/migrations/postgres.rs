@@ -548,7 +548,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         if marked {
             return Err(Diagnostic::new(
                 "DB_TARGET_IS_SCRATCH",
-                "The target database holds NTNT's replay marker, the schema _ntnt_replay: it is, or was, the scratch database of an NTNT configuration, whose next plan, status or verify may clean it up. Nothing was read or changed.",
+                "The target database holds NTNT's replay marker, the schema _ntnt_replay: it is, or was, the scratch database of an NTNT configuration, whose next plan, status or verify may clean it up. Its history was not read, and nothing was changed.",
             )
             .with_objects(&["schema:_ntnt_replay".to_owned()]));
         }
