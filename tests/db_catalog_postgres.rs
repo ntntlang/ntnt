@@ -1681,3 +1681,46 @@ fn single_schema_catalog_fingerprints_are_unchanged_in_public() {
         "PostgreSQL {major}"
     );
 }
+
+/// #430: checks, adoption checks included, may read tables whose columns
+/// use the types the history covers (an enum, a domain, a composite type,
+/// an extension's type in the managed schema), while citext's casts exist.
+/// They still run no routine the history wrote: comparing a domain's values
+/// does not evaluate its constraint, which here would advance a sequence.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_read_tables_with_columns_of_covered_types() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_types.sql",
+        "CREATE EXTENSION citext WITH SCHEMA app;
+CREATE SEQUENCE app.calls;
+CREATE FUNCTION app.valid(t text) RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN PERFORM nextval('app.calls'); RETURN position('@' in t) > 0; END $$;
+CREATE DOMAIN app.email AS text CHECK (app.valid(VALUE));
+CREATE TYPE app.order_status AS ENUM ('pending', 'paid');
+CREATE TYPE app.address AS (street text, city text);
+CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL, contact app.email, login app.citext, addr app.address);
+",
+    );
+    f.sql(
+        "0002_seed.sql",
+        "INSERT INTO app.orders VALUES (1, 'paid', 'a@b', 'A', ROW('x', 'y'));\n",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_seed.toml"),
+        "[ensures]\npaid = \"SELECT EXISTS (SELECT 1 FROM app.orders WHERE status = 'paid' AND contact = 'a@b' AND contact <> 'b' AND login IS NOT NULL AND addr IS NOT NULL)\"\n",
+    )
+    .unwrap();
+    let plan = f.plan("plan.json");
+    let r = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
+    // Only the seed INSERT coerced a value into the domain.
+    let calls: i64 = f
+        .target()
+        .query_one("SELECT last_value FROM app.calls", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(calls, 1);
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
