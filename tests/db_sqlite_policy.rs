@@ -475,6 +475,10 @@ fn counters(f: &Fixture) -> Vec<(String, i64)> {
         .collect()
 }
 
+/// The repair the rebuild guard's next_action gives for `orders`, rebuilt
+/// through `orders_new`.
+const COUNTER_REPAIR: &str = "UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('orders', 'orders_new')) WHERE name='orders_new'; DELETE FROM sqlite_sequence WHERE name='orders_new' AND rowid <> (SELECT min(rowid) FROM sqlite_sequence WHERE name='orders_new'); INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', max(seq) FROM sqlite_sequence WHERE name='orders' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='orders_new') HAVING count(*) > 0;";
+
 /// F3: a `sqlite_rebuild` of an AUTOINCREMENT table keeps its counter.
 /// Copying the rows into the replacement starts its counter from the
 /// highest id copied, so deleted ids would be given out again; the guard
@@ -515,7 +519,7 @@ fn sqlite_rebuild_keeps_the_autoincrement_counter() {
         "The rebuild of table `orders` did not keep what a rebuild must: the AUTOINCREMENT counter of table `orders` went back from 3 to 2 (sqlite_sequence), so SQLite would give new rows the ids of deleted ones. Row values suppressed.",
         "{r}"
     );
-    let line = "UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('orders', 'orders_new')) WHERE name='orders_new'; INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', max(seq) FROM sqlite_sequence WHERE name='orders' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='orders_new') HAVING count(*) > 0;";
+    let line = COUNTER_REPAIR;
     assert!(
         d["next_action"].as_str().unwrap().starts_with(&format!(
             "Before the DROP TABLE, copy the counter to the replacement table: `{line}`."
@@ -547,7 +551,7 @@ fn sqlite_rebuild_keeps_the_autoincrement_counter() {
 /// has a higher one, the source has two, or the table never had a counter.
 #[test]
 fn sqlite_rebuild_counter_repair_holds_with_or_without_a_counter_row() {
-    let repair = "UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('orders', 'orders_new')) WHERE name='orders_new'; INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', max(seq) FROM sqlite_sequence WHERE name='orders' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='orders_new') HAVING count(*) > 0;";
+    let repair = COUNTER_REPAIR;
     let create = "CREATE TABLE orders_new (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL CHECK (length(ref) > 0));";
     let copy = "INSERT INTO orders_new (id, ref) SELECT id, ref FROM orders;";
     let swap = "DROP TABLE orders; ALTER TABLE orders_new RENAME TO orders;";
@@ -644,6 +648,82 @@ fn sqlite_rebuild_counter_repair_holds_with_or_without_a_counter_row() {
     cycle(&f, "none.json");
     assert_eq!(counters(&f), [("orders".to_owned(), 0)]);
     assert_eq!(next_id(&f), 1);
+}
+
+/// F3, review: a replacement can already hold two counter rows, for example
+/// when the copy gave it one and the migration then INSERTs the original's
+/// counter. Raising both rows leaves both, so the guard refuses the rebuild,
+/// naming the count; the repair the next_action gives keeps one row with the
+/// highest counter, even when the second row holds it, so the rebuild then
+/// migrates and no id is given out again.
+#[test]
+fn sqlite_rebuild_counter_repair_leaves_one_of_two_replacement_rows() {
+    let create = "CREATE TABLE orders_new (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL CHECK (length(ref) > 0));";
+    let copy = "INSERT INTO orders_new (id, ref) SELECT id, ref FROM orders;";
+    let swap = "DROP TABLE orders; ALTER TABLE orders_new RENAME TO orders;";
+    // The copy gives `orders_new` counter 2; this adds 3, that of `orders`.
+    let second = "INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', seq FROM sqlite_sequence WHERE name='orders';";
+    // The repair without the DELETE: its UPDATE raises both rows to 3.
+    let raised = "UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('orders', 'orders_new')) WHERE name='orders_new'; INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', max(seq) FROM sqlite_sequence WHERE name='orders' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='orders_new') HAVING count(*) > 0;";
+    let migrated = |rows: &str, repair: &str| {
+        let f = Fixture::new();
+        f.sql(
+            "0001_orders.sql",
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL);",
+        );
+        cycle(&f, "0001.json");
+        f.target()
+            .execute_batch(
+                "INSERT INTO orders (ref) VALUES ('a'), ('b'), ('c'); DELETE FROM orders WHERE id = 3;",
+            )
+            .unwrap();
+        f.sql("0002_rebuild.toml", "sqlite_rebuild = \"orders\"");
+        f.sql(
+            "0002_rebuild.sql",
+            &format!("{create} {copy} {rows} {repair} {swap}"),
+        );
+        f
+    };
+    let next_id = |f: &Fixture| -> i64 {
+        let c = f.target();
+        c.execute_batch("INSERT INTO orders (ref) VALUES ('next')")
+            .unwrap();
+        c.query_row("SELECT id FROM orders WHERE ref = 'next'", [], |r| r.get(0))
+            .unwrap()
+    };
+    let f = migrated(second, raised);
+    let p = f.plan("raised.json");
+    let r = f.apply("raised.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "fail", "{r}");
+    let d = diagnostic(&r, "DB_REBUILD_GUARD");
+    assert_eq!(
+        d["message"],
+        "The rebuild of table `orders` did not keep what a rebuild must: table `orders` has 2 AUTOINCREMENT counters in sqlite_sequence, and SQLite reads and updates only the first, so it could give new rows the ids of deleted ones. Row values suppressed.",
+        "{r}"
+    );
+    assert!(
+        d["next_action"].as_str().unwrap().starts_with(&format!(
+            "Before the DROP TABLE, copy the counter to the replacement table: `{COUNTER_REPAIR}`."
+        )),
+        "{r}"
+    );
+    assert_eq!(counters(&f), [("orders".to_owned(), 3)]);
+    // The repair the next_action gives, after the same two rows, migrates.
+    f.sql(
+        "0002_rebuild.sql",
+        &format!("{create} {copy} {second} {COUNTER_REPAIR} {swap}"),
+    );
+    cycle(&f, "repaired.json");
+    assert_eq!(counters(&f), [("orders".to_owned(), 3)]);
+    assert_eq!(next_id(&f), 4);
+    // The highest counter, in the second row, survives the DELETE of that row.
+    let f = migrated(
+        "INSERT INTO sqlite_sequence (name, seq) VALUES ('orders_new', 9);",
+        COUNTER_REPAIR,
+    );
+    cycle(&f, "highest.json");
+    assert_eq!(counters(&f), [("orders".to_owned(), 9)]);
+    assert_eq!(next_id(&f), 10);
 }
 
 /// F6, review: the ADD COLUMN advice follows SQLite's own refusal of an

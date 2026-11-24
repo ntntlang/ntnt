@@ -1939,12 +1939,15 @@ impl RebuildGuard {
         }
         if let Some(rebuilt) = sequence {
             // Any write to the replacement, even one that copies no row,
-            // gives it a counter row, so the repair raises that row or adds one.
+            // gives it a counter row, and an INSERT into sqlite_sequence
+            // another, so the one repair for both failures raises every row
+            // the replacement has, keeps the first (the one SQLite reads)
+            // and adds one only when it has none (review: two rows).
             let (from, to) = (
                 literal(&rebuilt),
                 literal(&replacement_name(state, &rebuilt)),
             );
-            advice.push(format!("Before the DROP TABLE, copy the counter to the replacement table: `UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('{from}', '{to}')) WHERE name='{to}'; INSERT INTO sqlite_sequence (name, seq) SELECT '{to}', max(seq) FROM sqlite_sequence WHERE name='{from}' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='{to}') HAVING count(*) > 0;`. A statement that writes the replacement gives it a counter row, even when it copies no row. The UPDATE raises that row to the higher of the two counters, and the INSERT adds one row only when it has none, so the replacement keeps one counter, never lower than that of `{rebuilt}` or its own."));
+            advice.push(format!("Before the DROP TABLE, copy the counter to the replacement table: `UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('{from}', '{to}')) WHERE name='{to}'; DELETE FROM sqlite_sequence WHERE name='{to}' AND rowid <> (SELECT min(rowid) FROM sqlite_sequence WHERE name='{to}'); INSERT INTO sqlite_sequence (name, seq) SELECT '{to}', max(seq) FROM sqlite_sequence WHERE name='{from}' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='{to}') HAVING count(*) > 0;`. A statement that writes the replacement gives it a counter row, even when it copies no row, and each INSERT into sqlite_sequence adds one more. The UPDATE raises every counter row of the replacement to the highest counter of both tables, the DELETE keeps only the first of those rows, the one SQLite reads, and the INSERT adds a row only when the replacement has none, so the replacement keeps one counter, never lower than that of `{rebuilt}` or its own."));
         }
         if !catalog.uncovered.is_empty() {
             advice.push("Keep the rebuilt catalog within the coverage in docs/DATABASE_MIGRATIONS.md, Supported SQL and catalog coverage.".to_owned());
