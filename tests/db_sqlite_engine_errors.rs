@@ -434,15 +434,22 @@ fn sqlite_parser_gate_names_the_statement_and_the_cause() {
     );
 }
 
-/// An authorizer refusal without a name of its own names the action.
+/// An authorizer refusal without a name of its own names the action, and
+/// says what to do. (WITH RECURSIVE, the earlier example, is allowed since
+/// #427.)
 #[test]
-fn sqlite_recursive_cte_refusal_names_the_action() {
-    let r = plan_one(
-        "CREATE TABLE n (x INTEGER);\nINSERT INTO n SELECT x FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3) SELECT x FROM c);\n",
-    );
+fn sqlite_unnamed_refusal_names_the_action() {
+    let r = plan_one("CREATE TABLE n (x INTEGER);\nCREATE TEMP TABLE scratch (x INTEGER);\n");
+    let d = diagnostic(&r, "DB_SQL_UNSUPPORTED");
     assert_eq!(
-        message(diagnostic(&r, "DB_SQL_UNSUPPORTED")),
-        "Statement 2 uses a recursive common table expression (WITH RECURSIVE), which SQLite migrations cannot use.",
+        message(d),
+        "Statement 2 uses a temporary object, which SQLite migrations cannot use.",
+        "{r}"
+    );
+    assert!(
+        next_action(d).starts_with(
+            "Rewrite statement 2 of the migration named in source without a temporary object, then plan again."
+        ),
         "{r}"
     );
 }
