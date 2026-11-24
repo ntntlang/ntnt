@@ -124,6 +124,190 @@ fn schema_table(name: &str) -> bool {
         "sqlite_master" | "sqlite_schema" | "sqlite_temp_master" | "sqlite_temp_schema"
     )
 }
+/// SQLite's planner statistics tables: `sqlite_stat1`, `sqlite_stat4` in the
+/// bundled build, and the legacy `sqlite_stat2` and `sqlite_stat3` an older
+/// SQLite may have left in a file.
+fn statistics_table(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "sqlite_stat1" | "sqlite_stat2" | "sqlite_stat3" | "sqlite_stat4"
+    )
+}
+/// SQLite's own state tables, which hold no schema: the AUTOINCREMENT
+/// counters (`sqlite_sequence`) and the planner statistics that `ANALYZE` and
+/// `PRAGMA optimize` write (#427). No statement can create a `sqlite_` name;
+/// SQLite creates these itself, and updates them when a statement drops or
+/// renames a table or index they describe. Like PostgreSQL's sequence
+/// counters and statistics, they are left out of the catalog, and migrations
+/// may read and write them.
+fn engine_state(name: &str) -> bool {
+    name.eq_ignore_ascii_case("sqlite_sequence") || statistics_table(name)
+}
+/// SQLite's JSON table-valued functions (`json_each`, `json_tree` and their
+/// JSONB forms): eponymous virtual tables that read only their arguments.
+fn json_table(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "json_each" | "json_tree" | "jsonb_each" | "jsonb_tree"
+    )
+}
+/// The bundled SQLite's other eponymous virtual tables, which a name can
+/// resolve to without being in the catalog: `dbstat` reads every page of
+/// the file, the ledger's included; `pragma_*` runs a PRAGMA; `fts3tokenize`
+/// and `fts4aux` belong to full-text search.
+fn eponymous(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(name.as_str(), "dbstat" | "fts3tokenize" | "fts4aux") || name.starts_with("pragma_")
+}
+/// Whether a read of `name` that uses none of its columns (`count(*) FROM
+/// t`, `EXISTS (SELECT 1 FROM t)`) may run. SQLite gives such a read the
+/// database the statement spells, so none for an unqualified name. That
+/// name is a table or view in `main` (no other schema holds one: ntnt
+/// attaches no database and refuses temporary objects), a common table
+/// expression of the statement, or an eponymous virtual table. The first
+/// two may be read; ntnt's ledger, SQLite's internal tables and the
+/// eponymous virtual tables other than the JSON ones stay refused (#427).
+fn unqualified_read(name: &str, tables: &HashSet<String>) -> bool {
+    tables.contains(&name.to_ascii_lowercase())
+        || !(reserved(name) || internal(name) || eponymous(name))
+}
+
+/// SQLite's built-in SQL functions in the bundled SQLite 3.54 build, as its
+/// `pragma_function_list` reports them (`builtin` is 1): the core scalar,
+/// aggregate and window functions, the date and time functions and the JSON
+/// functions and operators (`->`, `->>`). This build has no math functions
+/// (`SQLITE_ENABLE_MATH_FUNCTIONS` is off). The two built-in functions that
+/// SQLite itself marks direct-only reach outside the database and are left
+/// out: `load_extension` loads code and `sqlite_log` writes to the process's
+/// log. The functions SQLite's FTS3,
+/// FTS5 and R*Tree extensions register (`fts3_tokenizer`, `snippet`, `bm25`,
+/// `rtreenode`, ...) are not built in, and neither is any application
+/// function. Where a function's value lands in the catalog, it lands as text:
+/// a DEFAULT such as `(lower(hex(randomblob(16))))` or `CURRENT_TIMESTAMP` is
+/// stored as its expression, so the catalog stays deterministic, and SQLite
+/// itself refuses a non-deterministic call where determinism is required (a
+/// CHECK constraint, generated column, index expression or predicate).
+/// Sorted, for `binary_search`; a unit test compares the list with the
+/// bundled SQLite.
+const BUILTIN_FUNCTIONS: &[&str] = &[
+    "->",
+    "->>",
+    "abs",
+    "avg",
+    "changes",
+    "char",
+    "coalesce",
+    "concat",
+    "concat_ws",
+    "count",
+    "cume_dist",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "date",
+    "datetime",
+    "dense_rank",
+    "first_value",
+    "format",
+    "glob",
+    "group_concat",
+    "hex",
+    "if",
+    "ifnull",
+    "iif",
+    "instr",
+    "json",
+    "json_array",
+    "json_array_insert",
+    "json_array_length",
+    "json_error_position",
+    "json_extract",
+    "json_group_array",
+    "json_group_object",
+    "json_insert",
+    "json_object",
+    "json_patch",
+    "json_pretty",
+    "json_quote",
+    "json_remove",
+    "json_replace",
+    "json_set",
+    "json_type",
+    "json_valid",
+    "jsonb",
+    "jsonb_array",
+    "jsonb_array_insert",
+    "jsonb_extract",
+    "jsonb_group_array",
+    "jsonb_group_object",
+    "jsonb_insert",
+    "jsonb_object",
+    "jsonb_patch",
+    "jsonb_remove",
+    "jsonb_replace",
+    "jsonb_set",
+    "julianday",
+    "lag",
+    "last_insert_rowid",
+    "last_value",
+    "lead",
+    "length",
+    "like",
+    "likelihood",
+    "likely",
+    "lower",
+    "ltrim",
+    "max",
+    "min",
+    "nth_value",
+    "ntile",
+    "nullif",
+    "octet_length",
+    "percent_rank",
+    "printf",
+    "quote",
+    "random",
+    "randomblob",
+    "rank",
+    "replace",
+    "round",
+    "row_number",
+    "rtrim",
+    "sign",
+    "soundex",
+    "sqlite_compileoption_get",
+    "sqlite_compileoption_used",
+    "sqlite_source_id",
+    "sqlite_version",
+    "strftime",
+    "string_agg",
+    "substr",
+    "substring",
+    "subtype",
+    "sum",
+    "time",
+    "timediff",
+    "total",
+    "total_changes",
+    "trim",
+    "typeof",
+    "unhex",
+    "unicode",
+    "unistr",
+    "unistr_quote",
+    "unixepoch",
+    "unlikely",
+    "upper",
+    "zeroblob",
+];
+/// The internal functions SQLite's own ALTER TABLE statements call.
+const ALTER_FUNCTIONS: &[&str] = &[
+    "sqlite_drop_column",
+    "sqlite_rename_column",
+    "sqlite_rename_quotefix",
+    "sqlite_rename_table",
+    "sqlite_rename_test",
+];
 
 #[derive(Clone, Copy)]
 enum Policy {
@@ -145,53 +329,52 @@ fn authorize(
     let schema = |name: &str| {
         schema_access && schema_table(name) && matches!(ctx.database_name, Some("main" | "temp"))
     };
+    // An unqualified name of a state table or a JSON table-valued function
+    // resolves to `main`, as no other schema holds one.
+    let local = matches!(ctx.database_name, None | Some("main"));
+    let state = |name: &str| write && local && engine_state(name);
     let allowed = match ctx.action {
         Select => true,
-        Read { table_name, .. } => {
+        Read {
+            table_name,
+            column_name,
+        } => {
             (main && ordinary(table_name) && tables.contains(&table_name.to_ascii_lowercase()))
                 || schema(table_name)
+                || state(table_name)
+                || (write && local && json_table(table_name))
+                // ALTER TABLE ... ADD COLUMN re-checks the table's constraints
+                // with pragma_quick_check (sq-08).
+                || (schema_access && main && table_name.eq_ignore_ascii_case("pragma_quick_check"))
+                || (ctx.database_name.is_none()
+                    && column_name.is_empty()
+                    && unqualified_read(table_name, tables))
         }
-        Function { function_name } => match function_name.to_ascii_lowercase().as_str() {
-            "count" => true,
-            "sqlite_rename_table"
-            | "sqlite_rename_column"
-            | "sqlite_rename_test"
-            | "sqlite_rename_quotefix"
-            | "sqlite_drop_column"
-            | "like"
-            | "substr"
-            | "length"
-            | "printf"
-            | "quote"
-            | "coalesce"
-            | "ifnull"
-            | "lower"
-            | "upper"
-            | "trim"
-            | "abs"
-            | "typeof"
-            // Date and time functions: a column DEFAULT stores the expression as
-            // text, so `CURRENT_TIMESTAMP` or `datetime('now')` leaves the catalog
-            // deterministic; SQLite itself refuses them where determinism is
-            // required (CHECK, generated columns, index expressions and predicates).
-            | "date"
-            | "time"
-            | "datetime"
-            | "julianday"
-            | "unixepoch"
-            | "strftime"
-            | "timediff"
-            | "current_date"
-            | "current_time"
-            | "current_timestamp" => write,
-            _ => false,
-        },
+        // The quick_check that pragma_quick_check runs, on a managed table.
+        Pragma {
+            pragma_name,
+            pragma_value,
+        } => {
+            schema_access
+                && main
+                && pragma_name.eq_ignore_ascii_case("quick_check")
+                && pragma_value.is_some_and(|table| tables.contains(&table.to_ascii_lowercase()))
+        }
+        Function { function_name } => {
+            let name = function_name.to_ascii_lowercase();
+            name == "count"
+                || (write
+                    && (BUILTIN_FUNCTIONS.binary_search(&name.as_str()).is_ok()
+                        || ALTER_FUNCTIONS.contains(&name.as_str())))
+        }
         CreateTable { table_name } => {
             if schema_access && main && ordinary(table_name) {
                 tables.insert(table_name.to_ascii_lowercase());
                 true
             } else {
-                false
+                // SQLite creates its state tables itself: sqlite_sequence for
+                // the first AUTOINCREMENT table, the statistics for ANALYZE.
+                schema_access && main && engine_state(table_name)
             }
         }
         CreateView { view_name } => {
@@ -205,8 +388,8 @@ fn authorize(
         DropTable { table_name } => {
             schema_access
                 && main
-                && ordinary(table_name)
-                && tables.contains(&table_name.to_ascii_lowercase())
+                && ((ordinary(table_name) && tables.contains(&table_name.to_ascii_lowercase()))
+                    || statistics_table(table_name))
         }
         DropView { view_name } => {
             schema_access
@@ -257,8 +440,13 @@ fn authorize(
                 && ((main
                     && ordinary(table_name)
                     && tables.contains(&table_name.to_ascii_lowercase()))
-                    || schema(table_name))
+                    || schema(table_name)
+                    || state(table_name))
         }
+        // ANALYZE reads the tables of `main` it names (all of them when it
+        // names none) and writes only the statistics tables (sq-19).
+        Analyze { .. } => schema_access && main,
+        Recursive => write,
         _ => false,
     };
     if allowed {
@@ -305,6 +493,10 @@ fn denial(action: &AuthAction<'_>) -> String {
         Unknown { code, .. } => format!("SQLite authorizer action {code}"),
         _ => "an operation".into(),
     }
+}
+/// What to do about statement `number`, which used `refused`.
+fn denial_advice(number: usize, refused: &str) -> String {
+    format!("Rewrite statement {number} of the migration named in source without {refused}, then plan again. A SQLite migration can use the tables and views of `main`, SQLite's built-in functions except load_extension and sqlite_log, the JSON table-valued functions, SQLite's AUTOINCREMENT counters and planner statistics, and ANALYZE. It cannot use ntnt's ledger, other virtual tables, temporary objects, functions an extension or application registers, ATTACH or PRAGMAs (docs/DATABASE_MIGRATIONS.md, Supported SQL and catalog coverage).")
 }
 type AuthScope = Option<(Policy, std::collections::HashSet<String>)>;
 
@@ -472,12 +664,16 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
             // authorizer's record of what it refused decides the diagnostic.
             Err(mut error) => {
                 return Err(match state.auth.take_denial() {
-                    Some(refused) => Diagnostic::new(
-                        "DB_SQL_UNSUPPORTED",
-                        &format!(
-                        "Statement {statement} uses {refused}, which SQLite migrations cannot use."
-                    ),
-                    ),
+                    Some(refused) => {
+                        let mut d = Diagnostic::new(
+                            "DB_SQL_UNSUPPORTED",
+                            &format!(
+                            "Statement {statement} uses {refused}, which SQLite migrations cannot use."
+                        ),
+                        );
+                        d.next_action = denial_advice(statement, &refused);
+                        d
+                    }
                     // This refusal already names its statement.
                     None if error.code == "DB_REBUILD_REQUIRED" => error,
                     // The session's file, not this statement, failed (#424).
@@ -625,7 +821,7 @@ fn replay_unsupported(sql: &str) -> Diagnostic {
             } else {
                 format!("Statement {statement} (`{construct}`) is outside the supported SQLite subset.")
             },
-            format!("Rewrite statement {statement} with the statements SQLite migrations support: CREATE, ALTER and DROP TABLE; CREATE and DROP INDEX, VIEW and TRIGGER; and INSERT, UPDATE and DELETE (write CREATE TABLE ... AS SELECT as CREATE TABLE, then INSERT ... SELECT), as docs/DATABASE_MIGRATIONS.md describes under Supported SQL and catalog coverage. Then rerun plan. Nothing in this migration ran."),
+            format!("Rewrite statement {statement} with the statements SQLite migrations support: CREATE, ALTER and DROP TABLE; CREATE and DROP INDEX, VIEW and TRIGGER; INSERT, UPDATE and DELETE (write CREATE TABLE ... AS SELECT as CREATE TABLE, then INSERT ... SELECT); and ANALYZE, as docs/DATABASE_MIGRATIONS.md describes under Supported SQL and catalog coverage. Then rerun plan. Nothing in this migration ran."),
         ),
     };
     let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", &message);
@@ -1011,6 +1207,13 @@ impl State {
             let name = object[1].as_str().unwrap();
             let table = object[2].as_str().unwrap();
             if reserved(name) || reserved(table) {
+                continue;
+            }
+            // SQLite's AUTOINCREMENT counters and planner statistics are
+            // state, not schema, and are left out like PostgreSQL's sequence
+            // counters and statistics (#427). An AUTOINCREMENT table's own
+            // definition, keyword included, stays in its definition hash.
+            if object[0] == "table" && engine_state(name) {
                 continue;
             }
             if object[4] != 1 {
@@ -1802,6 +2005,79 @@ impl Sqlite {
 
 #[cfg(test)]
 mod tests {
+    /// #427: a read that names no column, which SQLite reports without a
+    /// database, may read a managed table or view or a common table
+    /// expression, but not the ledger, SQLite's internal tables or the
+    /// eponymous virtual tables other than the JSON ones.
+    #[test]
+    fn reads_without_a_database_resolve_to_main_or_the_statement() {
+        let tables = ["events".to_owned(), "dbstat".to_owned()].into();
+        for allowed in [
+            "events",
+            "EVENTS",
+            "kinds",
+            "json_each",
+            "jsonb_tree",
+            "dbstat",
+        ] {
+            assert!(super::unqualified_read(allowed, &tables), "{allowed}");
+        }
+        for refused in [
+            "_ntnt_schema_migrations_v2",
+            "sqlite_schema",
+            "sqlite_temp_master",
+            "fts3tokenize",
+            "fts4aux",
+            "pragma_table_list",
+            "PRAGMA_quick_check",
+        ] {
+            assert!(!super::unqualified_read(refused, &tables), "{refused}");
+        }
+        assert!(!super::unqualified_read(
+            "dbstat",
+            &std::collections::HashSet::new()
+        ));
+    }
+
+    /// #427: the migration function policy is the bundled SQLite's own
+    /// built-in functions, less the two that reach outside the database.
+    /// A libsqlite3-sys update that adds, drops or renames a built-in
+    /// function fails here, so the list and its documentation are reviewed.
+    #[test]
+    fn builtin_functions_are_the_bundled_sqlite_builtins() {
+        let list = super::BUILTIN_FUNCTIONS;
+        assert!(
+            list.windows(2).all(|pair| pair[0] < pair[1]),
+            "BUILTIN_FUNCTIONS must stay sorted and unique for binary_search"
+        );
+        assert_eq!(rusqlite::version_number() / 1000, 3054);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let names = |builtin: i64| -> std::collections::BTreeSet<String> {
+            let mut statement = conn
+                .prepare("SELECT DISTINCT name FROM pragma_function_list WHERE builtin = ?1")
+                .unwrap();
+            statement
+                .query_map([builtin], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let mut expected: std::collections::BTreeSet<String> =
+            list.iter().map(|name| (*name).to_owned()).collect();
+        expected.extend(["load_extension".to_owned(), "sqlite_log".to_owned()]);
+        assert_eq!(names(1), expected);
+        // FTS3, FTS5 and R*Tree register functions of their own, which are
+        // not built in and stay refused.
+        let registered = names(0);
+        assert!(registered.contains("fts3_tokenizer"), "{registered:?}");
+        assert!(registered
+            .iter()
+            .all(|name| list.binary_search(&name.as_str()).is_err()));
+        for refused in ["load_extension", "sqlite_log", "fts3_tokenizer", "snippet"] {
+            assert!(list.binary_search(&refused).is_err(), "{refused}");
+        }
+    }
+
     /// CodeRabbit on #445 (sqlite.rs): DB_BUSY says only what is known.
     /// SQLITE_BUSY is another connection's lock, and the busy timeout is a
     /// limit, not a wait that happened. SQLITE_LOCKED is a conflict within

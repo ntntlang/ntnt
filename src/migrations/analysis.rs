@@ -385,6 +385,13 @@ fn classify(a: &mut Analysis, s: &Statement, engine: &str) -> &'static str {
             ("create_trigger", "TRIGGER_EFFECTS")
         }
         Statement::DropTrigger { .. } if engine == "sqlite" => ("drop_trigger", "REMOVED_TRIGGER"),
+        // ANALYZE reads the tables it names and writes SQLite's planner
+        // statistics, which are state outside the catalog (#427).
+        Statement::Analyze(_) if engine == "sqlite" => ("analyze", "STATISTICS_SCAN"),
+        // WITH ... INSERT, UPDATE or DELETE (#427).
+        s if engine == "sqlite" && sqlite_with_dml(s) => {
+            ("data_write", "DESTRUCTIVE_OR_OVERWRITING_DML")
+        }
         Statement::AlterTable(t) => {
             for op in &t.operations {
                 if matches!(
@@ -474,25 +481,35 @@ fn sqlite_script(a: &mut Analysis, sql: &str) {
     }
 }
 
+/// Whether `s` is an INSERT, UPDATE or DELETE that a WITH clause leads
+/// (`WITH RECURSIVE r(i) AS (...) INSERT INTO t SELECT i FROM r`), which the
+/// parser reads as a query around the statement.
+fn sqlite_with_dml(s: &Statement) -> bool {
+    matches!(s, Statement::Query(query) if query.with.is_some()
+        && matches!(*query.body, SetExpr::Insert(_) | SetExpr::Update(_) | SetExpr::Delete(_)))
+}
+
 /// Whether the SQLite subset includes statement `s`'s kind (see `sqlite_script`).
 fn sqlite_kind_supported(s: &Statement) -> bool {
     !matches!(s, Statement::CreateTable(table) if table.query.is_some())
-        && matches!(
-            s,
-            Statement::CreateTable(_)
-                | Statement::AlterTable(_)
-                | Statement::CreateIndex(_)
-                | Statement::CreateView { .. }
-                | Statement::CreateTrigger { .. }
-                | Statement::DropTrigger { .. }
-                | Statement::Insert(_)
-                | Statement::Update(_)
-                | Statement::Delete(_)
-                | Statement::Drop {
-                    object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
-                    ..
-                }
-        )
+        && (sqlite_with_dml(s)
+            || matches!(
+                s,
+                Statement::CreateTable(_)
+                    | Statement::AlterTable(_)
+                    | Statement::CreateIndex(_)
+                    | Statement::CreateView { .. }
+                    | Statement::CreateTrigger { .. }
+                    | Statement::DropTrigger { .. }
+                    | Statement::Analyze(_)
+                    | Statement::Insert(_)
+                    | Statement::Update(_)
+                    | Statement::Delete(_)
+                    | Statement::Drop {
+                        object_type: ObjectType::Table | ObjectType::Index | ObjectType::View,
+                        ..
+                    }
+            ))
 }
 
 /// Why the SQLite parser gate refuses a migration (#424): the statement it
