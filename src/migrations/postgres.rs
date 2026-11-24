@@ -1064,10 +1064,14 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         }
         // `public` and the declared extensions' schemas hold only what the
         // declared extensions own (`DECLARED_OWNED`). With none declared,
-        // `public` is empty and no other schema exists, as before.
+        // `public` is empty and no other schema exists, as before. Below,
+        // inspection checks every kind of object in `public` by catalog key;
+        // in the extensions' own schemas this query does, for each kind
+        // replay would take for the history's work (`OUTSIDE_OBJECTS`).
         let r=bounded(self.client.query_one(&format!(r#"
 WITH RECURSIVE {owned},
-prepared AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname='public' OR n.oid IN (SELECT e.extnamespace FROM pg_catalog.pg_extension e WHERE e.extname=ANY($1::text[])))
+prepared AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname='public' OR n.oid IN (SELECT e.extnamespace FROM pg_catalog.pg_extension e WHERE e.extname=ANY($1::text[]))),
+extension_schemas AS (SELECT oid FROM prepared WHERE oid NOT IN (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname='public'))
 SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $2))
  AND d.datdba=r.oid AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=r.oid)
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_event_trigger)
@@ -1077,6 +1081,16 @@ SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication O
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_class'::pg_catalog.regclass AND o.objid=c.oid))
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_proc'::pg_catalog.regclass AND o.objid=p.oid))
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type t WHERE t.typnamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_type'::pg_catalog.regclass AND o.objid=t.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_operator x WHERE x.oprnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_operator'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_collation x WHERE x.collnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_collation'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_conversion x WHERE x.connamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_conversion'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_opclass x WHERE x.opcnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_opclass'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_opfamily x WHERE x.opfnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_opfamily'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_statistic_ext x WHERE x.stxnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_statistic_ext'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_ts_parser x WHERE x.prsnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_ts_parser'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_ts_template x WHERE x.tmplnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_ts_template'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_ts_config x WHERE x.cfgnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_ts_config'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_ts_dict x WHERE x.dictnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_ts_dict'::pg_catalog.regclass AND o.objid=x.oid))
 FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user AND d.datname=pg_catalog.current_database()
 "#, owned = super::catalog_sql::DECLARED_OWNED),&[&declared, &target_bypasses_rls])).await?;
         if !r.get::<_, bool>(0) {
@@ -1230,7 +1244,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
           WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind='r'
           AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace WHERE t.oid=a.atttypid AND tn.nspname<>'pg_catalog' AND tn.nspname<>ALL($2)))
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast k WHERE k.oid>=16384 AND k.castcontext IN ('i','a') AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
-            WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND en.nspname=ANY($2)))
+            WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND (en.nspname=ANY($2) OR e.extname=ANY($3::text[]))))
           -- A composite type (relkind c) holds no rows to read.
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind NOT IN ('r','p','i','I','S','v','c'))
           -- A check may read a view, and through it what the view reads.
@@ -1239,7 +1253,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class v
             JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid
             JOIN pg_catalog.pg_proc p ON d.refclassid='pg_catalog.pg_proc'::regclass AND p.oid=d.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
-            WHERE v.oid IN (SELECT rel FROM reach) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema, &scope(schema, extra)]).await?;
+            WHERE v.oid IN (SELECT rel FROM reach) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema, &scope(schema, extra), &self.extensions]).await?;
         if !safe[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
