@@ -49,8 +49,9 @@
 - **Checks compare as the application does.** Checks resolve operators with
   `search_path=pg_catalog`, so `email = 'admin@example.com'` on a `citext`
   column compared case-sensitive text, and a check that the application's
-  comparison would fail could pass. A check that compares a column whose type
-  (or a domain's base type) has a same-named operator outside `pg_catalog`,
+  comparison would fail could pass. A check that compares a column (or a table's whole
+  row) whose type, builtin or not, or a domain's base type, has a
+  same-named operator outside `pg_catalog`,
   in any schema, since NTNT cannot know the application's search path,
   is now refused before any check runs, with `DB_CHECK_UNSUPPORTED` naming
   the check, table, column, type and operator (`app.=(app.citext,app.citext)`),
