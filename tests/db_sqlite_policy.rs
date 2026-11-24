@@ -204,6 +204,23 @@ fn sqlite_functions_that_are_not_builtin_or_reach_outside_are_refused_by_name() 
             2,
             "sqlite_log",
         ),
+        // A function the application registers on its own connections is
+        // missing on ntnt's: in DML it is named like one in a DEFAULT.
+        (
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, x TEXT); UPDATE t SET x = app_slugify(x);",
+            2,
+            "app_slugify",
+        ),
+        (
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, x TEXT); INSERT INTO t(x) VALUES (app_slugify('private_marker_427'));",
+            2,
+            "app_slugify",
+        ),
+        (
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, x TEXT DEFAULT (app_uuid()));",
+            1,
+            "app_uuid",
+        ),
     ] {
         let f = Fixture::new();
         f.sql("0001_initial.sql", sql);
@@ -434,4 +451,301 @@ fn sqlite_reads_without_columns_still_refuse_virtual_tables() {
         );
         assert_eq!(schema_objects(&f), 0);
     }
+}
+
+/// The counters SQLite keeps in `sqlite_sequence`, by table.
+fn counters(f: &Fixture) -> Vec<(String, i64)> {
+    f.target()
+        .prepare("SELECT name, seq FROM sqlite_sequence ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// F3: a `sqlite_rebuild` of an AUTOINCREMENT table keeps its counter.
+/// Copying the rows into the replacement starts its counter from the
+/// highest id copied, so deleted ids would be given out again; the guard
+/// refuses that, naming the table and both values, and its next_action is
+/// the line that copies the counter, which then migrates.
+#[test]
+fn sqlite_rebuild_keeps_the_autoincrement_counter() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_orders.sql",
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL); \
+         CREATE TABLE lines (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders (id) ON DELETE CASCADE);",
+    );
+    cycle(&f, "0001.json");
+    f.target()
+        .execute_batch(
+            "INSERT INTO orders (ref) VALUES ('a'), ('b'), ('c'); DELETE FROM orders WHERE id = 3; \
+             INSERT INTO lines (order_id) VALUES (1), (2);",
+        )
+        .unwrap();
+    assert_eq!(counters(&f), [("orders".to_owned(), 3)]);
+    f.sql("0002_rebuild.toml", "sqlite_rebuild = \"orders\"");
+    let rebuild = |counter: &str| {
+        format!(
+            "CREATE TABLE orders_new (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL CHECK (length(ref) > 0)); \
+             INSERT INTO orders_new (id, ref) SELECT id, ref FROM orders; {counter} \
+             DROP TABLE orders; ALTER TABLE orders_new RENAME TO orders;"
+        )
+    };
+    f.sql("0002_rebuild.sql", &rebuild(""));
+    // Replay's orders is empty, so the plan passes; the target's is not.
+    let p = f.plan("lost.json");
+    let r = f.apply("lost.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "fail", "{r}");
+    let d = diagnostic(&r, "DB_REBUILD_GUARD");
+    assert_eq!(
+        d["message"],
+        "The rebuild of table `orders` did not keep what a rebuild must: the AUTOINCREMENT counter of table `orders` went back from 3 to 2 (sqlite_sequence), so SQLite would give new rows the ids of deleted ones. Row values suppressed.",
+        "{r}"
+    );
+    let line = "UPDATE sqlite_sequence SET seq = (SELECT seq FROM sqlite_sequence WHERE name='orders') WHERE name='orders_new';";
+    assert!(
+        d["next_action"].as_str().unwrap().starts_with(&format!(
+            "Before the DROP TABLE, copy the counter to the replacement table: `{line}`."
+        )),
+        "{r}"
+    );
+    assert_eq!(d["objects"], json!(["table:\"orders\""]), "{r}");
+    assert_eq!(d["source"], "0002_rebuild.sql", "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    assert_eq!(counters(&f), [("orders".to_owned(), 3)]);
+    // The line the next_action gives, before the DROP, keeps the counter.
+    f.sql("0002_rebuild.sql", &rebuild(line));
+    cycle(&f, "kept.json");
+    assert_eq!(counters(&f), [("orders".to_owned(), 3)]);
+    let c = f.target();
+    c.execute_batch("INSERT INTO orders (ref) VALUES ('d')")
+        .unwrap();
+    let id: i64 = c
+        .query_row("SELECT id FROM orders WHERE ref = 'd'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(id, 4);
+}
+
+/// F2: DB_REBUILD_GUARD names the rule a rebuild broke and the object,
+/// never a row value: a recreated index whose stored SQL text differs
+/// (whitespace and quoting are compared), a view not recreated, and a
+/// write to another table.
+#[test]
+fn sqlite_rebuild_guard_names_what_the_rebuild_did_not_keep() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_posts.sql",
+        "CREATE TABLE \"posts\" (\"id\" integer PRIMARY KEY NOT NULL, \"user_id\" integer NOT NULL, \"title\" varchar NOT NULL); \
+         CREATE INDEX \"index_posts_on_user_id\" ON \"posts\" (\"user_id\"); \
+         CREATE VIEW titles AS SELECT id, title FROM posts; \
+         CREATE TABLE log (id INTEGER PRIMARY KEY, msg TEXT);",
+    );
+    cycle(&f, "0001.json");
+    f.sql("0002_rebuild.toml", "sqlite_rebuild = \"posts\"");
+    let rebuild = |after: &str| {
+        format!(
+            "DROP VIEW titles; \
+             CREATE TABLE posts_new (\"id\" integer PRIMARY KEY NOT NULL, \"user_id\" integer NOT NULL, \"title\" varchar NOT NULL CHECK (length(title) <= 200)); \
+             INSERT INTO posts_new SELECT * FROM posts; DROP TABLE posts; ALTER TABLE posts_new RENAME TO posts; {after}"
+        )
+    };
+    let index = "CREATE INDEX \"index_posts_on_user_id\" ON \"posts\" (\"user_id\");";
+    let view = "CREATE VIEW titles AS SELECT id, title FROM posts;";
+    for (after, broken, object) in [
+        (
+            format!("CREATE INDEX index_posts_on_user_id ON posts(user_id); {view}"),
+            "index `index_posts_on_user_id` has another stored SQL text than before the rebuild. SQLite compares the stored SQL text of a definition, so whitespace and quoting must match the original.",
+            "index:\"index_posts_on_user_id\"",
+        ),
+        (
+            index.to_owned(),
+            "view `titles` is missing.",
+            "view:\"titles\"",
+        ),
+        (
+            format!("{index} {view} INSERT INTO log (msg) VALUES ('private_marker_f2');"),
+            "the row count of table `log` changed from 0 to 1.",
+            "table:\"log\"",
+        ),
+    ] {
+        f.sql("0002_rebuild.sql", &rebuild(&after));
+        let r = f.command("plan", &[]);
+        assert_ne!(r["outcome"], "pass", "{after}: {r}");
+        let d = diagnostic(&r, "DB_REBUILD_GUARD");
+        assert_eq!(
+            d["message"],
+            format!("The rebuild of table `posts` did not keep what a rebuild must: {broken} Row values suppressed."),
+            "{r}"
+        );
+        assert_eq!(d["objects"], json!([object]), "{r}");
+        assert_eq!(d["source"], "0002_rebuild.sql", "{r}");
+        assert!(!r.to_string().contains("private_marker_f2"), "{r}");
+    }
+    f.sql("0002_rebuild.sql", &rebuild(&format!("{index} {view}")));
+    cycle(&f, "0002.json");
+}
+
+/// F6: SQLite's ALTER TABLE ... ADD COLUMN cannot add a UNIQUE or PRIMARY
+/// KEY column. The refusal is SQLite's own, not the autoindex SQLite asks
+/// for on its copy of the table, and says what to write instead, which
+/// migrates.
+#[test]
+fn sqlite_add_unique_column_says_to_add_a_unique_index() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_t.sql",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT);",
+    );
+    cycle(&f, "0001.json");
+    for (sql, refusal, advice) in [
+        (
+            "ALTER TABLE t ADD COLUMN c TEXT UNIQUE;",
+            "Cannot add a UNIQUE column",
+            "SQLite's ALTER TABLE ... ADD COLUMN cannot add a UNIQUE column. In statement 1, add the column without UNIQUE, then create a unique index on it in the same migration: `ALTER TABLE <table> ADD COLUMN <column> <type>;` followed by `CREATE UNIQUE INDEX <table>_<column>_key ON <table> (<column>);`.",
+        ),
+        (
+            "ALTER TABLE t ADD COLUMN c TEXT PRIMARY KEY;",
+            "Cannot add a PRIMARY KEY column",
+            "SQLite's ALTER TABLE ... ADD COLUMN cannot add a PRIMARY KEY column. Instead of statement 1, rebuild the table with a `sqlite_rebuild` sidecar",
+        ),
+    ] {
+        f.sql("0002_add.sql", sql);
+        let r = f.command("plan", &[]);
+        assert_ne!(r["outcome"], "pass", "{sql}: {r}");
+        let d = diagnostic(&r, "DB_SQLITE");
+        assert_eq!(
+            d["message"],
+            format!("Statement 1: {refusal} (SQLITE_ERROR)."),
+            "{r}"
+        );
+        assert!(
+            d["next_action"].as_str().unwrap().starts_with(advice),
+            "{r}"
+        );
+        assert!(!r.to_string().contains("sqlite_altertab"), "{r}");
+    }
+    f.sql(
+        "0002_add.sql",
+        "ALTER TABLE t ADD COLUMN c TEXT; CREATE UNIQUE INDEX t_c_key ON t (c);",
+    );
+    cycle(&f, "0002.json");
+}
+
+/// F7 and F1: what replay's empty tables cannot show fails on the target
+/// with what to do. ADD COLUMN with a non-constant default or NOT NULL
+/// without one on a table with rows; and a drop of a table that other
+/// tables reference without an ON DELETE action, whose immediate key fails
+/// the DROP and whose deferred key fails the COMMIT.
+#[test]
+fn sqlite_target_only_failures_say_what_to_do() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_tables.sql",
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT); \
+         CREATE TABLE p (id INTEGER PRIMARY KEY, name TEXT NOT NULL); \
+         CREATE TABLE c (id INTEGER PRIMARY KEY, p_id INTEGER NOT NULL REFERENCES p (id)); \
+         CREATE TABLE q (id INTEGER PRIMARY KEY, name TEXT NOT NULL); \
+         CREATE TABLE d (id INTEGER PRIMARY KEY, q_id INTEGER NOT NULL REFERENCES q (id) DEFERRABLE INITIALLY DEFERRED);",
+    );
+    cycle(&f, "0001.json");
+    f.target()
+        .execute_batch(
+            "INSERT INTO t (a) VALUES ('x'); INSERT INTO p VALUES (1, 'p'); INSERT INTO c VALUES (1, 1); \
+             INSERT INTO q VALUES (1, 'q'); INSERT INTO d VALUES (1, 1);",
+        )
+        .unwrap();
+    let rebuild = |table: &str| {
+        format!(
+            "CREATE TABLE {table}_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL, note TEXT); \
+             INSERT INTO {table}_new (id, name) SELECT id, name FROM {table}; DROP TABLE {table}; \
+             ALTER TABLE {table}_new RENAME TO {table};"
+        )
+    };
+    for (n, (sql, message, advice)) in [
+        (
+            "ALTER TABLE t ADD COLUMN created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP;".to_owned(),
+            "Statement 1: Cannot add a column with non-constant default (SQLITE_ERROR).",
+            "SQLite's ALTER TABLE ... ADD COLUMN gives every existing row the new column's default, so on a table that has rows it accepts only a constant default",
+        ),
+        (
+            "ALTER TABLE t ADD COLUMN b TEXT NOT NULL;".to_owned(),
+            "Statement 1: Cannot add a NOT NULL column with default value NULL (SQLITE_ERROR).",
+            "SQLite's ALTER TABLE ... ADD COLUMN cannot add a NOT NULL column without a default to a table that has rows",
+        ),
+        (
+            rebuild("p"),
+            "Statement 3: FOREIGN KEY constraint failed (SQLITE_CONSTRAINT_FOREIGNKEY).",
+            "Statement 3 drops table `p`, which `c` references. SQLite deletes every row of a dropped table first",
+        ),
+        (
+            rebuild("q"),
+            "SQLite could not commit the migration: FOREIGN KEY constraint failed (SQLITE_CONSTRAINT_FOREIGNKEY).",
+            "The migration dropped table `q`, which `d` references with a deferred foreign key.",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        f.sql("0002_change.sql", &sql);
+        let plan = format!("0002-{n}.json");
+        let p = f.plan(&plan);
+        let r = f.apply(&plan, p["plan_digest"].as_str());
+        assert_eq!(r["outcome"], "fail", "{sql}: {r}");
+        let d = diagnostic(&r, "DB_SQLITE");
+        assert_eq!(d["message"], message, "{r}");
+        let next_action = d["next_action"].as_str().unwrap();
+        assert!(next_action.starts_with(advice), "{r}");
+        assert!(next_action.contains("sqlite_rebuild"), "{r}");
+        assert!(next_action.contains("Explicit one-table rebuild"), "{r}");
+        assert_eq!(d["source"], "0002_change.sql", "{r}");
+        assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    }
+    let columns: i64 = f
+        .target()
+        .query_row("SELECT count(*) FROM pragma_table_info('t')", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(columns, 2);
+}
+
+/// F8: a saved plan that `ntnt db plan` could not make (outcome fail, no
+/// plan and no plan_digest) is refused as blocked, not as edited, even
+/// when approval holds jq's `null`.
+#[test]
+fn sqlite_saved_plan_without_a_plan_is_blocked() {
+    let f = Fixture::new();
+    f.target()
+        .execute_batch("CREATE TABLE legacy (id INTEGER PRIMARY KEY);")
+        .unwrap();
+    f.sql("0001_t.sql", "CREATE TABLE t (id INTEGER PRIMARY KEY);");
+    let p = f.command("plan", &["--out", "blocked.json"]);
+    assert_eq!(p["outcome"], "fail", "{p}");
+    diagnostic(&p, "DB_UNRECOGNIZED_HISTORY");
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(f.root.path().join("blocked.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["outcome"], "fail", "{saved}");
+    assert!(
+        saved.get("plan_digest").is_none_or(Value::is_null),
+        "{saved}"
+    );
+    let r = f.apply("blocked.json", Some("null"));
+    assert_eq!(r["outcome"], "fail", "{r}");
+    let d = diagnostic(&r, "DB_PLAN_STALE");
+    assert_eq!(
+        d["message"],
+        "Saved plan is blocked: its outcome is fail, and it holds no plan because `ntnt db plan` stopped before it could make one. A blocked plan is never executed.",
+        "{r}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("Approve a plan only when its outcome is pass and it has a plan_digest."),
+        "{r}"
+    );
+    assert_eq!(schema_objects(&f), 1);
 }
