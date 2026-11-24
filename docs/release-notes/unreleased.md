@@ -41,7 +41,9 @@
   function the history wrote or a volatile one such as `nextval`, fails with
   `DB_CHECK_UNSUPPORTED` before it runs, naming the table, column, type,
   domain and function. So does a view that converts values to such a domain,
-  or that uses an operator whose function the history wrote. A domain whose
+  or that uses an operator whose function, or whose negator's, the history
+  wrote, and a view that calls `pg_input_is_valid` or `json_populate_record`
+  while such a domain exists. A domain whose
   constraint uses only builtins, such as a regular expression, is allowed at
   any depth (#430).
 
