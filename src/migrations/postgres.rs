@@ -1145,7 +1145,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         Ok(self
             .rows(
                 super::catalog_sql::OUTSIDE_OBJECTS,
-                &[&scope(schema, extra), &scratch.schemas],
+                &[&scope(schema, extra), &scratch.schemas, &self.extensions],
             )
             .await?
             .iter()

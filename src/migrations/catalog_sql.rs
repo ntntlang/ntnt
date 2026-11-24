@@ -281,18 +281,30 @@ WHERE $1::text IS NOT NULL
 /// The `QUERIES` that take `$4`, the declared extensions.
 pub(super) const WITH_DECLARED_EXTENSIONS: &[&str] = &["relation", "extension"];
 
+// `DECLARED_OWNED`, with the declared extensions in parameter `$p`.
+macro_rules! declared_owned {
+    ($p:literal) => {
+        concat!(
+            r#"owned(classid, objid) AS (
+  SELECT d.classid, d.objid FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
+   WHERE d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extname=ANY("#,
+            $p,
+            r#"::text[])
+  UNION
+  SELECT d.classid, d.objid FROM owned o JOIN pg_catalog.pg_depend d ON d.refclassid=o.classid AND d.refobjid=o.objid
+   WHERE d.deptype IN ('i','a'))"#
+        )
+    };
+}
+
 /// What the declared extensions (`$1`, text[]) own, as a `WITH RECURSIVE`
 /// element: `owned(classid, objid)`, their members (pg_depend `e`) and,
 /// transitively, what depends on one of those internally or automatically
 /// (`i`, `a`), such as array and row types, indexes and TOAST tables.
 /// Superuser-owned, it is what `prepare_scratch` accepts in a scratch
-/// database's `public` and in the declared extensions' schemas (#430).
-pub(super) const DECLARED_OWNED: &str = r#"owned(classid, objid) AS (
-  SELECT d.classid, d.objid FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
-   WHERE d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extname=ANY($1::text[])
-  UNION
-  SELECT d.classid, d.objid FROM owned o JOIN pg_catalog.pg_depend d ON d.refclassid=o.classid AND d.refobjid=o.objid
-   WHERE d.deptype IN ('i','a'))"#;
+/// database's `public` and in the declared extensions' schemas, and what
+/// `OUTSIDE_OBJECTS` does not take for a replayed history's work (#430).
+pub(super) const DECLARED_OWNED: &str = declared_owned!("$1");
 
 /// What a replayed history has created outside the managed scope in scratch,
 /// by the catalog key `QUERIES` give it, for their `$3`. Scratch holds nothing
@@ -306,10 +318,19 @@ pub(super) const DECLARED_OWNED: &str = r#"owned(classid, objid) AS (
 /// it, and an extension's members follow the extension, which `QUERIES`
 /// inspect database-wide, so neither is listed. Default privileges for a
 /// schema are not objects and are not listed either.
-pub(super) const OUTSIDE_OBJECTS: &str = r#"
-WITH o AS (SELECT n.oid,n.nspname FROM pg_catalog.pg_namespace n
+///
+/// What the declared extensions (`$3`) own (`DECLARED_OWNED`) was installed
+/// before replay, as on the target, so it is not listed either: their
+/// members, and what is not a member but depends on one, such as the
+/// relations of tablefunc's and dblink's composite types (#430).
+pub(super) const OUTSIDE_OBJECTS: &str = concat!(
+    r#"
+WITH RECURSIVE "#,
+    declared_owned!("$3"),
+    r#",
+o AS (SELECT n.oid,n.nspname FROM pg_catalog.pg_namespace n
  WHERE n.nspname<>ALL($1) AND n.nspname NOT IN ('information_schema','_ntnt') AND NOT starts_with(n.nspname,'pg_')),
-e AS (SELECT d.classid,d.objid FROM pg_catalog.pg_depend d WHERE d.deptype='e')
+e AS (SELECT d.classid,d.objid FROM pg_catalog.pg_depend d WHERE d.deptype='e' UNION SELECT w.classid,w.objid FROM owned w)
 SELECT 'schema:'||o.nspname FROM o WHERE o.nspname<>ALL($2)
 UNION ALL SELECT quote_ident(o.nspname)||'.relation:'||c.relname FROM pg_catalog.pg_class c JOIN o ON o.oid=c.relnamespace
  WHERE c.relkind NOT IN ('i','I') AND NOT EXISTS(SELECT 1 FROM e WHERE e.classid='pg_catalog.pg_class'::regclass AND e.objid=c.oid)
@@ -337,4 +358,5 @@ UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_config.'||x.cfgname
 UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_dictionary.'||x.dictname FROM pg_catalog.pg_ts_dict x JOIN o ON o.oid=x.dictnamespace
  WHERE NOT EXISTS(SELECT 1 FROM e WHERE e.classid='pg_catalog.pg_ts_dict'::regclass AND e.objid=x.oid)
 ORDER BY 1 LIMIT 10001
-"#;
+"#,
+);
