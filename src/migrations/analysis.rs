@@ -868,8 +868,10 @@ pub(crate) fn sqlite_renamed_to(sql: &str, table: &str) -> Option<String> {
         .tokenize_with_location()
         .ok()?;
     let keyword = |token: &Token, k: &str| matches!(token, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(k));
+    // SQLite also reads a single-quoted string where it expects a name.
     let name = |token: &Token| match token {
         Token::Word(w) => Some(w.value.clone()),
+        Token::SingleQuotedString(s) => Some(s.clone()),
         _ => None,
     };
     sqlite_statements(&tokens)
@@ -3088,5 +3090,39 @@ mod tests {
                 "{sql}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod renamed_to_tests {
+    use super::sqlite_renamed_to;
+
+    /// The replacement a rebuild renames to the table, with its names
+    /// quoted or not (review).
+    #[test]
+    fn sqlite_renamed_to_reads_single_quoted_names() {
+        for sql in [
+            "ALTER TABLE orders_new RENAME TO orders;",
+            "ALTER TABLE orders_new RENAME TO 'orders';",
+            "ALTER TABLE 'orders_new' RENAME TO \"orders\";",
+            "ALTER TABLE main.'orders_new' RENAME TO 'orders';",
+        ] {
+            assert_eq!(
+                sqlite_renamed_to(sql, "orders").as_deref(),
+                Some("orders_new"),
+                "{sql}"
+            );
+        }
+        assert_eq!(
+            sqlite_renamed_to("ALTER TABLE orders_new RENAME TO 'other';", "orders"),
+            None
+        );
+        assert_eq!(
+            sqlite_renamed_to(
+                "SELECT 'ALTER', 'TABLE', 'RENAME', 'TO', 'orders';",
+                "orders"
+            ),
+            None
+        );
     }
 }
