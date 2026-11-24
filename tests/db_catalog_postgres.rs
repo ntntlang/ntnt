@@ -2786,3 +2786,97 @@ fn a_scratch_role_with_privileges_it_does_not_own_is_refused() {
         .unwrap();
     assert_eq!(f.command("plan")["outcome"], "pass");
 }
+
+/// #430: cleanup's DROP OWNED drops everything the scratch role owns, so a
+/// plan refuses scratch-owned objects that the emptiness check does not see,
+/// such as a large object and a publication, before it commits its marker,
+/// and keeps them.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn objects_the_scratch_role_already_owns_are_refused_and_kept() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
+    let mut owner = Client::connect(&f.scratch_url, NoTls).unwrap();
+    owner
+        .batch_execute("SELECT pg_catalog.lo_create(4242); CREATE PUBLICATION ntnt_kept_pub;")
+        .unwrap();
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_NOT_EMPTY").unwrap_or_else(|| panic!("{r}"));
+    let objects = names(&d["objects"]);
+    assert!(
+        objects.iter().any(|o| o.contains("large object 4242")),
+        "{d}"
+    );
+    assert!(objects.iter().any(|o| o.contains("ntnt_kept_pub")), "{d}");
+    let kept = owner
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_largeobject_metadata WHERE oid = 4242) AND EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'ntnt_kept_pub') AND to_regnamespace('_ntnt_replay') IS NULL",
+            &[],
+        )
+        .unwrap()
+        .get::<_, bool>(0);
+    assert!(
+        kept,
+        "the plan dropped what the scratch role owned or left a marker"
+    );
+    owner
+        .batch_execute("SELECT pg_catalog.lo_unlink(4242); DROP PUBLICATION ntnt_kept_pub;")
+        .unwrap();
+    drop(owner);
+    assert_eq!(f.command("plan")["outcome"], "pass");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// #430: a migration that releases NTNT's replay lock is refused before it
+/// commits. While it still runs, another plan takes the lock, finds that
+/// replay's marker and its session, and fails with DB_SCRATCH_BUSY instead
+/// of cleaning up what the first replay still uses.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_migration_that_releases_the_replay_lock_is_refused() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
+    f.sql(
+        "0002_unlock.sql",
+        "SELECT pg_catalog.pg_advisory_unlock_all(); SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    let mut holder = scratch_admin(&f);
+    holder
+        .batch_execute("SELECT pg_advisory_lock(4242)")
+        .unwrap();
+    let mut first = spawn_plan(&f);
+    let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND NOT granted)";
+    wait_for(&mut holder, waiting, &mut first, "replay waiting in 0002");
+    let second = f.command("plan");
+    let d = diagnostic(&second, "DB_SCRATCH_BUSY").unwrap_or_else(|| panic!("{second}"));
+    assert!(
+        d["message"].as_str().unwrap().contains("still connected"),
+        "{d}"
+    );
+    assert!(second["scratch"]["recovered"].is_null(), "{second}");
+    let kept: bool = holder
+        .query_one(
+            "SELECT to_regclass('app.t') IS NOT NULL AND to_regnamespace('_ntnt_replay') IS NOT NULL",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(kept, "the second plan cleaned up a running replay");
+    holder
+        .batch_execute("SELECT pg_advisory_unlock(4242)")
+        .unwrap();
+    let r = report(first);
+    let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["source"], "0002_unlock.sql", "{d}");
+    assert!(
+        d["message"].as_str().unwrap().contains("replay lock"),
+        "{d}"
+    );
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    std::fs::remove_file(f.root.path().join("migrations/0002_unlock.sql")).unwrap();
+    assert_eq!(f.command("plan")["outcome"], "pass");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
