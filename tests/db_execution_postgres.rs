@@ -1701,7 +1701,7 @@ fn declared_extensions_must_match_between_target_and_scratch() {
 /// only what the declared extensions own: members, and what depends on a
 /// member internally or automatically (array and row types, indexes).
 /// Anything else there is refused before replay: a table, an operator over
-/// builtin functions in `public`, a table in the extension's schema.
+/// builtin functions in `public`, a sequence in the extension's schema.
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn scratch_holds_only_what_declared_extensions_own() {
@@ -1722,7 +1722,8 @@ fn scratch_holds_only_what_declared_extensions_own() {
             "CREATE OPERATOR public.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = pg_catalog.int4eq)",
             "DROP OPERATOR public.=== (int, int)",
         ),
-        ("CREATE TABLE ext.stray (id int)", "DROP TABLE ext.stray"),
+        // A sequence has no row type: only the relation check sees it.
+        ("CREATE SEQUENCE ext.stray", "DROP SEQUENCE ext.stray"),
     ] {
         scratch.batch_execute(stray).unwrap();
         let r = f.command("plan");
