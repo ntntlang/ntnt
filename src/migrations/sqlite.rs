@@ -1939,12 +1939,12 @@ impl RebuildGuard {
         }
         if let Some(rebuilt) = sequence {
             // Any write to the replacement, even one that copies no row,
-            // gives it a counter row, so the repair replaces what it holds.
+            // gives it a counter row, so the repair raises that row or adds one.
             let (from, to) = (
                 literal(&rebuilt),
                 literal(&replacement_name(state, &rebuilt)),
             );
-            advice.push(format!("Before the DROP TABLE, copy the counter to the replacement table: `DELETE FROM sqlite_sequence WHERE name='{to}'; INSERT INTO sqlite_sequence (name, seq) SELECT '{to}', seq FROM sqlite_sequence WHERE name='{from}';`. A statement that writes the replacement gives it a counter row, even when it copies no row, and the DELETE removes that row, so the replacement is left with exactly the counter of `{rebuilt}`."));
+            advice.push(format!("Before the DROP TABLE, copy the counter to the replacement table: `UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('{from}', '{to}')) WHERE name='{to}'; INSERT INTO sqlite_sequence (name, seq) SELECT '{to}', max(seq) FROM sqlite_sequence WHERE name='{from}' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='{to}') HAVING count(*) > 0;`. A statement that writes the replacement gives it a counter row, even when it copies no row. The UPDATE raises that row to the higher of the two counters, and the INSERT adds one row only when it has none, so the replacement keeps one counter, never lower than that of `{rebuilt}` or its own."));
         }
         if !catalog.uncovered.is_empty() {
             advice.push("Keep the rebuilt catalog within the coverage in docs/DATABASE_MIGRATIONS.md, Supported SQL and catalog coverage.".to_owned());

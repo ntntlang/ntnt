@@ -515,7 +515,7 @@ fn sqlite_rebuild_keeps_the_autoincrement_counter() {
         "The rebuild of table `orders` did not keep what a rebuild must: the AUTOINCREMENT counter of table `orders` went back from 3 to 2 (sqlite_sequence), so SQLite would give new rows the ids of deleted ones. Row values suppressed.",
         "{r}"
     );
-    let line = "DELETE FROM sqlite_sequence WHERE name='orders_new'; INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', seq FROM sqlite_sequence WHERE name='orders';";
+    let line = "UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('orders', 'orders_new')) WHERE name='orders_new'; INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', max(seq) FROM sqlite_sequence WHERE name='orders' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='orders_new') HAVING count(*) > 0;";
     assert!(
         d["next_action"].as_str().unwrap().starts_with(&format!(
             "Before the DROP TABLE, copy the counter to the replacement table: `{line}`."
@@ -542,12 +542,12 @@ fn sqlite_rebuild_keeps_the_autoincrement_counter() {
 /// F3, review: a statement that writes the replacement, even an INSERT ...
 /// SELECT that copies no row, gives it a counter row, and SQLite reads and
 /// updates only the first row for a name. A second row is refused, naming
-/// the table and the count, and the one repair the next_action gives keeps
-/// the counter whether the replacement has a row, has none, or the table
-/// never had a counter.
+/// the table and the count. The one repair the next_action gives leaves one
+/// row with the higher counter whether the replacement has a row, has none,
+/// has a higher one, the source has two, or the table never had a counter.
 #[test]
 fn sqlite_rebuild_counter_repair_holds_with_or_without_a_counter_row() {
-    let repair = "DELETE FROM sqlite_sequence WHERE name='orders_new'; INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', seq FROM sqlite_sequence WHERE name='orders';";
+    let repair = "UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('orders', 'orders_new')) WHERE name='orders_new'; INSERT INTO sqlite_sequence (name, seq) SELECT 'orders_new', max(seq) FROM sqlite_sequence WHERE name='orders' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='orders_new') HAVING count(*) > 0;";
     let create = "CREATE TABLE orders_new (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL CHECK (length(ref) > 0));";
     let copy = "INSERT INTO orders_new (id, ref) SELECT id, ref FROM orders;";
     let swap = "DROP TABLE orders; ALTER TABLE orders_new RENAME TO orders;";
@@ -609,14 +609,40 @@ fn sqlite_rebuild_counter_repair_holds_with_or_without_a_counter_row() {
     cycle(&f, "absent.json");
     assert_eq!(counters(&f), [("orders".to_owned(), 3)]);
     assert_eq!(next_id(&f), 4);
-    // `orders` never had a counter: the repair leaves the replacement none.
+    // A replacement whose counter is higher (renumbered ids) keeps it, so
+    // the id of a row deleted later is not given out again.
+    let f = migrated(
+        "INSERT INTO orders (ref) VALUES ('a'), ('b'), ('c'); DELETE FROM orders WHERE id = 3;",
+    );
+    f.sql(
+        "0002_rebuild.sql",
+        &format!("{create} INSERT INTO orders_new (id, ref) SELECT id + 100, ref FROM orders; {repair} {swap}"),
+    );
+    cycle(&f, "renumbered.json");
+    assert_eq!(counters(&f), [("orders".to_owned(), 102)]);
+    f.target()
+        .execute_batch("DELETE FROM orders WHERE id = 102")
+        .unwrap();
+    assert_eq!(next_id(&f), 103);
+    // A source with two counter rows gives the replacement one, the higher.
+    let f = migrated(
+        "INSERT INTO orders (ref) VALUES ('a'), ('b'); INSERT INTO sqlite_sequence (name, seq) VALUES ('orders', 5);",
+    );
+    f.sql(
+        "0002_rebuild.sql",
+        &format!("{create} {copy} {repair} {swap}"),
+    );
+    cycle(&f, "doubled.json");
+    assert_eq!(counters(&f), [("orders".to_owned(), 5)]);
+    assert_eq!(next_id(&f), 6);
+    // `orders` never had a counter: the replacement keeps its own (0).
     let f = migrated("");
     f.sql(
         "0002_rebuild.sql",
         &format!("{create} {copy} {repair} {swap}"),
     );
     cycle(&f, "none.json");
-    assert_eq!(counters(&f), []);
+    assert_eq!(counters(&f), [("orders".to_owned(), 0)]);
     assert_eq!(next_id(&f), 1);
 }
 
