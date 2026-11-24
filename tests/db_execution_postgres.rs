@@ -1585,6 +1585,41 @@ fn declared_superuser_installed_extensions_plan_migrate_and_verify() {
     }
 }
 
+/// #430: a declared extension owns what depends on its members internally,
+/// not just its members. tablefunc's composite types
+/// (`tablefunc_crosstab_2`, ...) and dblink's `dblink_pkey_results` are
+/// members, but their relations are not. Installed in `public` of both
+/// databases and declared, they leave scratch acceptable, and replay does
+/// not take them for the history's work: the plan migrates and verifies.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn declared_extensions_own_what_depends_on_their_members() {
+    for schema in ["app", "public"] {
+        let f = Fixture::with_schema(schema);
+        f.sql(
+            "0001_t.sql",
+            &format!("CREATE TABLE {schema}.t (id BIGINT PRIMARY KEY);\n"),
+        );
+        for db in [&f.target, &f.scratch] {
+            superuser_in(db)
+                .batch_execute(
+                    "CREATE EXTENSION tablefunc SCHEMA public; CREATE EXTENSION dblink SCHEMA public;",
+                )
+                .unwrap();
+        }
+        declare_extensions(&f, Some(r#"["tablefunc", "dblink"]"#));
+        let p = f.plan("plan.json");
+        assert!(
+            p["catalog"]["uncovered"].as_array().unwrap().is_empty(),
+            "{schema}: {p}"
+        );
+        let r = f.apply("plan.json", p["plan_digest"].as_str());
+        assert_eq!(r["outcome"], "pass", "{schema}: {r}");
+        let v = f.command("verify");
+        assert_eq!(v["outcome"], "pass", "{schema}: {v}");
+    }
+}
+
 /// #430: a declared extension must be in the scratch database as on the
 /// target. A version that differs is drift on the extension, by name; one
 /// missing from scratch, or installed where NTNT keeps its ledger, is
