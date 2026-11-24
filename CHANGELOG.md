@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+
+- Update `cookie` to 0.18.3 for RUSTSEC-2026-0594 (#454).
+
 ### Fixed
 
 - `ntnt db` (PostgreSQL): a `requires`, `ensures` or adoption check that reads a
