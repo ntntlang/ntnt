@@ -1758,6 +1758,24 @@ unsupported. SQLite adoption compares stored CREATE text exactly, so write
 baselines from the database's own `sqlite_master.sql`. Approve a saved plan only
 when its outcome is `pass` and it has a `plan_digest`.
 Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
+On PostgreSQL, replay commits each migration on scratch, in a transaction set up
+like the target's, so a plan sees what `migrate` will: an enum value one migration
+adds with `ALTER TYPE ... ADD VALUE` can be used by the next on PostgreSQL 16, and
+a migration that adds and uses one fails at plan with `DB_ENUM_VALUE_UNCOMMITTED`.
+Afterwards replay drops what the scratch role owns and restores `public`; never put
+anything you need in scratch. A second plan on the same scratch waits for the first, up to
+`migrator_wait_seconds`, then fails with `DB_SCRATCH_BUSY`: rerun it. A plan
+after a killed one cleans up NTNT's marker schema `_ntnt_replay` and what that
+replay committed (`scratch.recovered`), but only what it can prove that replay
+committed in that very database. `DB_SCRATCH_NOT_EMPTY` means scratch holds
+something NTNT did not create there (another project's `_ntnt` ledger, say);
+never point a scratch at a database anything else uses, and recreate it yourself
+if it is only a scratch. `DB_TARGET_IS_SCRATCH` means the target holds
+`_ntnt_replay`: some configuration uses it as its scratch; fix that first.
+Settings, grants and comments a migration puts on the scratch database or its
+role are restored afterwards. `DB_REPLAY_UNSUPPORTED` from a `DO` block that
+changes a password (even one rolled back), memberships or another database means:
+move that statement out of the migration history.
 On PostgreSQL, `plan.check_warnings` lists pending checks that `migrate` will
 refuse, several per check if need be: `CHECK_OPERATOR_MISMATCH` and
 `CHECK_VIEW_WRITES` (`DB_CHECK_UNSUPPORTED`), and, since checks read with

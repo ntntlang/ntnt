@@ -318,8 +318,9 @@ pub(super) const DECLARED_OWNED: &str = declared_owned!("$1");
 /// else outside the scope, so this is exactly the history's work there:
 /// - each schema it created (`$1` is the managed scope; `$2` the schemas
 ///   scratch was prepared with, such as `public`, which it did not create);
-/// - in any other schema but PostgreSQL's and `_ntnt`: its relations other
-///   than indexes, routines, types and other namespace objects.
+/// - in any other schema but PostgreSQL's, `_ntnt` and NTNT's replay marker
+///   `_ntnt_replay`: its relations other than indexes, routines, types and
+///   other namespace objects.
 ///
 /// A relation's indexes, constraints, triggers, policies and rules follow
 /// it, and an extension's members follow the extension, which `QUERIES`
@@ -336,7 +337,7 @@ WITH RECURSIVE "#,
     declared_owned!("$3"),
     r#",
 o AS (SELECT n.oid,n.nspname FROM pg_catalog.pg_namespace n
- WHERE n.nspname<>ALL($1) AND n.nspname NOT IN ('information_schema','_ntnt') AND NOT starts_with(n.nspname,'pg_')),
+ WHERE n.nspname<>ALL($1) AND n.nspname NOT IN ('information_schema','_ntnt','_ntnt_replay') AND NOT starts_with(n.nspname,'pg_')),
 e AS (SELECT d.classid,d.objid FROM pg_catalog.pg_depend d WHERE d.deptype='e' UNION SELECT w.classid,w.objid FROM owned w)
 SELECT 'schema:'||o.nspname FROM o WHERE o.nspname<>ALL($2)
 UNION ALL SELECT quote_ident(o.nspname)||'.relation:'||c.relname FROM pg_catalog.pg_class c JOIN o ON o.oid=c.relnamespace
