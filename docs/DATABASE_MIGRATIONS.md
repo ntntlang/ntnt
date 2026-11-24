@@ -684,8 +684,10 @@ CREATE EXTENSION pg_stat_statements SCHEMA public;
   `_ntnt`, a system schema or a managed schema other than `public`, is refused with
   `DB_SCRATCH_MISMATCH` naming it. Scratch's `public` and the declared extensions'
   schemas may hold only what those extensions own: their members, and what
-  depends on a member internally or automatically, such as array and row types
-  and indexes. Anything else there is refused with `DB_SCRATCH_NOT_EMPTY`.
+  depends on a member internally or automatically, such as array and row types,
+  the relations of composite types (tablefunc's and dblink's) and indexes.
+  Anything else there is refused with `DB_SCRATCH_NOT_EMPTY`. Replay does not
+  count what they own as the history's work.
 - A declared extension's casts do not block DDL, as an in-scope extension's do
   not.
 - The key is part of the plan's policy, so adding or changing it needs a new plan.
