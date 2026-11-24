@@ -515,6 +515,15 @@ role may then have `BYPASSRLS` too. Otherwise, change the check so that it reads
 no such table. A plan without such checks has no `check_warnings`, so its digest
 is the one earlier releases computed.
 
+`plan.check_warnings` holds these entries and the `CHECK_OPERATOR_MISMATCH` and
+`CHECK_VIEW_WRITES` ones above. Every entry has `code`, `source`, `phase`, `check`,
+`relation` and `message`, and `CHECK_ROW_SECURITY` adds `forced`. One check can
+have several entries. They come in the order `migrate` meets them: by migration,
+each migration's `requires` before its `ensures`, by check name, and within one
+check `CHECK_OPERATOR_MISMATCH` and `CHECK_VIEW_WRITES` before `CHECK_ROW_SECURITY`.
+A check with both kinds is refused with `DB_CHECK_UNSUPPORTED` before any check of
+its phase runs.
+
 Files use `<positive-decimal-u64>_<ASCII-name>.sql`; names contain letters, digits, `_` or `-`. Ordering is numeric; `01` and `0001` are the same ID and cannot coexist. Gaps are allowed. Sidecars must have the exact SQL stem. The directory contains only SQL and matching TOML files, apart from entries it ignores: names that start with `.` (`.gitkeep`, `.DS_Store`, editor swap files and lock links, macOS `._` files) and `README` or `README.<ext>` with one extension (`README.md`, `readme.txt`) in any letter case. Ignored entries are never read and are not part of a plan's identity. Every other entry, `*.SQL` files and editor backups such as `0001_initial.sql~` included, is refused by name. Orphan sidecars, duplicate IDs, invalid UTF-8, unsafe paths, symlinks, hard links, directories in place of files and nonregular inputs are rejected.
 
 Each refusal names the entry relative to the project, in its message and `source`
