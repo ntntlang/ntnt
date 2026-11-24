@@ -2241,9 +2241,10 @@ fn public_state(f: &Fixture) -> String {
 /// What `f`'s scratch holds beyond the empty stock database it was: the
 /// emptiness check's conditions (no schemas but `public`, nothing in it, no
 /// extensions but plpgsql, no event triggers or default privileges), large
-/// objects, publications, casts, database and role settings, privileges and
-/// comments, and a `public` that differs from `public_before`. Empty when
-/// scratch is clean.
+/// objects, publications, casts, languages and transforms, database and role
+/// settings, privileges (compared as sets, so an explicit default is none)
+/// and comments, the role's comment and memberships, and a `public` that
+/// differs from `public_before`. Empty when scratch is clean.
 fn scratch_leftovers(f: &Fixture, public_before: &str) -> Vec<String> {
     let sql = format!(
         r#"SELECT x FROM (
@@ -2251,6 +2252,20 @@ fn scratch_leftovers(f: &Fixture, public_before: &str) -> Vec<String> {
  UNION ALL SELECT 'relation public.'||c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'
  UNION ALL SELECT 'routine public.'||p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'
  UNION ALL SELECT 'type public.'||t.typname FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'operator public.'||o.oprname FROM pg_operator o JOIN pg_namespace n ON n.oid=o.oprnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'operator class public.'||o.opcname FROM pg_opclass o JOIN pg_namespace n ON n.oid=o.opcnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'operator family public.'||o.opfname FROM pg_opfamily o JOIN pg_namespace n ON n.oid=o.opfnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'collation public.'||c.collname FROM pg_collation c JOIN pg_namespace n ON n.oid=c.collnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'conversion public.'||c.conname FROM pg_conversion c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'text search configuration public.'||c.cfgname FROM pg_ts_config c JOIN pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'text search dictionary public.'||c.dictname FROM pg_ts_dict c JOIN pg_namespace n ON n.oid=c.dictnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'text search parser public.'||c.prsname FROM pg_ts_parser c JOIN pg_namespace n ON n.oid=c.prsnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'text search template public.'||c.tmplname FROM pg_ts_template c JOIN pg_namespace n ON n.oid=c.tmplnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'statistics public.'||x.stxname FROM pg_statistic_ext x JOIN pg_namespace n ON n.oid=x.stxnamespace WHERE n.nspname='public'
+ UNION ALL SELECT 'language '||lanname FROM pg_language WHERE oid>=16384
+ UNION ALL SELECT 'transform '||trftype::regtype||' '||trflang FROM pg_transform WHERE oid>=16384
+ UNION ALL SELECT 'role comment '||shobj_description(datdba,'pg_authid') FROM pg_database WHERE datname=current_database() AND shobj_description(datdba,'pg_authid') IS NOT NULL
+ UNION ALL SELECT 'membership '||m.roleid::regrole||' '||m.member::regrole FROM pg_auth_members m, pg_database d WHERE d.datname=current_database() AND d.datdba IN (m.roleid, m.member)
  UNION ALL SELECT 'extension '||extname FROM pg_extension WHERE extname<>'plpgsql'
  UNION ALL SELECT 'event trigger '||evtname FROM pg_event_trigger
  UNION ALL SELECT 'default privileges '||oid FROM pg_default_acl
@@ -2259,8 +2274,11 @@ fn scratch_leftovers(f: &Fixture, public_before: &str) -> Vec<String> {
  UNION ALL SELECT 'cast '||castsource::regtype||' AS '||casttarget::regtype FROM pg_cast WHERE oid>=16384
  UNION ALL SELECT 'setting '||array_to_string(s.setconfig, ',') FROM pg_db_role_setting s
    WHERE s.setdatabase=(SELECT oid FROM pg_database WHERE datname=current_database()) OR s.setrole=(SELECT datdba FROM pg_database WHERE datname=current_database())
- UNION ALL SELECT 'database '||coalesce(datacl::text,'-')||' '||datconnlimit||' '||coalesce(shobj_description(oid,'pg_database'),'-') FROM pg_database
-   WHERE datname=current_database() AND (datacl IS NOT NULL OR datconnlimit<>-1 OR shobj_description(oid,'pg_database') IS NOT NULL)
+ UNION ALL SELECT 'database '||datconnlimit||' '||coalesce(shobj_description(oid,'pg_database'),'-')||CASE WHEN acl THEN ' '||datacl::text ELSE '' END FROM (
+   SELECT d.*, EXISTS (SELECT * FROM aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) EXCEPT SELECT * FROM aclexplode(acldefault('d', d.datdba)))
+    OR EXISTS (SELECT * FROM aclexplode(acldefault('d', d.datdba)) EXCEPT SELECT * FROM aclexplode(coalesce(d.datacl, acldefault('d', d.datdba)))) AS acl
+   FROM pg_database d WHERE d.datname=current_database()) d
+   WHERE datconnlimit<>-1 OR shobj_description(oid,'pg_database') IS NOT NULL OR acl
  UNION ALL SELECT 'public '||state FROM ({PUBLIC_STATE}) p(state) WHERE state IS DISTINCT FROM $1
  UNION ALL SELECT 'no public' WHERE NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='public')
 ) q ORDER BY 1"#
@@ -2490,11 +2508,11 @@ fn scratch_is_empty_after_every_plan() {
 }
 
 /// #430: a replayed migration commits on scratch, so a change cleanup could
-/// not undo is refused before it commits: settings, privileges, comments
-/// and connection limits of the scratch database or role, a new password,
-/// an object given to another role, a session left acting as another role,
-/// and NTNT's replay marker. Scratch keeps its settings, so the next plan
-/// still matches the target.
+/// not undo is refused before it commits: a new password (also one an
+/// exception block rolled back, which PostgreSQL still counts as a write),
+/// an object given to another role, a session left
+/// acting as another role, and NTNT's replay marker, however it is changed.
+/// Scratch keeps its settings, so the next plan still matches the target.
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn changes_that_outlive_scratch_objects_are_refused_before_commit() {
@@ -2502,12 +2520,6 @@ fn changes_that_outlive_scratch_objects_are_refused_before_commit() {
     let public = public_state(&f);
     f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
     for (sql, code) in [
-        ("DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET timezone = ''Europe/Paris''', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
-        ("DO $$ BEGIN EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT 50', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
-        ("DO $$ BEGIN EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
-        ("DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS ''replayed''', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
-        ("DO $$ BEGIN EXECUTE 'ALTER ROLE CURRENT_USER SET work_mem = ''8MB'''; END $$;", "DB_REPLAY_UNSUPPORTED"),
-        ("DO $$ BEGIN EXECUTE format('ALTER ROLE CURRENT_USER IN DATABASE %I SET work_mem = ''8MB''', current_database()); END $$;", "DB_REPLAY_UNSUPPORTED"),
         ("DO $$ BEGIN EXECUTE 'ALTER ROLE CURRENT_USER PASSWORD ''changed'''; END $$;", "DB_REPLAY_UNSUPPORTED"),
         ("DO $$ BEGIN EXECUTE 'SET LOCAL ROLE pg_database_owner'; EXECUTE 'CREATE TABLE public.given (id int)'; EXECUTE 'RESET ROLE'; END $$;", "DB_REPLAY_UNSUPPORTED"),
         ("ALTER DEFAULT PRIVILEGES FOR ROLE pg_database_owner GRANT SELECT ON TABLES TO PUBLIC;", "DB_REPLAY_UNSUPPORTED"),
@@ -2515,11 +2527,26 @@ fn changes_that_outlive_scratch_objects_are_refused_before_commit() {
         ("DO $$ BEGIN EXECUTE 'UPDATE _ntnt_replay.replay_v1 SET public_comment = ''x'''; END $$;", "DB_OUTSIDE_SCOPE"),
         ("DO $$ BEGIN EXECUTE 'DROP TABLE _ntnt_replay.replay_v1'; END $$;", "DB_OUTSIDE_SCOPE"),
         ("DELETE FROM _ntnt_replay.replay_v1;", "DB_OUTSIDE_SCOPE"),
+        ("DO $$ BEGIN BEGIN EXECUTE 'ALTER ROLE CURRENT_USER PASSWORD ''changed'''; RAISE EXCEPTION 'undo'; EXCEPTION WHEN raise_exception THEN NULL; END; END $$;", "DB_REPLAY_UNSUPPORTED"),
+        // NTNT's marker, changed in other ways than UPDATE, DELETE or DROP.
+        ("DO $$ BEGIN EXECUTE 'TRUNCATE _ntnt_replay.replay_v1'; END $$;", "DB_OUTSIDE_SCOPE"),
+        ("DO $$ BEGIN EXECUTE 'INSERT INTO _ntnt_replay.replay_v1 (id) VALUES (''other'')'; END $$;", "DB_OUTSIDE_SCOPE"),
+        ("DO $$ BEGIN EXECUTE 'ALTER TABLE _ntnt_replay.replay_v1 ADD COLUMN extra int'; END $$;", "DB_OUTSIDE_SCOPE"),
+        ("DO $$ BEGIN EXECUTE 'UPDATE _ntnt_replay.replay_v1 SET xids = ''{}'''; END $$;", "DB_OUTSIDE_SCOPE"),
+        ("DO $$ BEGIN EXECUTE 'CREATE TABLE _ntnt_replay.extra (id int)'; END $$;", "DB_OUTSIDE_SCOPE"),
+        ("DO $$ BEGIN EXECUTE 'ALTER SCHEMA _ntnt_replay RENAME TO elsewhere'; END $$;", "DB_OUTSIDE_SCOPE"),
+        ("DO $$ BEGIN EXECUTE 'ALTER TABLE _ntnt_replay.replay_v1 ENABLE ROW LEVEL SECURITY'; END $$;", "DB_OUTSIDE_SCOPE"),
     ] {
         f.sql("0002_case.sql", sql);
         let r = f.command("plan");
         let d = diagnostic(&r, code).unwrap_or_else(|| panic!("{sql}: {r}"));
         assert_eq!(d["source"], "0002_case.sql", "{sql}: {d}");
+        if sql.contains("RAISE EXCEPTION 'undo'") {
+            assert!(
+                d["message"].as_str().unwrap().contains("rolled it back"),
+                "{d}"
+            );
+        }
         assert_eq!(r["scratch"]["cleanup"], "pass", "{sql}: {r}");
         assert_eq!(
             scratch_leftovers(&f, &public),
@@ -2567,10 +2594,10 @@ fn crash_during_replay(f: &Fixture) {
         .batch_execute("SELECT pg_advisory_lock(4242)")
         .unwrap();
     let mut child = spawn_plan(f);
-    let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND NOT granted)";
+    let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
     wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
     let pid: i32 = holder
-        .query_one("SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND NOT granted", &[])
+        .query_one("SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted", &[])
         .unwrap()
         .get(0);
     child.kill().unwrap();
@@ -2847,7 +2874,7 @@ fn a_migration_that_releases_the_replay_lock_is_refused() {
         .batch_execute("SELECT pg_advisory_lock(4242)")
         .unwrap();
     let mut first = spawn_plan(&f);
-    let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND NOT granted)";
+    let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
     wait_for(&mut holder, waiting, &mut first, "replay waiting in 0002");
     let second = f.command("plan");
     let d = diagnostic(&second, "DB_SCRATCH_BUSY").unwrap_or_else(|| panic!("{second}"));
@@ -2878,5 +2905,348 @@ fn a_migration_that_releases_the_replay_lock_is_refused() {
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
     std::fs::remove_file(f.root.path().join("migrations/0002_unlock.sql")).unwrap();
     assert_eq!(f.command("plan")["outcome"], "pass");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// The scratch database's privileges (as sets), connection limit, comment
+/// and settings, and the scratch role's settings, in `f`'s scratch.
+fn database_state(f: &Fixture) -> String {
+    scratch_admin(f)
+        .query_one(
+            "SELECT coalesce((SELECT string_agg(e, ',' ORDER BY e) FROM (SELECT a.grantor::regrole||'>'||a.grantee||':'||a.privilege_type||':'||a.is_grantable AS e FROM aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a) x), '-')
+              ||' | '||d.datconnlimit||' | '||coalesce(shobj_description(d.oid, 'pg_database'), '-')
+              ||' | '||coalesce((SELECT string_agg(s.setdatabase||'/'||s.setrole||'='||array_to_string(s.setconfig, ';'), ',' ORDER BY s.setdatabase, s.setrole) FROM pg_db_role_setting s WHERE s.setdatabase=d.oid OR s.setrole=d.datdba), '-')
+             FROM pg_database d WHERE d.datname=current_database()",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+}
+
+/// #430 review: histories #456 accepted change the scratch database and the
+/// scratch role in ways cleanup can undo, so they still plan: settings
+/// (also a list the database already had, written back element by
+/// element), privileges, a connection limit and a comment of the database,
+/// settings of the role, and `public` dropped and created again for
+/// `pg_database_owner`. Cleanup restores each, and the next plan gets the
+/// same digest.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn scratch_database_and_role_settings_are_restored_after_replay() {
+    let mut f = Fixture::new();
+    f.admin
+        .batch_execute(&format!(
+            "ALTER DATABASE {0} SET search_path TO \"$user\", public, \"odd, name\"; COMMENT ON DATABASE {0} IS 'scratch'",
+            f.scratch
+        ))
+        .unwrap();
+    let public = public_state(&f);
+    let (left, state) = (scratch_leftovers(&f, &public), database_state(&f));
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int PRIMARY KEY);");
+    let on_db =
+        |what: &str| format!("DO $$ BEGIN EXECUTE format('{what}', current_database()); END $$;");
+    for sql in [
+        on_db("ALTER DATABASE %I SET search_path TO app, public"),
+        on_db("GRANT CONNECT ON DATABASE %I TO PUBLIC"),
+        on_db("REVOKE CONNECT ON DATABASE %I FROM PUBLIC"),
+        on_db(&format!("GRANT CONNECT ON DATABASE %I TO {}", f.target)),
+        "DROP SCHEMA public; CREATE SCHEMA public AUTHORIZATION pg_database_owner; GRANT USAGE ON SCHEMA public TO PUBLIC;".into(),
+        on_db("ALTER DATABASE %I RESET ALL"),
+        on_db("ALTER DATABASE %I SET timezone = ''Europe/Paris''"),
+        on_db("ALTER DATABASE %I CONNECTION LIMIT 50"),
+        on_db("REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC"),
+        on_db("COMMENT ON DATABASE %I IS ''replayed''"),
+        "DO $$ BEGIN EXECUTE 'ALTER ROLE CURRENT_USER SET work_mem = ''8MB'''; END $$;".into(),
+        on_db("ALTER ROLE CURRENT_USER IN DATABASE %I SET work_mem = ''8MB''"),
+    ] {
+        f.sql("0002_case.sql", &sql);
+        let r = f.command("plan");
+        assert_eq!(r["outcome"], "pass", "{sql}: {r}");
+        assert_eq!(r["scratch"]["cleanup"], "pass", "{sql}: {r}");
+        assert_eq!(scratch_leftovers(&f, &public), left, "{sql}: {r}");
+        assert_eq!(database_state(&f), state, "{sql}: {r}");
+        assert_eq!(f.command("plan")["plan_digest"], r["plan_digest"], "{sql}");
+    }
+}
+
+/// Run `sql` as `f`'s scratch role in scratch, then wait until that session
+/// has ended: a plan takes another connected session of the scratch role
+/// for an unfinished replay that may still be running.
+fn as_scratch_role(f: &Fixture, sql: &str) {
+    let mut owner = Client::connect(&f.scratch_url, NoTls).unwrap();
+    owner.batch_execute(sql).unwrap();
+    drop(owner);
+    let mut admin = scratch_admin(f);
+    let start = std::time::Instant::now();
+    while admin
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND usename=$1::text)",
+            &[&f.scratch],
+        )
+        .unwrap()
+        .get::<_, bool>(0)
+    {
+        assert!(start.elapsed() < LOCK_WAIT_DEADLINE, "the session did not end");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Run `command` on a manifest whose target is `f`'s scratch database (as
+/// another project could be configured) and whose scratch is `f`'s target.
+fn command_on_scratch_as_target(f: &Fixture, command: &str) -> Value {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("migrations")).unwrap();
+    std::fs::write(
+        root.path().join("ntnt.toml"),
+        format!(
+            "[databases.app]\nengine = \"postgresql\"\nmigrations_dir = \"migrations\"\nschema = \"b\"\napproval_secret = \"DB_APPROVAL\"\n[databases.app.targets.test]\nconnection_secret = \"DB_TARGET\"\ndatabase = \"{0}\"\nrole = \"{0}\"\n[databases.app.scratch]\nconnection_secret = \"DB_SCRATCH\"\ndatabase = \"{1}\"\nrole = \"{1}\"\ndisposable = true\n[secrets.DB_TARGET]\n[secrets.DB_SCRATCH]\n[secrets.DB_APPROVAL]\n",
+            f.scratch, f.target
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+        .args(["db", command, "--target", "test", "--json"])
+        .env("DB_TARGET", &f.scratch_url)
+        .env("DB_SCRATCH", &f.target_url)
+        .env_remove("DB_APPROVAL")
+        .env("NTNT_SECRETS_PROVIDER", "env")
+        .env("NTNT_ENV", "development")
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+}
+
+/// #430 review (P1): a scratch database that holds an unfinished replay's
+/// marker but also what NTNT cannot prove that replay committed is refused
+/// and keeps everything: another project's ledger (`_ntnt`, named as such),
+/// objects written outside the replay's transactions, and a marker copied
+/// from another database or cluster. Such a database used as a target is
+/// refused with DB_TARGET_IS_SCRATCH. Once only the replay's leftovers are
+/// there, also what an exception block (a subtransaction) created, the next
+/// plan cleans them up.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn recovery_never_drops_what_it_cannot_prove_the_replay_committed() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql(
+        "0001_types.sql",
+        "CREATE TYPE app.mood AS ENUM ('ok'); CREATE TABLE app.t (id int, m app.mood);
+         DO $$ BEGIN BEGIN CREATE TABLE app.in_block (id int); EXCEPTION WHEN duplicate_table THEN NULL; END; END $$;",
+    );
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    // Another project, configured with this database as its target.
+    let r = command_on_scratch_as_target(&f, "status");
+    let d = diagnostic(&r, "DB_TARGET_IS_SCRATCH").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(names(&d["objects"]), ["schema:_ntnt_replay"], "{d}");
+    // That project migrated here with an earlier NTNT: its ledger and data.
+    as_scratch_role(
+        &f,
+        "CREATE SCHEMA _ntnt; CREATE TABLE _ntnt.schema_migrations_v2 (position int); INSERT INTO _ntnt.schema_migrations_v2 VALUES (1);
+         CREATE SCHEMA b; CREATE TABLE b.accounts (id int PRIMARY KEY, name text); INSERT INTO b.accounts VALUES (1, 'kept'), (2, 'kept');",
+    );
+    let mut owner = scratch_admin(&f);
+    let kept = |c: &mut Client| -> (i64, bool) {
+        let r = c
+            .query_one(
+                "SELECT (SELECT count(*) FROM b.accounts), to_regnamespace('_ntnt_replay') IS NOT NULL AND to_regclass('app.t') IS NOT NULL",
+                &[],
+            )
+            .unwrap();
+        (r.get(0), r.get(1))
+    };
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_NOT_EMPTY").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(names(&d["objects"]), ["schema:_ntnt"], "{d}");
+    assert!(
+        d["message"].as_str().unwrap().contains("migration ledger"),
+        "{d}"
+    );
+    assert!(r["scratch"]["recovered"].is_null(), "{r}");
+    assert_eq!(r["scratch"]["cleanup"], "not_needed", "{r}");
+    assert_eq!(kept(&mut owner), (2, true));
+    assert!(owner
+        .query_one(
+            "SELECT to_regclass('_ntnt.schema_migrations_v2') IS NOT NULL",
+            &[]
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+    // Without the ledger, what was written outside the replay is named.
+    as_scratch_role(&f, "DROP SCHEMA _ntnt CASCADE");
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_NOT_EMPTY").unwrap_or_else(|| panic!("{r}"));
+    let objects = names(&d["objects"]);
+    assert!(objects.contains(&"schema b"), "{d}");
+    assert!(objects.contains(&"table b.accounts"), "{d}");
+    assert!(!objects.iter().any(|o| o.contains("app.")), "{d}");
+    assert_eq!(kept(&mut owner), (2, true));
+    as_scratch_role(&f, "DROP SCHEMA b CASCADE");
+    // A marker that names another database or cluster.
+    let mut admin = scratch_admin(&f);
+    for (column, tamper, cast) in [
+        (
+            "database_oid",
+            "UPDATE _ntnt_replay.replay_v1 SET database_oid = database_oid::int8 + 1",
+            "oid",
+        ),
+        (
+            "system_identifier",
+            "UPDATE _ntnt_replay.replay_v1 SET system_identifier = system_identifier || '0'",
+            "text",
+        ),
+    ] {
+        let original: String = admin
+            .query_one(
+                &format!("SELECT {column}::text FROM _ntnt_replay.replay_v1"),
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        admin.batch_execute(tamper).unwrap();
+        let r = f.command("plan");
+        let d = diagnostic(&r, "DB_SCRATCH_NOT_EMPTY").unwrap_or_else(|| panic!("{r}"));
+        assert!(
+            d["message"].as_str().unwrap().contains("copied here"),
+            "{d}"
+        );
+        let left: bool = owner
+            .query_one(
+                "SELECT to_regnamespace('_ntnt_replay') IS NOT NULL AND to_regclass('app.t') IS NOT NULL",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert!(left, "{column}: the leftovers were dropped");
+        admin
+            .execute(
+                &format!("UPDATE _ntnt_replay.replay_v1 SET {column} = $1::text::{cast}"),
+                &[&original],
+            )
+            .unwrap();
+    }
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    let r = command_on_scratch_as_target(&f, "status");
+    assert!(diagnostic(&r, "DB_TARGET_IS_SCRATCH").is_none(), "{r}");
+}
+
+/// #430 review: cleanup drops nothing without the replay lock. A migration
+/// released it and another session took it, so cleanup fails with
+/// DB_SCRATCH_CLEANUP and keeps what the replay committed; the next plan,
+/// holding the lock again, recovers it.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn cleanup_without_the_replay_lock_drops_nothing_and_the_next_plan_recovers() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
+    f.sql(
+        "0002_unlock.sql",
+        "SELECT pg_catalog.pg_advisory_unlock_all(); SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    let mut holder = scratch_admin(&f);
+    holder
+        .batch_execute("SELECT pg_advisory_lock(4242)")
+        .unwrap();
+    let mut child = spawn_plan(&f);
+    let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
+    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    holder
+        .batch_execute("SELECT pg_advisory_lock(1853124212, 430); SELECT pg_advisory_unlock(4242)")
+        .unwrap();
+    let r = report(child);
+    assert!(diagnostic(&r, "DB_REPLAY_UNSUPPORTED").is_some(), "{r}");
+    let d = diagnostic(&r, "DB_SCRATCH_CLEANUP").unwrap_or_else(|| panic!("{r}"));
+    assert!(
+        d["message"].as_str().unwrap().contains("replay lock"),
+        "{d}"
+    );
+    assert_eq!(r["scratch"]["cleanup"], "unknown", "{r}");
+    let kept: bool = holder
+        .query_one(
+            "SELECT to_regclass('app.t') IS NOT NULL AND to_regnamespace('_ntnt_replay') IS NOT NULL",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(kept, "cleanup dropped without the replay lock");
+    holder
+        .batch_execute("SELECT pg_advisory_unlock(1853124212, 430)")
+        .unwrap();
+    std::fs::remove_file(f.root.path().join("migrations/0002_unlock.sql")).unwrap();
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// #430 review: a marker the replay committed that another session drops
+/// while the replay runs fails cleanup with DB_SCRATCH_CLEANUP, so the
+/// results are discarded, and nothing is dropped without it.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_committed_marker_that_disappears_fails_cleanup() {
+    let f = Fixture::new();
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    let mut holder = scratch_admin(&f);
+    holder
+        .batch_execute("SELECT pg_advisory_lock(4242)")
+        .unwrap();
+    let mut child = spawn_plan(&f);
+    let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
+    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    holder
+        .batch_execute("DROP SCHEMA _ntnt_replay CASCADE; SELECT pg_advisory_unlock(4242)")
+        .unwrap();
+    let r = report(child);
+    let d = diagnostic(&r, "DB_SCRATCH_CLEANUP").unwrap_or_else(|| panic!("{r}"));
+    assert!(d["message"].as_str().unwrap().contains("is gone"), "{d}");
+    assert_eq!(r["scratch"]["cleanup"], "unknown", "{r}");
+    assert_ne!(r["outcome"], "pass", "{r}");
+    assert!(holder
+        .query_one("SELECT to_regclass('app.t') IS NOT NULL", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+}
+
+/// #430 review: replay has its own deadline inside inspection, so a plan
+/// whose replay runs past it is cut short (its statement cancelled) with
+/// DB_TIMEOUT, and cleanup still runs and empties scratch. Each migration
+/// stays within the statement limit; together they pass the default
+/// deadline, so this takes about two minutes.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_replay_cut_short_by_its_deadline_is_cleaned_up() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
+    f.sql("0002_wait.sql", "SELECT pg_catalog.pg_sleep(70);");
+    f.sql("0003_wait.sql", "SELECT pg_catalog.pg_sleep(70);");
+    let started = std::time::Instant::now();
+    let r = f.command("plan");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(140),
+        "{:?}",
+        started.elapsed()
+    );
+    let d = diagnostic(&r, "DB_TIMEOUT").unwrap_or_else(|| panic!("{r}"));
+    assert!(
+        d["message"].as_str().unwrap().contains("Scratch replay"),
+        "{d}"
+    );
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
 }
