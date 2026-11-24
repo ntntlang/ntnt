@@ -988,8 +988,28 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 "Scratch must use a separate role, not deployment credentials.",
             ));
         }
+        let mismatch = Diagnostic::new("DB_SCRATCH_MISMATCH","Scratch engine version, encoding, locale and session settings must exactly match the target.");
+        // A session takes these from the database's and role's settings,
+        // which a replayed migration may change and cleanup restores. A
+        // replay that never finished may have left them changed: its
+        // leftovers are recovered first (below), then the mismatch reported.
+        let session_defaults = |settings: &Value| {
+            let mut s = settings.clone();
+            if let Some(o) = s.as_object_mut() {
+                for key in ["timezone", "date_style", "interval_style"] {
+                    o.remove(key);
+                }
+            }
+            s
+        };
+        let mut deferred = None;
         if target.version != identity.version || target.settings != identity.settings {
-            return Err(Diagnostic::new("DB_SCRATCH_MISMATCH","Scratch engine version, encoding, locale and session settings must exactly match the target."));
+            if target.version != identity.version
+                || session_defaults(&target.settings) != session_defaults(&identity.settings)
+            {
+                return Err(mismatch);
+            }
+            deferred = Some(mismatch);
         }
         self.rollback().await?;
         // Scripts must see row-level security as the target role does. Scratch
@@ -1008,6 +1028,17 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         // waits here, before it reads what scratch holds.
         self.lock_scratch(wait).await?;
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
+        if let Some(mut mismatch) = deferred {
+            if self
+                .recover_leftovers(&identity.cluster, identity.database_oid)
+                .await?
+                .is_some()
+            {
+                self.batch("COMMIT").await?;
+                mismatch.message.push_str(" Scratch held the leftovers of a replay that never finished, which NTNT cleaned up first, restoring the scratch database's and role's settings for new sessions: rerun.");
+            }
+            return Err(mismatch);
+        }
         // Cleaned up in this transaction, so a refusal below keeps the
         // leftovers, and their marker, as they were.
         let recovered = self
