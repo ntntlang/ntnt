@@ -87,6 +87,22 @@
   or with another role's objects, scratch is refused with
   `DB_SCRATCH_NOT_EMPTY` as before and left untouched. A failed cleanup is
   `DB_SCRATCH_CLEANUP` (#430).
+- **Recovery drops only what it can prove the unfinished replay committed.**
+  The marker is bound to the database's OID and the cluster's system
+  identifier, and records each transaction of the replay that wrote the
+  catalog, in that transaction. A plan recovers only when every catalog row in
+  scratch was last written by one of them and scratch holds no `_ntnt` ledger;
+  otherwise it refuses with `DB_SCRATCH_NOT_EMPTY`, names why, and drops
+  nothing. A database another project uses as its target, reached through a
+  misconfigured scratch, is therefore never wiped, and that project's
+  `status`, `plan`, `verify` and `migrate` refuse a target holding the marker
+  with `DB_TARGET_IS_SCRATCH` (#430).
+- **Replay has its own deadline.** It stops at the inspection deadline, cancels
+  the running statement, and cleanup still gets 30 seconds; `DB_TIMEOUT` says
+  scratch may keep leftovers for the next plan to recover. `scratch.cleanup`
+  is `not_needed` when nothing was committed. Cleanup drops nothing unless it
+  holds the replay lock, and a committed marker that is gone is
+  `DB_SCRATCH_CLEANUP` (#430).
 - **Concurrent plans on one scratch database wait for each other** instead of
   interleaving: a session advisory lock covers each replay, a second plan,
   status or verify waits up to `migrator_wait_seconds` and then fails with
@@ -94,11 +110,17 @@
   (`pg_advisory_unlock_all()`) is refused before it commits, and a killed
   replay's leftovers wait until no other session of the scratch role is
   connected (`DB_SCRATCH_BUSY`) (#430).
+- **Cleanup restores the scratch database and role.** Its privileges
+  (compared as sets), connection limit, comment and settings, and the scratch
+  role's settings, are recorded in the marker and restored, so histories that
+  run `ALTER DATABASE current_database() SET ...` or `GRANT`/`REVOKE CONNECT`
+  in a `DO` block, or recreate `public` for `pg_database_owner`, plan with the
+  same digests as before (#430).
 - **Changes cleanup cannot undo are refused before they commit**, with
-  `DB_REPLAY_UNSUPPORTED` naming the migration: `ALTER DATABASE` or
-  `ALTER ROLE` settings, database-level grants and comments, connection limits
-  and passwords made in a `DO` block or function, objects given to another
-  role, and a session left acting as another role (#430).
+  `DB_REPLAY_UNSUPPORTED` naming the migration: passwords (PostgreSQL's write
+  counters also count one an exception block rolled back), memberships, role
+  attributes and comments, other databases, objects given to another role, and
+  a session left acting as another role (#430).
 - **Three new scratch requirements:** the scratch role may hold no privileges
   on objects it does not own other than on `public` (`DROP OWNED` would revoke
   them), and `track_counts` must be on, as it is by default. Otherwise plans

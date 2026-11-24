@@ -30,19 +30,29 @@
   outcome: it commits a marker schema `_ntnt_replay` first, then drops what the
   scratch role owns (`DROP OWNED`), restores `public` and checks scratch is
   empty again (`DB_SCRATCH_CLEANUP` if not). A later plan cleans up the
-  leftovers of a killed replay only when its marker is there and only the
-  scratch role owns objects there (`scratch.recovered`); otherwise
-  `DB_SCRATCH_NOT_EMPTY` as before (#430).
+  leftovers of a killed replay (`scratch.recovered`) only when it can prove
+  they are that replay's: the marker was written in this database of this
+  cluster, scratch holds no `_ntnt` ledger, only the scratch role owns objects
+  there, and every catalog row there was last written by one of the
+  transactions the marker records. Otherwise `DB_SCRATCH_NOT_EMPTY`, dropping
+  nothing. A target that holds the marker is refused with
+  `DB_TARGET_IS_SCRATCH` (#430).
+- `ntnt db` (PostgreSQL): replay stops at its own deadline, cancels the
+  statement it was running and still cleans scratch up within 30 more seconds;
+  `scratch.cleanup` is `not_needed` when replay committed nothing, and cleanup
+  drops nothing without the replay lock (#430).
 - `ntnt db` (PostgreSQL): plans, statuses and verifies on one scratch database
   are serialized by an advisory lock; a second one waits up to
   `migrator_wait_seconds`, then fails with `DB_SCRATCH_BUSY`. A migration that
   releases that lock is refused, and a killed replay's leftovers are not cleaned
   up while another session of the scratch role is connected (`DB_SCRATCH_BUSY`)
   (#430).
-- `ntnt db` (PostgreSQL): replay refuses, before they commit, changes cleanup
-  cannot undo: database and role settings, database-level grants, comments and
-  connection limits, passwords, objects given to another role and a session
-  left as another role (`DB_REPLAY_UNSUPPORTED`). Scratch now also requires
+- `ntnt db` (PostgreSQL): cleanup restores the scratch database's privileges,
+  connection limit, comment and settings, and the scratch role's settings, so
+  histories that change them in a `DO` block still plan. Replay refuses, before
+  they commit, changes cleanup cannot undo: passwords (also one an exception
+  block rolled back), memberships, other databases, objects given to another
+  role and a session left as another role (`DB_REPLAY_UNSUPPORTED`). Scratch now also requires
   that its role hold no privileges on objects it does not own, other than on
   `public`, and `track_counts` on (`DB_SCRATCH_UNSAFE`), and that it own nothing
   in scratch but `public` before replay, such as a large object or a
