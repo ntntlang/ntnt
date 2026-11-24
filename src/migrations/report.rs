@@ -752,13 +752,11 @@ pub(super) async fn inspect(
     let name = &inputs.endpoint.connection_secret;
     let secret = crate::stdlib::secrets::require_from_manifest(name, &inputs.document)
         .map_err(|error| unresolved_secret("target", name, &inputs.config.engine, error))?;
-    let (identity, catalog, history) = observe(&inputs, &secret, &[]).await?;
+    let observed = observe(&inputs, &secret, &[]).await?;
     inspect_observed(
         &inputs,
         command,
-        identity,
-        catalog,
-        history,
+        observed,
         adopt_through,
         &secret,
         replay_until,
@@ -830,9 +828,7 @@ fn second_snapshot(
 async fn inspect_observed(
     inputs: &CapturedInputs,
     command: &str,
-    identity: Identity,
-    mut catalog: Catalog,
-    history: Result<History>,
+    (identity, mut catalog, history): (Identity, Catalog, Result<History>),
     adopt_through: Option<u64>,
     target_secret: &crate::interpreter::SecretValue,
     replay_until: Option<tokio::time::Instant>,
