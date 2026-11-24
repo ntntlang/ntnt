@@ -47,6 +47,44 @@
   constraint uses only builtins, such as a regular expression, is allowed at
   any depth (#430).
 
+- **Replay commits each migration on scratch, as `migrate` does on the target.**
+  Replay used to run the whole history in one rollback-only transaction. A
+  history whose migration adds an enum value with `ALTER TYPE ... ADD VALUE`
+  (as Prisma generates) and whose next migration uses it could never plan on
+  PostgreSQL 16 (SQLSTATE 55P04); it now plans, migrates and verifies on 16,
+  17 and 18. A migration that adds a value and uses it in the same script
+  used to plan on 17 and 18 and then fail at `migrate`; it now fails at plan
+  with the same SQLSTATE. Each migration runs in a `READ COMMITTED`
+  transaction with the target's settings and commits (#430).
+- **Scratch is cleaned up, fail-safe.** Replay commits a marker (schema
+  `_ntnt_replay`) before the first migration and, whatever the outcome, drops
+  what the scratch role owns with `DROP OWNED`, restores `public`'s owner,
+  privileges and comment, and checks scratch is empty again. A plan after one
+  that was killed between migrations cleans up its leftovers when only the
+  scratch role owns them, and reports `scratch.recovered`; without the marker,
+  or with another role's objects, scratch is refused with
+  `DB_SCRATCH_NOT_EMPTY` as before and left untouched. A failed cleanup is
+  `DB_SCRATCH_CLEANUP` (#430).
+- **Concurrent plans on one scratch database wait for each other** instead of
+  interleaving: a session advisory lock covers each replay, a second plan,
+  status or verify waits up to `migrator_wait_seconds` and then fails with
+  `DB_SCRATCH_BUSY` (#430).
+- **Changes cleanup cannot undo are refused before they commit**, with
+  `DB_REPLAY_UNSUPPORTED` naming the migration: `ALTER DATABASE` or
+  `ALTER ROLE` settings, database-level grants and comments, connection limits
+  and passwords made in a `DO` block or function, objects given to another
+  role, and a session left acting as another role (#430).
+- **Two new scratch requirements:** the scratch role may hold no privileges on
+  objects it does not own other than on `public` (`DROP OWNED` would revoke
+  them), and `track_counts` must be on, as it is by default. Otherwise plans
+  fail with `DB_SCRATCH_UNSAFE` and change nothing (#430).
+- Same-named constraints with different `INITIALLY DEFERRED` defaults no
+  longer stop replay with `DB_REPLAY_UNSUPPORTED` (#430).
+- `capabilities.operations.transactional_script_replay` now reads
+  `per_migration_commits_on_scratch` instead of `rollback_only_scratch`.
+  Capabilities feed no digest: plans saved by earlier 0.6.x builds stay valid,
+  and accepted histories keep their plan digests and fingerprints.
+
 Catalogs that use none of these keep their fingerprints, so saved plans and
 applied history stay valid.
 

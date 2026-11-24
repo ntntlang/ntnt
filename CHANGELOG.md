@@ -20,6 +20,31 @@
   name in two access methods no longer collide as catalog keys, and
   `DB_CATALOG_AMBIGUOUS` names the shared key and the migration (#430).
 - `ntnt db` (PostgreSQL): `EXCLUDE` constraints plan, migrate and verify (#430).
+- `ntnt db` (PostgreSQL): replay commits each migration on scratch in a
+  transaction set up like the target's, instead of one rollback-only
+  transaction, so an enum value added by one migration can be used by the next
+  on PostgreSQL 16, and adding and using one in the same migration fails at
+  plan (SQLSTATE 55P04) instead of at `migrate` on 17 and 18 (#430).
+- `ntnt db` (PostgreSQL): replay cleans scratch up afterwards, whatever its
+  outcome: it commits a marker schema `_ntnt_replay` first, then drops what the
+  scratch role owns (`DROP OWNED`), restores `public` and checks scratch is
+  empty again (`DB_SCRATCH_CLEANUP` if not). A later plan cleans up the
+  leftovers of a killed replay only when its marker is there and only the
+  scratch role owns objects there (`scratch.recovered`); otherwise
+  `DB_SCRATCH_NOT_EMPTY` as before (#430).
+- `ntnt db` (PostgreSQL): plans, statuses and verifies on one scratch database
+  are serialized by an advisory lock; a second one waits up to
+  `migrator_wait_seconds`, then fails with `DB_SCRATCH_BUSY` (#430).
+- `ntnt db` (PostgreSQL): replay refuses, before they commit, changes cleanup
+  cannot undo: database and role settings, database-level grants, comments and
+  connection limits, passwords, objects given to another role and a session
+  left as another role (`DB_REPLAY_UNSUPPORTED`). Scratch now also requires
+  that its role hold no privileges on objects it does not own, other than on
+  `public`, and `track_counts` on (`DB_SCRATCH_UNSAFE`) (#430).
+- `ntnt db` (PostgreSQL): `capabilities.operations.transactional_script_replay`
+  is now `per_migration_commits_on_scratch` (was `rollback_only_scratch`).
+  Capabilities feed no digest, so saved plans, plan digests and fingerprints of
+  accepted histories are unchanged (#430).
 - `ntnt db` (PostgreSQL): `requires`, `ensures` and adoption checks can read
   tables with columns of these types, and run while an extension's casts exist.
   They still run no routine the history wrote: `DB_CHECK_UNSUPPORTED` names a

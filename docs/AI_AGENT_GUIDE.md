@@ -1741,6 +1741,18 @@ and zero executed SQL assertions is `not_run`, not a business-verification pass.
 replaying a migration produced them, names that migration in `source`. SQLite
 covers partial and expression indexes by definition, like PostgreSQL.
 Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
+On PostgreSQL, replay commits each migration on scratch, in a transaction set up
+like the target's, so a plan sees what `migrate` will: an enum value one migration
+adds with `ALTER TYPE ... ADD VALUE` can be used by the next on PostgreSQL 16, and
+a migration that adds and uses one fails at plan (SQLSTATE 55P04). Afterwards
+replay drops what the scratch role owns and restores `public`; never put anything
+you need in scratch. A second plan on the same scratch waits for the first, up to
+`migrator_wait_seconds`, then fails with `DB_SCRATCH_BUSY`: rerun it. A plan
+after a killed one cleans up NTNT's marker schema `_ntnt_replay` and what that
+replay committed (`scratch.recovered`). `DB_SCRATCH_NOT_EMPTY` means scratch holds
+something NTNT did not create there; clean it yourself. `DB_REPLAY_UNSUPPORTED`
+from a `DO` block that changes database or role settings, grants, comments or a
+password means: move that statement out of the migration history.
 
 `ntnt db migrate --database app --target development --plan review.json --json`
 (and `ntnt db reconcile` with the same plan after an interrupted
