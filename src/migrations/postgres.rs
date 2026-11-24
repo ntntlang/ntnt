@@ -141,6 +141,71 @@ pub(crate) trait RelationalAdapter {
     ) -> Result<Catalog>;
     fn capabilities(version: i32) -> Value;
 }
+/// What reading the relations a check can reach could call through a
+/// conversion (see `Postgres::check_purity`): one row per finding, the
+/// relation's catalog key and why, for the first 20. `walk` follows each
+/// column's type, starting at its top level (`runs` false: comparing with a
+/// literal converts it to a domain's base type), and each type a view's
+/// rules convert to (`runs` true). Below an array's elements, a range's
+/// bounds or a composite's attributes, a type's input runs (`runs` true), and
+/// then a domain's constraints run, and so do those of the types they
+/// convert to. pg_depend never records a builtin (pinned) function, so what
+/// a domain's constraint calls is read from its stored expression; an
+/// operator is followed to its function. A top-level composite is counted
+/// too, though PostgreSQL 16-18 reject a literal compared with one (as an
+/// anonymous record) before any input runs. "The history wrote" means
+/// outside `pg_catalog` and not installed by an extension in the scope.
+const CHECK_CONVERSION_CALLS: &str = r#"WITH RECURSIVE reach(rel) AS (
+  SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1
+  UNION
+  SELECT d.refobjid FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v'
+  JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
+  JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass),
+walk(rel, col, top, typ, runs) AS (
+  (SELECT a.attrelid, a.attname::text, a.atttypid, a.atttypid, false FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
+    WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind IN ('r','p','v') AND a.attnum>0 AND NOT a.attisdropped
+   UNION ALL
+   SELECT r.ev_class, NULL, d.refobjid, d.refobjid, true FROM pg_catalog.pg_rewrite r
+    JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_type'::pg_catalog.regclass
+    WHERE r.ev_class IN (SELECT rel FROM reach))
+  UNION
+  SELECT w.rel, w.col, w.top, x.typ, w.runs OR x.below FROM walk w JOIN pg_catalog.pg_type t ON t.oid=w.typ
+  CROSS JOIN LATERAL (
+    SELECT t.typbasetype, false WHERE t.typtype='d'
+    UNION ALL SELECT t.typelem, true WHERE t.typelem<>0
+    UNION ALL SELECT a.atttypid, true FROM pg_catalog.pg_attribute a WHERE t.typrelid<>0 AND a.attrelid=t.typrelid AND a.attnum>0 AND NOT a.attisdropped
+    UNION ALL SELECT g.rngsubtype, true FROM pg_catalog.pg_range g WHERE g.rngtypid=t.oid
+    UNION ALL SELECT g.rngtypid, true FROM pg_catalog.pg_range g WHERE g.rngmultitypid=t.oid
+    UNION ALL SELECT d.refobjid, true FROM pg_catalog.pg_constraint k
+     JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_type'::pg_catalog.regclass
+     WHERE w.runs AND k.contypid=t.oid) x(typ, below)),
+calls(dom, fn) AS (
+  SELECT k.contypid, m[1]::oid FROM pg_catalog.pg_constraint k CROSS JOIN LATERAL pg_catalog.regexp_matches(k.conbin::text, ':(?:funcid|opfuncid) (\d+)', 'g') m WHERE k.contypid<>0
+  UNION ALL
+  SELECT k.contypid, o.oprcode FROM pg_catalog.pg_constraint k
+   JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
+   JOIN pg_catalog.pg_operator o ON o.oid=d.refobjid WHERE k.contypid<>0),
+found(rel, what, fn) AS (
+  SELECT w.rel, CASE WHEN w.col IS NULL THEN 'converts values to '||pg_catalog.format_type(w.top,NULL)||', which runs'
+    ELSE 'has column '||pg_catalog.quote_ident(w.col)||' of type '||pg_catalog.format_type(w.top,NULL)||', and converting a literal to that type runs' END
+    ||' the constraints of domain '||pg_catalog.format_type(w.typ,NULL)||', which call ', c.fn
+  FROM walk w JOIN pg_catalog.pg_type t ON t.oid=w.typ AND t.typtype='d' JOIN calls c ON c.dom=t.oid WHERE w.runs
+  UNION ALL
+  SELECT r.ev_class, 'uses operator '||o.oid::pg_catalog.regoperator::text||', whose function is ', o.oprcode FROM pg_catalog.pg_rewrite r
+   JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
+   JOIN pg_catalog.pg_operator o ON o.oid=d.refobjid WHERE r.ev_class IN (SELECT rel FROM reach)),
+named(rel, what, fn, volatile, authored) AS (
+  SELECT f.rel, f.what, p.oid, p.provolatile='v', pn.nspname<>'pg_catalog' AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend e JOIN pg_catalog.pg_extension x ON x.oid=e.refobjid
+    JOIN pg_catalog.pg_namespace xn ON xn.oid=x.extnamespace WHERE e.classid='pg_catalog.pg_proc'::pg_catalog.regclass AND e.objid=p.oid
+    AND e.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND e.deptype='e' AND xn.nspname=ANY($2))
+  FROM found f JOIN pg_catalog.pg_proc p ON p.oid=f.fn JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace WHERE p.provolatile='v' OR pn.nspname<>'pg_catalog')
+SELECT DISTINCT CASE WHEN rn.nspname=$1 THEN '' ELSE pg_catalog.quote_ident(rn.nspname)||'.' END||'relation:'||rc.relname,
+  CASE WHEN rc.relkind='v' THEN 'view ' ELSE 'table ' END||pg_catalog.quote_ident(rn.nspname)||'.'||pg_catalog.quote_ident(rc.relname)||' '||n.what
+  ||n.fn::pg_catalog.regprocedure::text||CASE WHEN n.authored THEN ' (a routine the history wrote)' ELSE ' (a volatile function)' END
+FROM named n JOIN pg_catalog.pg_class rc ON rc.oid=n.rel JOIN pg_catalog.pg_namespace rn ON rn.oid=rc.relnamespace
+WHERE n.authored OR n.volatile
+ORDER BY 1, 2 LIMIT 20"#;
+
 impl Postgres {
     /// Open a dedicated session after checking explicit host, role, database and transport.
     /// The initial connection is read-only by default. Every TLS sslmode requires TLS from
@@ -863,9 +928,20 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// coverage check has just found covered: an enum, a domain or composite
     /// type over covered types, or an extension's type. Reading or comparing
     /// such a value runs builtin code or the extension's own (covered by its
-    /// version), never a routine the history wrote: a domain's constraints
-    /// run only on a coercion into the domain, which the check grammar cannot
-    /// write. The same holds for the casts of an extension in the scope.
+    /// version), and so do the casts of an extension in the scope. A
+    /// domain's constraints run when a value is converted to the domain. The
+    /// check grammar writes no casts, but comparing a column with a literal
+    /// converts the literal to the column's type. For a domain that is its
+    /// base type, so the domain's own constraints never run. An array's
+    /// elements, a range's bounds and a composite's attributes, though, go
+    /// through their own types' input, domain constraints included.
+    /// `CHECK_CONVERSION_CALLS` refuses, by name, a reachable column whose
+    /// type holds such a domain below its top level (through a top-level
+    /// domain's base type too), and a reachable view that converts values to
+    /// a type holding one at any level or uses an operator, when the domain's
+    /// constraints or the operator call a routine the history wrote or a
+    /// volatile function. Plain domains and domains with builtin-only
+    /// constraints (a regular expression, say) stay allowed.
     pub async fn check_purity(
         &self,
         schema: &str,
@@ -908,6 +984,25 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
                 "DB_CHECK_UNSUPPORTED",
                 "Live types, casts or view functions exceed the verified builtin contract subset.",
             ));
+        }
+        let calls = self
+            .rows(CHECK_CONVERSION_CALLS, &[&schema, &scope(schema, extra)])
+            .await?;
+        if !calls.is_empty() {
+            let mut objects: Vec<String> = calls.iter().map(|r| r.get(0)).collect();
+            objects.dedup();
+            let mut reasons: Vec<String> = calls.iter().take(3).map(|r| r.get(1)).collect();
+            if calls.len() > 3 {
+                reasons.push("and more".into());
+            }
+            return Err(Diagnostic::new(
+                "DB_CHECK_UNSUPPORTED",
+                &format!(
+                    "Checks run no routine the history wrote and no volatile function, but the relations they can read could make them: {}. Give such a domain a constraint that uses only builtin non-volatile functions, or keep it at the top level of the column's type; a view must not convert values to it or use such an operator.",
+                    reasons.join("; ")
+                ),
+            )
+            .with_objects(&objects));
         }
         Ok(())
     }
