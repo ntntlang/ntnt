@@ -38,11 +38,12 @@
   the counter to the highest id copied, so the ids of deleted rows were
   given out again. The rebuild guard now refuses that with
   `DB_REBUILD_GUARD`, naming the table and both counter values, and its
-  `next_action` gives the `UPDATE` and `INSERT` to put before the DROP
-  (docs/DATABASE_MIGRATIONS.md, Explicit one-table rebuild). They leave the
-  replacement one counter row with the higher of the two counters, whether or
-  not it already has one. SQLite reads only the first `sqlite_sequence` row
-  for a name, so the guard also refuses a rebuilt table left with two (#427).
+  `next_action` gives the `UPDATE`, `DELETE` and `INSERT` to put before the
+  DROP (docs/DATABASE_MIGRATIONS.md, Explicit one-table rebuild). They leave
+  the replacement one counter row with the highest counter of both tables,
+  whether it had none, one or more. SQLite reads only the first
+  `sqlite_sequence` row for a name, so the guard also refuses a rebuilt table
+  left with two, and gives the same lines (#427).
 - **Rebuild guard says what failed.** `DB_REBUILD_GUARD` names each rule a
   rebuild broke and the object: ``the row count of table `log` changed from 0
   to 1``, ``index `index_posts_on_user_id` has another stored SQL text than

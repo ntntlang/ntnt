@@ -1745,10 +1745,10 @@ window functions included; not `load_extension`, `sqlite_log`, or extension and
 application functions) and use AUTOINCREMENT, `WITH RECURSIVE` and `ANALYZE`;
 `sqlite_sequence` and the `sqlite_stat*` planner statistics are outside coverage
 and drift. A `sqlite_rebuild` must keep an AUTOINCREMENT table's counter (before
-the DROP, raise the replacement's counter row to the higher of the two counters
-or add one, with the `UPDATE` and `INSERT` in docs/DATABASE_MIGRATIONS.md,
-Explicit one-table rebuild, right whether or not it already has one;
-SQLite uses only the first row for a name, so never add a second), recreate
+the DROP, run the `UPDATE`, `DELETE` and `INSERT` in docs/DATABASE_MIGRATIONS.md,
+Explicit one-table rebuild: they leave the replacement one counter row, the one
+SQLite reads, with the highest counter of both tables, whether it had none, one
+or more), recreate
 indexes, triggers and views with their stored SQL text exactly, and is needed on
 populated targets for any rebuild of a table other tables reference by foreign key;
 `DB_REBUILD_GUARD` names the rule and object it broke. SQLite's ADD COLUMN cannot

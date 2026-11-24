@@ -23,7 +23,8 @@
 - `ntnt db` (SQLite): a `sqlite_rebuild` must keep the rebuilt table's
   AUTOINCREMENT counter in one `sqlite_sequence` row, so deleted ids are
   never reused; the refusal names the table and both values (or the number of
-  rows), and gives the `UPDATE` and `INSERT` lines that fix it (#427).
+  rows), and gives the `UPDATE`, `DELETE` and `INSERT` lines that fix it
+  (#427).
 - `ntnt db` (SQLite): `DB_REBUILD_GUARD` names the rule and object a rebuild
   broke (a row count with both values, a missing or changed index, trigger or
   view, a changed table) and lists them in `objects` (#427).
