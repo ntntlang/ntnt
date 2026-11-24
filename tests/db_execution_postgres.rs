@@ -1221,6 +1221,120 @@ fn migration_scripts_run_with_normal_row_security() {
     );
 }
 
+/// #430 (cli-17): checks read with row_security=off, so PostgreSQL refuses
+/// a check's read of a table whose row-level security applies to the
+/// migration role: FORCE ROW LEVEL SECURITY on a table the documented
+/// unprivileged owner owns. The plan warns, naming each check and table, and
+/// migrate refuses the check by name instead of failing with a bare SQLSTATE
+/// 42501. A view the role owns reads as the role, so a check through it is
+/// caught too. Once the role has BYPASSRLS, a new plan has no warning and
+/// migrate passes.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_on_forced_row_security_tables_are_flagged_and_named() {
+    let mut f = Fixture::new();
+    f.sql(
+        "0001_tenants.sql",
+        "CREATE TABLE app.tenants (id BIGINT PRIMARY KEY, slug TEXT NOT NULL);
+         ALTER TABLE app.tenants ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE app.tenants FORCE ROW LEVEL SECURITY;
+         CREATE POLICY tenant_all ON app.tenants USING (true) WITH CHECK (true);
+         INSERT INTO app.tenants VALUES (1, 'internal');
+         CREATE VIEW app.tenant_slugs AS SELECT slug FROM app.tenants;
+         CREATE TABLE app.plain (id BIGINT PRIMARY KEY);",
+    );
+    f.sql(
+        "0002_names.sql",
+        "ALTER TABLE app.tenants ADD COLUMN name TEXT;",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_names.toml"),
+        "[requires]\nslugs_via_view = \"SELECT EXISTS (SELECT 1 FROM app.tenant_slugs)\"\nplain_ok = \"SELECT NOT EXISTS (SELECT 1 FROM app.plain)\"\n[ensures]\nslugs_present = \"SELECT EXISTS (SELECT 1 FROM app.tenants WHERE slug = 'internal')\"\n",
+    )
+    .unwrap();
+    let p = f.plan("plan.json");
+    let warnings: Vec<_> = p["plan"]["check_warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("plan flags the checks: {p}"))
+        .iter()
+        .map(|w| {
+            assert_eq!(w["code"], "CHECK_ROW_SECURITY", "{w}");
+            assert_eq!(w["source"], "0002_names.sql", "{w}");
+            assert_eq!(w["relation"], "app.tenants", "{w}");
+            assert_eq!(w["forced"], true, "{w}");
+            let message = w["message"].as_str().unwrap();
+            assert!(message.contains("BYPASSRLS"), "{w}");
+            (
+                w["phase"].as_str().unwrap().to_owned(),
+                w["check"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            ("requires".to_owned(), "slugs_via_view".to_owned()),
+            ("ensures".to_owned(), "slugs_present".to_owned())
+        ],
+        "{p}"
+    );
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "fail", "{r}");
+    let d = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_CHECK_ROW_SECURITY")
+        .unwrap_or_else(|| panic!("named refusal, not a bare SQLSTATE: {r}"));
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            "Check slugs_via_view ([requires]) reads app.tenants (FORCE ROW LEVEL SECURITY)"
+        ) && message.contains(&f.target),
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("ALTER ROLE {} BYPASSRLS", f.target)),
+        "{d}"
+    );
+    assert_eq!(d["source"], "0002_names.sql", "{d}");
+    assert_eq!(d["objects"], serde_json::json!(["relation:tenants"]), "{d}");
+    // Checks run in name order: plain_ok passed before the refused one.
+    assert_eq!(
+        r["assertions"]["checks"],
+        serde_json::json!([
+            {"source":"0002_names.sql","name":"plain_ok","phase":"requires","outcome":"pass"},
+            {"source":"0002_names.sql","name":"slugs_via_view","phase":"requires","outcome":"fail"}
+        ]),
+        "{r}"
+    );
+    assert_eq!(r["progress"][0]["state"], "committed", "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    let added: bool = f
+        .target()
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='app' AND table_name='tenants' AND column_name='name')",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(!added, "the refused migration was rolled back");
+    // The documented remedy: the migration role bypasses row-level security.
+    // Its attributes are part of the plan's binding, so plan again.
+    f.admin
+        .batch_execute(&format!("ALTER ROLE {} BYPASSRLS", f.target))
+        .unwrap();
+    let p = f.plan("plan2.json");
+    assert!(p["plan"].get("check_warnings").is_none(), "{p}");
+    let r = f.apply("plan2.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 3, "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn deferred_constraints_settle_at_each_migration_boundary() {

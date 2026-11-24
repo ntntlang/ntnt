@@ -445,7 +445,24 @@ async fn checks(
         let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
         report["assertions"]["executed"] = json!(count + 1);
         report["assertions"]["outcome"] = json!("unknown");
-        let result = db.check(sql, schema).await;
+        // Checks read with row_security=off. Where row-level security
+        // applies to the migration role, PostgreSQL would refuse the read
+        // with a bare SQLSTATE 42501, so name the check and the table first.
+        let read: Vec<String> = super::analysis::check_tables(sql, schema)
+            .into_iter()
+            .filter(|(s, _)| s == schema)
+            .map(|(_, table)| table)
+            .collect();
+        let result = match db.row_security_blocked(schema, &read).await {
+            Ok(blocked) if blocked.is_empty() => db.check(sql, schema).await,
+            Ok(blocked) => Err(super::row_security_refusal(
+                name,
+                phase,
+                &inputs.endpoint.role,
+                &blocked,
+            )),
+            Err(d) => Err(d),
+        };
         if report["assertions"]["checks"].is_null() {
             report["assertions"]["checks"] = json!([]);
         }

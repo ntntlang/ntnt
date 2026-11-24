@@ -126,6 +126,21 @@ pub(crate) struct Identity {
 }
 use super::model::{Catalog, History, HistoryEntry};
 
+impl Identity {
+    /// Whether the login role bypasses row-level security: it has BYPASSRLS
+    /// or is a superuser. Neither attribute is inherited through membership.
+    pub fn bypasses_row_security(&self) -> bool {
+        self.authority["roles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                r["role"] == self.role.as_str()
+                    && (r["bypassrls"] == true || r["superuser"] == true)
+            })
+    }
+}
+
 /// Small relational boundary: each adapter owns its native catalog and operation
 /// capabilities. A driver alone does not confer migration support.
 pub(crate) trait RelationalAdapter {
@@ -743,14 +758,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         // Scripts must see row-level security as the target role does. Scratch
         // may bypass RLS only when the target login role bypasses it (directly
         // or as a superuser); it never gains other elevated attributes.
-        let target_bypasses_rls = target.authority["roles"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|r| {
-                r["role"] == target.role.as_str()
-                    && (r["bypassrls"] == true || r["superuser"] == true)
-            });
+        let target_bypasses_rls = target.bypasses_row_security();
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
         let r=bounded(self.client.query_one(r#"
 SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $1))
@@ -886,6 +894,49 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             ));
         }
         Ok(())
+    }
+
+    /// What a check naming `tables` of the managed schema would read where
+    /// row-level security applies to this session's role: those tables, and
+    /// what views among them that this role owns read, transitively. Checks
+    /// read with row_security=off so that no policy can silently filter
+    /// them, and PostgreSQL refuses such a read (SQLSTATE 42501) instead of
+    /// filtering it. `row_security_active` is PostgreSQL's own test: row
+    /// security is enabled and the role neither bypasses it (BYPASSRLS or
+    /// superuser) nor owns the table, unless the table forces it on its
+    /// owner. Views another role owns read as that role and are not
+    /// followed. Each relation comes as its qualified name, its catalog key
+    /// and whether it forces row security on its owner.
+    pub async fn row_security_blocked(
+        &self,
+        schema: &str,
+        tables: &[String],
+    ) -> Result<Vec<super::RowSecurity>> {
+        if tables.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(self
+            .rows(
+                r#"WITH RECURSIVE reach(rel) AS (
+            SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=ANY($2)
+            UNION
+            SELECT d.refobjid FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v' AND pg_catalog.pg_get_userbyid(v.relowner)=current_user
+            JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
+            JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::regclass)
+          SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(c.relname),
+            CASE WHEN n.nspname=$1 THEN '' ELSE pg_catalog.quote_ident(n.nspname)||'.' END||'relation:'||c.relname, c.relforcerowsecurity
+          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+          WHERE c.oid IN (SELECT rel FROM reach) AND c.relrowsecurity AND pg_catalog.row_security_active(c.oid) ORDER BY 1"#,
+                &[&schema, &tables],
+            )
+            .await?
+            .iter()
+            .map(|r| super::RowSecurity {
+                relation: r.get(0),
+                key: r.get(1),
+                forced: r.get(2),
+            })
+            .collect())
     }
 
     /// Execute captured check bytes once; consume at most two rows and inspect

@@ -34,6 +34,105 @@ pub struct Diagnostic {
     pub next_action: String,
 }
 
+/// A relation a check would read where row-level security applies to the
+/// migration role, so the check cannot read it (#430).
+pub(super) struct RowSecurity {
+    /// Qualified, quoted where needed: `app.tenants`.
+    pub relation: String,
+    /// Its catalog key: `relation:tenants`.
+    pub key: String,
+    /// Whether it has FORCE ROW LEVEL SECURITY, which applies its policies
+    /// to its owner too.
+    pub forced: bool,
+}
+
+/// `name ([ensures])`, `name ([requires])` or `name (adoption_checks)`: a
+/// check as its sidecar or the manifest declares it.
+fn check_label(name: &str, phase: &str) -> String {
+    match phase {
+        "adoption" => format!("{name} (adoption_checks)"),
+        phase => format!("{name} ([{phase}])"),
+    }
+}
+
+/// `blocked` in words, each with why row-level security applies to the role.
+fn row_security_relations(blocked: &[RowSecurity]) -> String {
+    blocked
+        .iter()
+        .map(|r| {
+            if r.forced {
+                format!("{} (FORCE ROW LEVEL SECURITY)", r.relation)
+            } else {
+                format!("{} (row-level security, owned by another role)", r.relation)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `DB_CHECK_ROW_SECURITY`: check `name` of `phase` would read `blocked`,
+/// where row-level security applies to the migration `role` (#430). Checks
+/// read with row_security=off, so PostgreSQL would refuse the read with a
+/// bare SQLSTATE 42501; the check is refused before it runs instead.
+pub(super) fn row_security_refusal(
+    name: &str,
+    phase: &str,
+    role: &str,
+    blocked: &[RowSecurity],
+) -> Diagnostic {
+    let objects: Vec<String> = blocked.iter().map(|r| r.key.clone()).collect();
+    let mut d = Diagnostic::new(
+        "DB_CHECK_ROW_SECURITY",
+        &format!(
+            "Check {} reads {}, where row-level security applies to the migration role {role}. Checks read with row_security=off so that no policy can silently filter what they see, and PostgreSQL refuses such a read (SQLSTATE 42501) unless the role bypasses row-level security. The check did not run.",
+            check_label(name, phase),
+            row_security_relations(blocked)
+        ),
+    )
+    .with_objects(&objects);
+    d.next_action = format!(
+        "As a superuser, give the migration role BYPASSRLS (ALTER ROLE {role} BYPASSRLS), then plan, review and approve again: the role's attributes are part of the plan. Or change the check so that it does not read that table. A failed check rolls back its transaction, so nothing from it was committed; progress shows each migration's state. See docs/DATABASE_MIGRATIONS.md, Checks and row-level security."
+    );
+    d
+}
+
+/// A plan's warning that check `name` of `phase` in `source` will read
+/// `blocked`, where row-level security applies to the migration role, so
+/// migrate will refuse it with `DB_CHECK_ROW_SECURITY` (#430).
+pub(super) fn row_security_warning(
+    source: &str,
+    name: &str,
+    phase: &str,
+    blocked: &RowSecurity,
+) -> serde_json::Value {
+    serde_json::json!({
+        "code": "CHECK_ROW_SECURITY",
+        "source": source,
+        "phase": phase,
+        "check": name,
+        "relation": blocked.relation,
+        "forced": blocked.forced,
+        "message": format!(
+            "Check {} reads {}, where row-level security applies to the migration role, which does not bypass it. Checks read with row_security=off, so migrate will refuse this check (DB_CHECK_ROW_SECURITY) and roll its migration back. Give the migration role BYPASSRLS, or change the check, then plan again.",
+            check_label(name, phase),
+            row_security_relations(std::slice::from_ref(blocked))
+        ),
+    })
+}
+
+/// A plan's `check_warnings` for the checks of `source` (a migration file,
+/// or `manifest` for adoption checks).
+fn check_warnings<'a>(
+    report: &'a serde_json::Value,
+    source: &'a serde_json::Value,
+) -> impl Iterator<Item = &'a serde_json::Value> {
+    report["plan"]["check_warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(move |warning| warning["source"] == *source)
+}
+
 /// A migration with no statements yet (#428): only comments, whitespace or
 /// semicolons, such as the file `ntnt db new` creates.
 pub(super) fn empty_migration() -> Diagnostic {
@@ -931,6 +1030,16 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     warning["code"], warning["relation"], warning["statement"], warning["message"]
                 );
             }
+            for warning in check_warnings(&report, &migration["source"]) {
+                println!(
+                    "  Warning {} on {} ({} check {}): {}",
+                    warning["code"],
+                    warning["relation"],
+                    warning["phase"],
+                    warning["check"],
+                    warning["message"]
+                );
+            }
             // Never refused, and NTNT inspects only what the history creates
             // there: for the reviewer, like a destructive change.
             for note in migration["analysis"]["outside_scope"]
@@ -945,6 +1054,12 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     _ => println!("  Outside the managed scope: statement {statement} names schema {schema}"),
                 }
             }
+        }
+        for warning in check_warnings(&report, &serde_json::json!("manifest")) {
+            println!(
+                "Warning {} on {} (adoption check {}): {}",
+                warning["code"], warning["relation"], warning["check"], warning["message"]
+            );
         }
         for d in report["diagnostics"].as_array().into_iter().flatten() {
             println!("{}: {}", d["code"], d["message"]);

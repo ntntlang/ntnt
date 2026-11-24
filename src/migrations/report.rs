@@ -554,6 +554,65 @@ struct Replayed {
     /// managed scope, at any step, by catalog key. The target is inspected
     /// for these (`outside` in `catalog`), and a plan records them.
     outside: std::collections::BTreeSet<String>,
+    /// For plans: each pending check that will read a table where
+    /// row-level security applies to the migration role (`Probe`).
+    check_warnings: Vec<Value>,
+}
+
+/// A check migrate will run, examined in replay at the state it runs in
+/// for tables where row-level security applies to the migration role,
+/// which a check cannot read (#430).
+struct Probe<'a> {
+    /// Migrations applied when the check runs: those before its migration
+    /// for `requires`, through it for `ensures`, the adopted prefix for
+    /// adoption checks.
+    state: usize,
+    source: &'a str,
+    phase: &'static str,
+    name: &'a str,
+    /// The managed-schema tables the check names.
+    tables: Vec<String>,
+}
+
+/// The checks this plan's migrate will run, as `Probe`s. Only asked for
+/// when row-level security can apply to the target role: scratch may then
+/// not bypass it either, and its role owns what replay creates as the
+/// target role owns what migrate creates, so PostgreSQL answers in scratch
+/// as it will on the target. `applied` migrations already ran there.
+fn row_security_probes<'a>(
+    inputs: &'a CapturedInputs,
+    applied: usize,
+    adoption: Option<&super::adoption::Adoption>,
+) -> Vec<Probe<'a>> {
+    let schema = &inputs.config.schema;
+    let probe = |state, source, phase, name, sql: &str| Probe {
+        state,
+        source,
+        phase,
+        name,
+        tables: super::analysis::check_tables(sql, schema)
+            .into_iter()
+            .filter(|(s, _)| s == schema)
+            .map(|(_, table)| table)
+            .collect(),
+    };
+    let mut probes = vec![];
+    if let Some(action) = adoption {
+        for (name, sql) in &inputs.config.adoption_checks {
+            probes.push(probe(action.count, "manifest", "adoption", name, sql));
+        }
+    } else {
+        for (index, migration) in inputs.migrations.iter().enumerate().skip(applied) {
+            for (name, sql) in &migration.requires {
+                probes.push(probe(index, &migration.name, "requires", name, sql));
+            }
+            for (name, sql) in &migration.ensures {
+                probes.push(probe(index + 1, &migration.name, "ensures", name, sql));
+            }
+        }
+    }
+    probes.retain(|p| !p.tables.is_empty());
+    probes
 }
 
 /// Replay the first `count` migrations on a prepared scratch, inspecting the
@@ -568,6 +627,7 @@ async fn replay_prefix(
     inputs: &CapturedInputs,
     role: &str,
     (count, reference, plan): (usize, usize, bool),
+    probes: &[Probe<'_>],
     replayed: &mut Replayed,
 ) -> Result<()> {
     let (schema, extra) = (&inputs.config.schema, &inputs.history_schemas);
@@ -624,6 +684,16 @@ async fn replay_prefix(
             .with_objects(&uncovered);
             d.source = Some(migration.name.clone());
             return Err(d);
+        }
+        for probe in probes.iter().filter(|p| p.state == index) {
+            for blocked in scratch.row_security_blocked(schema, &probe.tables).await? {
+                replayed.check_warnings.push(super::row_security_warning(
+                    probe.source,
+                    probe.name,
+                    probe.phase,
+                    &blocked,
+                ));
+            }
         }
         replayed.fingerprints.extend(fingerprint);
         if index == reference {
@@ -802,6 +872,11 @@ async fn inspect_observed(
     // catalog is final (below).
     let coverage_at = report["diagnostics"].as_array().map_or(0, Vec::len);
     let mut replayed = Replayed::default();
+    let probes = if command == "plan" && identity.row_security_applies() {
+        row_security_probes(inputs, applied, adoption.as_ref())
+    } else {
+        vec![]
+    };
     if let Some(scratch_config) = &inputs.config.scratch {
         let mut cleanup_failure = None;
         let replay = async {
@@ -834,6 +909,7 @@ async fn inspect_observed(
                     inputs,
                     &scratch_config.endpoint.role,
                     (count, reference, command == "plan"),
+                    &probes,
                     &mut replayed,
                 )
                 .await
@@ -884,6 +960,7 @@ async fn inspect_observed(
         expected,
         candidate,
         outside: _,
+        check_warnings,
     } = replayed;
     if let Some(expected) = &expected {
         report["drift"] = compare(&catalog, expected);
@@ -960,6 +1037,12 @@ async fn inspect_observed(
             "data_checks":{"outcome":"not_run","reason":"Constraints, casts, nulls, duplicates, orphans and deployed-client compatibility require later data/behavior evidence."}});
         if let Some(action) = adoption {
             plan["action"] = json!(action);
+        }
+        // For the reviewer: checks migrate will refuse because row-level
+        // security applies to the migration role. Absent when there are
+        // none, so other plans keep their digests.
+        if !check_warnings.is_empty() {
+            plan["check_warnings"] = json!(check_warnings);
         }
         report["plan_digest"] = json!(json_digest(&plan));
         report["plan"] = plan;
@@ -1093,7 +1176,7 @@ mod tests {
         current_thread().block_on(async {
             let (identity, scratch) = prepared_scratch(&project).await;
             let mut replayed = Replayed::default();
-            replay_prefix(&scratch, inputs, "", (n, n, true), &mut replayed)
+            replay_prefix(&scratch, inputs, "", (n, n, true), &[], &mut replayed)
                 .await
                 .unwrap();
             assert_eq!(replayed.fingerprints.len(), n + 1);
@@ -1110,7 +1193,7 @@ mod tests {
                 .await
                 .unwrap();
             let mut replayed = Replayed::default();
-            replay_prefix(&scratch, inputs, "", (n, n, false), &mut replayed)
+            replay_prefix(&scratch, inputs, "", (n, n, false), &[], &mut replayed)
                 .await
                 .unwrap();
             assert!(replayed.fingerprints.is_empty() && replayed.candidate.is_none());
