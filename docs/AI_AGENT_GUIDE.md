@@ -1744,7 +1744,17 @@ migrations can call SQLite's built-in functions (JSON, `hex`, `randomblob` and
 window functions included; not `load_extension`, `sqlite_log`, or extension and
 application functions) and use AUTOINCREMENT, `WITH RECURSIVE` and `ANALYZE`;
 `sqlite_sequence` and the `sqlite_stat*` planner statistics are outside coverage
-and drift.
+and drift. A `sqlite_rebuild` must keep an AUTOINCREMENT table's counter (copy it
+with `UPDATE sqlite_sequence SET seq = (SELECT seq FROM sqlite_sequence WHERE
+name='orders') WHERE name='orders_new';` before the DROP), recreate indexes,
+triggers and views with their stored SQL text exactly, and is needed on populated
+targets for any rebuild of a table other tables reference by foreign key;
+`DB_REBUILD_GUARD` names the rule and object it broke. SQLite's ADD COLUMN cannot
+add a UNIQUE or PRIMARY KEY column (add the column, then CREATE UNIQUE INDEX) and,
+on a table with rows, accepts only a constant default. INSTEAD OF triggers are
+unsupported. SQLite adoption compares stored CREATE text exactly, so write
+baselines from the database's own `sqlite_master.sql`. Approve a saved plan only
+when its outcome is `pass` and it has a `plan_digest`.
 Plans are not executable or authorizing; unsupported SQL/metadata stays blocked.
 
 `ntnt db migrate --database app --target development --plan review.json --json`

@@ -33,6 +33,38 @@
   other reads that name no column of a table run, and `WITH RECURSIVE` is
   allowed, including a `WITH` clause that leads an INSERT, UPDATE or DELETE
   (#427).
+- **Rebuilds keep AUTOINCREMENT counters.** A `sqlite_rebuild` of an
+  AUTOINCREMENT table that copies its rows into a replacement used to reset
+  the counter to the highest id copied, so the ids of deleted rows were
+  given out again. The rebuild guard now refuses that with
+  `DB_REBUILD_GUARD`, naming the table and both counter values, and its
+  `next_action` is the line to put before the DROP:
+  `UPDATE sqlite_sequence SET seq = (SELECT seq FROM sqlite_sequence WHERE
+  name='orders') WHERE name='orders_new';` (#427).
+- **Rebuild guard says what failed.** `DB_REBUILD_GUARD` names each rule a
+  rebuild broke and the object: ``the row count of table `log` changed from 0
+  to 1``, ``index `index_posts_on_user_id` has another stored SQL text than
+  before the rebuild`` (SQLite compares the stored text, so whitespace and
+  quoting must match) or ``view `titles` is missing``, with their catalog
+  keys in `objects` and a `next_action` for each rule (#427).
+- **Clearer refusals.** A function SQLite does not define, such as one the
+  application registers, used in an INSERT or UPDATE is now
+  ``DB_SQL_UNSUPPORTED: Statement 2 uses SQLite function `app_slugify` ``,
+  as in a DEFAULT, instead of `no such function`. `ALTER TABLE ... ADD COLUMN
+  c TEXT UNIQUE` reports SQLite's `Cannot add a UNIQUE column` and suggests
+  ADD COLUMN followed by CREATE UNIQUE INDEX, instead of naming an internal
+  autoindex (#427).
+- **Failures that replay cannot show.** On a target with rows, ADD COLUMN
+  with a non-constant default (`CURRENT_TIMESTAMP`, `randomblob()`) or NOT
+  NULL without a default, and a rebuild without the sidecar of a table that
+  other tables reference (immediate keys fail the DROP, deferred keys such as
+  Django's fail the COMMIT), now fail with a `next_action` that says what to
+  write instead: a constant default and an UPDATE, or the `sqlite_rebuild`
+  sidecar. The COMMIT failure also names its migration (#427).
+- **Blocked saved plans.** `migrate --plan` with a file that `plan --out`
+  saved when `plan` stopped before it could make a plan (outcome `fail`, no
+  `plan_digest`) says the plan is blocked instead of calling it edited. The
+  quick start checks a plan's outcome before approving its digest (#427).
 
 ## Security
 
