@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Security
+
+- Update `cookie` to 0.18.3 for RUSTSEC-2026-0594.
+
 ### Fixed
 
 - `ntnt db` (SQLite): migrations can call SQLite's built-in functions, the JSON

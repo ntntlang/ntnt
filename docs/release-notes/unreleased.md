@@ -34,5 +34,9 @@
   allowed, including a `WITH` clause that leads an INSERT, UPDATE or DELETE
   (#427).
 
+## Security
+
+The lockfile updates `cookie` from 0.18.2 to 0.18.3 for [RUSTSEC-2026-0594](https://rustsec.org/advisories/RUSTSEC-2026-0594.html).
+
 See [NTNT v0.6.4](v0.6.4.md) for the latest release announcement and upgrade
 guidance.
