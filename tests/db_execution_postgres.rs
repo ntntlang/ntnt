@@ -1620,6 +1620,81 @@ fn declared_extensions_own_what_depends_on_their_members() {
     }
 }
 
+/// #430: a declared extension's implicit casts do not block checks, as they
+/// do not block DDL: citext's, in `public` of both databases, with a check on
+/// an ordinary managed table.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn declared_extensions_casts_do_not_block_checks() {
+    let f = Fixture::new();
+    for db in [&f.target, &f.scratch] {
+        superuser_in(db)
+            .batch_execute("CREATE EXTENSION citext SCHEMA public")
+            .unwrap();
+    }
+    declare_extensions(&f, Some(r#"["citext"]"#));
+    f.sql(
+        "0001_accounts.sql",
+        "CREATE TABLE app.accounts (id BIGINT PRIMARY KEY, name TEXT);\n",
+    );
+    let p = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", p["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0002_active.sql",
+        "ALTER TABLE app.accounts ADD COLUMN active BOOLEAN NOT NULL DEFAULT true;",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_active.toml"),
+        "[ensures]\nactive = \"SELECT NOT EXISTS (SELECT 1 FROM app.accounts WHERE NOT active)\"\n",
+    )
+    .unwrap();
+    let p = f.plan("checked.json");
+    let r = f.apply("checked.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+/// #430: with `public` managed, what a declared extension installs there is
+/// inspected, but its owner and grants are its installer's and are not
+/// compared, as for an extension's routines and types. Another superuser may
+/// install it in scratch.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn declared_extensions_installed_by_another_superuser_match() {
+    let f = Fixture::with_schema("public");
+    f.sql(
+        "0001_t.sql",
+        "CREATE TABLE public.t (id BIGINT PRIMARY KEY);\n",
+    );
+    let installer = format!("{}_inst", f.scratch);
+    let install = "CREATE EXTENSION pg_stat_statements SCHEMA public; CREATE EXTENSION tablefunc SCHEMA public;";
+    superuser_in(&f.target).batch_execute(install).unwrap();
+    let mut scratch = superuser_in(&f.scratch);
+    scratch
+        .batch_execute(&format!(
+            "CREATE ROLE {installer} SUPERUSER; SET ROLE {installer}; {install} RESET ROLE;"
+        ))
+        .unwrap();
+    declare_extensions(&f, Some(r#"["pg_stat_statements", "tablefunc"]"#));
+    let p = f.plan("plan.json");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "pass", "{v}");
+    assert!(
+        v["catalog"]["objects"]["relation:pg_stat_statements"].is_object(),
+        "{v}"
+    );
+    scratch
+        .batch_execute(&format!(
+            "REASSIGN OWNED BY {installer} TO CURRENT_USER; DROP OWNED BY {installer}; DROP ROLE {installer};"
+        ))
+        .unwrap();
+}
+
 /// #430: a declared extension must be in the scratch database as on the
 /// target. A version that differs is drift on the extension, by name; one
 /// missing from scratch, or installed where NTNT keeps its ledger, is
@@ -1759,6 +1834,11 @@ fn scratch_holds_only_what_declared_extensions_own() {
         ),
         // A sequence has no row type: only the relation check sees it.
         ("CREATE SEQUENCE ext.stray", "DROP SEQUENCE ext.stray"),
+        // Every kind of object counts in a declared extension's schema too.
+        (
+            "CREATE OPERATOR ext.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = pg_catalog.int4eq)",
+            "DROP OPERATOR ext.=== (int, int)",
+        ),
     ] {
         scratch.batch_execute(stray).unwrap();
         let r = f.command("plan");
