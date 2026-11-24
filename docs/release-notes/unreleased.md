@@ -38,9 +38,12 @@
   the counter to the highest id copied, so the ids of deleted rows were
   given out again. The rebuild guard now refuses that with
   `DB_REBUILD_GUARD`, naming the table and both counter values, and its
-  `next_action` is the line to put before the DROP:
-  `UPDATE sqlite_sequence SET seq = (SELECT seq FROM sqlite_sequence WHERE
-  name='orders') WHERE name='orders_new';` (#427).
+  `next_action` gives the lines to put before the DROP, which are right
+  whether or not the replacement already has a counter row:
+  `DELETE FROM sqlite_sequence WHERE name='orders_new'; INSERT INTO
+  sqlite_sequence (name, seq) SELECT 'orders_new', seq FROM sqlite_sequence
+  WHERE name='orders';`. SQLite reads only the first `sqlite_sequence` row for
+  a name, so the guard also refuses a rebuilt table left with two (#427).
 - **Rebuild guard says what failed.** `DB_REBUILD_GUARD` names each rule a
   rebuild broke and the object: ``the row count of table `log` changed from 0
   to 1``, ``index `index_posts_on_user_id` has another stored SQL text than

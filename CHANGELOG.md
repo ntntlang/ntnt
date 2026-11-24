@@ -21,9 +21,9 @@
   CHECK constraint plans, and reads that name no column (`count(*) FROM t`)
   and `WITH RECURSIVE` are allowed (#427).
 - `ntnt db` (SQLite): a `sqlite_rebuild` must keep the rebuilt table's
-  AUTOINCREMENT counter, so deleted ids are never reused; the refusal names
-  the table, both values and the `UPDATE sqlite_sequence` line that fixes it
-  (#427).
+  AUTOINCREMENT counter in one `sqlite_sequence` row, so deleted ids are
+  never reused; the refusal names the table and both values (or the number of
+  rows), and gives the `DELETE` and `INSERT` lines that fix it (#427).
 - `ntnt db` (SQLite): `DB_REBUILD_GUARD` names the rule and object a rebuild
   broke (a row count with both values, a missing or changed index, trigger or
   view, a changed table) and lists them in `objects` (#427).

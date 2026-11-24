@@ -1744,11 +1744,13 @@ migrations can call SQLite's built-in functions (JSON, `hex`, `randomblob` and
 window functions included; not `load_extension`, `sqlite_log`, or extension and
 application functions) and use AUTOINCREMENT, `WITH RECURSIVE` and `ANALYZE`;
 `sqlite_sequence` and the `sqlite_stat*` planner statistics are outside coverage
-and drift. A `sqlite_rebuild` must keep an AUTOINCREMENT table's counter (copy it
-with `UPDATE sqlite_sequence SET seq = (SELECT seq FROM sqlite_sequence WHERE
-name='orders') WHERE name='orders_new';` before the DROP), recreate indexes,
-triggers and views with their stored SQL text exactly, and is needed on populated
-targets for any rebuild of a table other tables reference by foreign key;
+and drift. A `sqlite_rebuild` must keep an AUTOINCREMENT table's counter (before
+the DROP, `DELETE FROM sqlite_sequence WHERE name='orders_new'; INSERT INTO
+sqlite_sequence (name, seq) SELECT 'orders_new', seq FROM sqlite_sequence WHERE
+name='orders';`, right whether or not `orders_new` already has a counter row;
+SQLite uses only the first row for a name, so never add a second), recreate
+indexes, triggers and views with their stored SQL text exactly, and is needed on
+populated targets for any rebuild of a table other tables reference by foreign key;
 `DB_REBUILD_GUARD` names the rule and object it broke. SQLite's ADD COLUMN cannot
 add a UNIQUE or PRIMARY KEY column (add the column, then CREATE UNIQUE INDEX) and,
 on a table with rows, accepts only a constant default. INSTEAD OF triggers are
