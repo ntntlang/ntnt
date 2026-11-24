@@ -2728,6 +2728,203 @@ fn leftovers_of_an_unfinished_replay_are_cleaned_only_with_the_marker() {
         .get::<_, bool>(0));
 }
 
+/// A superuser session in `f`'s target database.
+fn target_admin(f: &Fixture) -> Client {
+    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.dbname(&f.target);
+    config.connect(NoTls).unwrap()
+}
+
+/// `f`'s manifest with `[databases.app] extensions = <list>` (#430).
+fn declare_extensions(f: &Fixture, list: &str) {
+    let path = f.root.path().join("ntnt.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("approval_secret = \"DB_APPROVAL\"\n"),
+        "{text}"
+    );
+    let text = text.replacen(
+        "approval_secret = \"DB_APPROVAL\"\n",
+        &format!("approval_secret = \"DB_APPROVAL\"\nextensions = {list}\n"),
+        1,
+    );
+    std::fs::write(path, text).unwrap();
+}
+
+/// Two untrusted extensions of #430, as a superuser installs them in `public`.
+const FDW_AND_STATEMENTS: &str = "CREATE EXTENSION postgres_fdw SCHEMA public; CREATE EXTENSION pg_stat_statements SCHEMA public;";
+
+/// The extensions installed in a database, with their OIDs and schemas.
+fn installed_extensions(c: &mut Client) -> Vec<String> {
+    c.query(
+        "SELECT e.extname||' '||e.oid::text||' '||n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname<>'plpgsql' ORDER BY 1",
+        &[],
+    )
+    .unwrap()
+    .iter()
+    .map(|r| r.get(0))
+    .collect()
+}
+
+/// #430: postgres_fdw and pg_stat_statements, declared and installed in
+/// `public` of both databases by a superuser, survive the recovery of a
+/// replay that never finished. A superuser owns them and wrote their catalog
+/// rows before any replay, so recovery takes them neither for another
+/// role's objects nor for writes the marker must record, and DROP OWNED
+/// keeps them. Scratch is then as it was before the first replay, with
+/// `public`'s privileges and the scratch database's comment, which the
+/// replay changed, restored; the next plan needs no recovery and migrates.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn declared_extensions_survive_the_recovery_of_an_unfinished_replay() {
+    let f = Fixture::new();
+    target_admin(&f).batch_execute(FDW_AND_STATEMENTS).unwrap();
+    let mut scratch = scratch_admin(&f);
+    scratch.batch_execute(FDW_AND_STATEMENTS).unwrap();
+    declare_extensions(&f, r#"["postgres_fdw", "pg_stat_statements"]"#);
+    let public = public_state(&f);
+    let before = scratch_leftovers(&f, &public);
+    let installed = installed_extensions(&mut scratch);
+    assert_eq!(installed.len(), 2, "{installed:?}");
+    f.sql(
+        "0001_t.sql",
+        "CREATE EXTENSION IF NOT EXISTS postgres_fdw; CREATE TABLE app.t (id int PRIMARY KEY); GRANT CREATE ON SCHEMA public TO PUBLIC;
+         DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), 'replayed'); END $$;",
+    );
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    assert!(
+        scratch
+            .query_one(
+                "SELECT to_regnamespace('_ntnt_replay') IS NOT NULL AND to_regclass('app.t') IS NOT NULL",
+                &[],
+            )
+            .unwrap()
+            .get::<_, bool>(0),
+        "the crash left no marker"
+    );
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(installed_extensions(&mut scratch), installed);
+    assert!(scratch
+        .query_one(
+            "SELECT to_regclass('public.pg_stat_statements') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname='postgres_fdw')",
+            &[],
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+    assert_eq!(scratch_leftovers(&f, &public), before);
+    let p = f.plan("plan.json");
+    assert!(p["scratch"]["recovered"].is_null(), "{p}");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "pass", "{v}");
+    assert_eq!(installed_extensions(&mut scratch), installed);
+    assert_eq!(scratch_leftovers(&f, &public), before);
+}
+
+/// #430: USAGE on postgres_fdw's foreign-data wrapper, which a DBA granted
+/// the scratch role directly, is refused by name before anything runs:
+/// cleanup's DROP OWNED would revoke it, and only the superuser who owns the
+/// extension could grant it again. Granted to PUBLIC in scratch instead, as
+/// the diagnostic says, it survives replay, cleanup and recovery.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_dba_grant_on_a_declared_extension_to_the_scratch_role_is_refused_by_name() {
+    let f = Fixture::new();
+    target_admin(&f)
+        .batch_execute(&format!(
+            "{FDW_AND_STATEMENTS} GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO {}",
+            f.target
+        ))
+        .unwrap();
+    let mut scratch = scratch_admin(&f);
+    scratch
+        .batch_execute(&format!(
+            "{FDW_AND_STATEMENTS} GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO {}",
+            f.scratch
+        ))
+        .unwrap();
+    declare_extensions(&f, r#"["postgres_fdw", "pg_stat_statements"]"#);
+    f.sql("0001_t.sql", "CREATE TABLE app.t (id int PRIMARY KEY);");
+    let acl = |c: &mut Client| -> String {
+        c.query_one(
+            "SELECT coalesce(fdwacl::text, '') FROM pg_foreign_data_wrapper WHERE fdwname='postgres_fdw'",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+    };
+    let public_usage = |c: &mut Client| -> bool {
+        c.query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_foreign_data_wrapper w, aclexplode(w.fdwacl) a WHERE w.fdwname='postgres_fdw' AND a.grantee=0 AND a.privilege_type='USAGE')",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+    };
+    let granted = acl(&mut scratch);
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_UNSAFE").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(
+        names(&d["objects"]),
+        ["foreign-data wrapper postgres_fdw"],
+        "{d}"
+    );
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.contains("that the postgres_fdw extension(s) installed")
+            && message.contains("DROP OWNED")
+            && message.contains("cannot grant these back"),
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO PUBLIC"),
+        "{d}"
+    );
+    // Nothing ran: no marker, and the grant is as it was.
+    assert!(!scratch
+        .query_one("SELECT to_regnamespace('_ntnt_replay') IS NOT NULL", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+    assert_eq!(acl(&mut scratch), granted);
+    // As the diagnostic says: PUBLIC holds it in scratch instead.
+    scratch
+        .batch_execute(&format!(
+            "REVOKE USAGE ON FOREIGN DATA WRAPPER postgres_fdw FROM {0}; GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO PUBLIC",
+            f.scratch
+        ))
+        .unwrap();
+    assert!(public_usage(&mut scratch));
+    let held = acl(&mut scratch);
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(acl(&mut scratch), held);
+    // A replay that never finished is recovered, and PUBLIC keeps it.
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(acl(&mut scratch), held);
+}
+
 /// A plan waiting for the replay lock, `pg_advisory_lock(1853124212, 430)`.
 const REPLAY_LOCK_WAITER: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1853124212 AND objid=430 AND objsubid=2 AND NOT granted)";
 
