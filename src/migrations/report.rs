@@ -583,6 +583,7 @@ async fn replay_prefix(
                 .execute_captured(
                     migration,
                     schema,
+                    extra,
                     super::inventory::Limits::default().statement(),
                 )
                 .await?;
@@ -598,18 +599,33 @@ async fn replay_prefix(
         };
         replayed.outside.extend(outside.iter().cloned());
         let keep = index == reference || (plan && index == count);
+        // Two objects sharing a catalog key exist only in the replayed
+        // catalog too: name the migration that made them.
+        let attribute = |mut d: Diagnostic| {
+            if d.code == "DB_CATALOG_AMBIGUOUS" {
+                d.source = migration.map(|m| m.name.clone());
+            }
+            d
+        };
         let (uncovered, catalog, fingerprint) = if keep {
-            let catalog = scratch.catalog(schema, extra, &outside, role).await?;
+            let catalog = scratch
+                .catalog(schema, extra, &outside, role)
+                .await
+                .map_err(attribute)?;
             let fingerprint = plan.then(|| digests.digest(&catalog));
             (catalog.uncovered.clone(), Some(catalog), fingerprint)
         } else if plan {
             let (uncovered, fingerprint) = scratch
                 .fingerprint(schema, extra, &outside, role, &mut digests)
-                .await?;
+                .await
+                .map_err(attribute)?;
             (uncovered, None, Some(fingerprint))
         } else {
             (
-                scratch.coverage(schema, extra, &outside, role).await?,
+                scratch
+                    .coverage(schema, extra, &outside, role)
+                    .await
+                    .map_err(attribute)?,
                 None,
                 None,
             )
@@ -1375,6 +1391,7 @@ mod tests {
                     .execute_captured(
                         migration,
                         "main",
+                        &[],
                         super::super::inventory::Limits::default().statement(),
                     )
                     .await;

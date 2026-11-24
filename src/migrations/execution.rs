@@ -634,6 +634,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 db.execute_captured(
                     migration,
                     &inputs.config.schema,
+                    &inputs.history_schemas,
                     inputs.limits().statement(),
                 )
                 .await?;
@@ -780,7 +781,10 @@ async fn build_concurrent(
     progress["attempt_recorded"] = json!(true);
     progress["phase"] = json!("build");
     let limit = inputs.limits().statement();
-    if let Err(d) = db.build_concurrent_index(migration, schema, limit).await {
+    if let Err(d) = db
+        .build_concurrent_index(migration, schema, &inputs.history_schemas, limit)
+        .await
+    {
         // Delete the attempt only once the index is confirmed absent. A build
         // can succeed and still return an error (e.g. restoring settings
         // failed); a valid or unknown index keeps the attempt for reconcile.

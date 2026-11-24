@@ -180,10 +180,14 @@ impl Adapter {
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.build_concurrent_index(migration, schema, limit).await,
+            Self::Postgres(pg) => {
+                pg.build_concurrent_index(migration, schema, extra, limit)
+                    .await
+            }
             Self::Sqlite(_) => Err(Diagnostic::new(
                 "DB_REPLAY_UNSUPPORTED",
                 "SQLite has no concurrent index builds.",
@@ -286,14 +290,16 @@ impl Adapter {
     }
     /// `limit` bounds the migration on a target: each PostgreSQL statement, or
     /// the whole SQLite script. Scratch replay keeps SQLite's fixed bound.
+    /// `extra` are the schemas the history creates (PostgreSQL only).
     pub async fn execute_captured(
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         match self {
-            Self::Postgres(pg) => pg.execute_captured(migration, schema, limit).await,
+            Self::Postgres(pg) => pg.execute_captured(migration, schema, extra, limit).await,
             Self::Sqlite(db) => db.execute_captured(migration, limit).await,
         }
     }

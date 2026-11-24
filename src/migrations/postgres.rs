@@ -554,10 +554,16 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         // Index expressions coerce values like any DDL; see execute_captured.
-        self.reject_custom_casts().await?;
+        self.reject_custom_casts(&scope(schema, extra))
+            .await
+            .map_err(|mut d| {
+                d.source = Some(migration.name.clone());
+                d
+            })?;
         self.outside_transaction(&migration.sql, schema, limit)
             .await
             .map_err(|mut d| {
@@ -822,19 +828,27 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             .map(|r| r.get(0))
             .collect())
     }
-    /// Reject unsupported live invocation paths before preparing any authored
-    /// check. Names alone and provolatile are not proofs: only builtin base types,
-    /// heap tables, builtin indexes/operators and the closed grammar are admitted.
-    /// Custom implicit/assignment casts are rejected database-wide, conservatively.
-    async fn reject_custom_casts(&self) -> Result<()> {
-        let safe = self
-            .rows("SELECT NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast WHERE oid>=16384 AND castcontext IN ('i','a'))", &[])
-            .await?;
-        if !safe[0].get::<_, bool>(0) {
+    /// Reject custom implicit/assignment casts database-wide before DDL:
+    /// ordinary coercion could run them without appearing in the reviewed
+    /// script. The casts of an extension installed in the managed `scope`
+    /// (citext's, say) are the extension's own code, which its version
+    /// covers like its routines and operators, so they are allowed.
+    async fn reject_custom_casts(&self, scope: &[String]) -> Result<()> {
+        let casts: Vec<String> = self
+            .rows("SELECT 'cast:'||pg_catalog.format_type(c.castsource,NULL)||' AS '||pg_catalog.format_type(c.casttarget,NULL) FROM pg_catalog.pg_cast c
+ WHERE c.oid>=16384 AND c.castcontext IN ('i','a') AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
+ WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=c.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND en.nspname=ANY($1))
+ ORDER BY 1 LIMIT 101", &[&scope])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        if !casts.is_empty() {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
-                "Custom implicit/assignment casts exist in this database; DDL coercions could run unreviewed code.",
-            ));
+                "Custom implicit/assignment casts exist in this database outside the extensions installed in the managed scope; DDL coercions could run unreviewed code. Drop the casts its objects field names, or make them explicit.",
+            )
+            .with_objects(&casts));
         }
         Ok(())
     }
@@ -929,11 +943,13 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// Shared execution primitive: consumes captured bytes only, within a caller-
     /// owned transaction. Replay and authorized migration use exactly this primitive.
     /// `limit` bounds each statement and its deferred checks; the whole script
-    /// gets `SERVER_LIMIT_MARGIN` more on the client.
+    /// gets `SERVER_LIMIT_MARGIN` more on the client. `extra` are the schemas
+    /// the history creates, which belong to the managed scope.
     pub async fn execute_captured(
         &self,
         migration: &Migration,
         schema: &str,
+        extra: &[String],
         limit: Duration,
     ) -> Result<()> {
         // A lone CREATE INDEX CONCURRENTLY replays as the equivalent plain
@@ -989,7 +1005,12 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         // Migration SQL may call application routines; that is reviewed SQL.
         // A custom implicit/assignment cast planted elsewhere could instead run
         // unreviewed code during ordinary DDL coercion, so it still blocks.
-        self.reject_custom_casts().await?;
+        self.reject_custom_casts(&scope(schema, extra))
+            .await
+            .map_err(|mut d| {
+                d.source = Some(migration.name.clone());
+                d
+            })?;
         // pg_catalog is implicitly searched first when omitted, while CREATE
         // uses the first explicit namespace. Never let app objects shadow builtins.
         // Inspection and checks use row_security=off so a policy can never
@@ -1087,6 +1108,7 @@ fn protect_definitions(value: &mut Value) {
                 key.as_str(),
                 "definition"
                     | "default"
+                    | "labels"
                     | "using"
                     | "check"
                     | "comment"
@@ -1145,7 +1167,7 @@ impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
             "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"rollback_only_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"lone_named_create_index_concurrently", "baseline_adoption":"reviewed_prefix_checkpoint"},
-            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "managed_schema_extensions":"version", "custom_types_external_dependencies_non_sql_routines":"unknown"},
+            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "enums_domains_composite_types_operators_exclusion_constraints":"definition_fingerprints", "managed_schema_extensions":"version_covers_members", "range_and_base_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
     async fn catalog(
@@ -1175,12 +1197,14 @@ impl RelationalAdapter for Postgres {
                 if !supported {
                     catalog.uncovered.push(key.clone());
                 }
-                if catalog.objects.insert(key, value).is_some() {
+                if catalog.objects.contains_key(&key) {
                     return Err(Diagnostic::new(
                         "DB_CATALOG_AMBIGUOUS",
-                        "Catalog object keys collided; inspection is incomplete.",
-                    ));
+                        "Two catalog objects share one key; inspection is incomplete.",
+                    )
+                    .with_objects(&[key]));
                 }
+                catalog.objects.insert(key, value);
             }
         }
         if !catalog.objects.contains_key(&format!("schema:{schema}")) {
