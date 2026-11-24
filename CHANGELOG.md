@@ -2,7 +2,20 @@
 
 ## Unreleased
 
-No changes recorded since 0.6.4.
+### Fixed
+
+- `ntnt db` (SQLite): migrations can call SQLite's built-in functions, the JSON
+  functions, `hex` and `randomblob` included; `load_extension`, `sqlite_log`
+  and extension or application functions stay refused, and the refusal says
+  what a migration can use (#427).
+- `ntnt db` (SQLite): AUTOINCREMENT tables plan, migrate and verify; the
+  `sqlite_sequence` counters are outside coverage and drift (#427).
+- `ntnt db` (SQLite): the planner statistics that `ANALYZE` and `PRAGMA
+  optimize` write are outside coverage and drift, and a migration can run
+  `ANALYZE` (#427).
+- `ntnt db` (SQLite): `ALTER TABLE ... ADD COLUMN` on a STRICT table or with a
+  CHECK constraint plans, and reads that name no column (`count(*) FROM t`)
+  and `WITH RECURSIVE` are allowed (#427).
 
 ## 0.6.4
 
