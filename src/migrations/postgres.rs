@@ -28,11 +28,72 @@ async fn bounded_for<T>(
     limit: Duration,
     future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
 ) -> Result<T> {
+    bounded_classified(limit, future, |_| None).await
+}
+/// `bounded_for`, letting `classify` explain a server error it recognizes
+/// from fields that hold no server payload; any other is `driver_error`.
+async fn bounded_classified<T>(
+    limit: Duration,
+    future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
+    classify: impl FnOnce(&tokio_postgres::Error) -> Option<Diagnostic>,
+) -> Result<T> {
     match tokio::time::timeout(limit, future).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(driver_error(&e)),
+        Ok(Err(e)) => Err(classify(&e).unwrap_or_else(|| driver_error(&e))),
         Err(_) => Err(deadline_error()),
     }
+}
+/// What the server says of an extension a migration creates by name
+/// (`analysis::created_extensions`), read before the migration runs.
+struct ExtensionFacts {
+    name: String,
+    /// Only a superuser can create it: it is not trusted.
+    untrusted: bool,
+    installed: bool,
+}
+/// `DB_EXTENSION_PRIVILEGE` when `e` is PostgreSQL refusing to create (or
+/// update) an extension for lack of privilege (#430). The routine that
+/// raised it, unlike the message, is not translated. Names the extensions
+/// `created` names that this explains, from `facts`, never the server's
+/// message.
+fn extension_privilege(
+    e: &tokio_postgres::Error,
+    created: &[(usize, String)],
+    facts: &[ExtensionFacts],
+) -> Option<Diagnostic> {
+    let db = e.as_db_error()?;
+    if db.code().code() != "42501" || db.routine() != Some("execute_extension_script") {
+        return None;
+    }
+    let named = |untrusted: bool| -> Vec<String> {
+        created
+            .iter()
+            .filter(|(_, name)| {
+                facts
+                    .iter()
+                    .any(|f| f.name == *name && f.untrusted == untrusted && !f.installed)
+            })
+            .map(|(number, name)| format!("CREATE EXTENSION {name} (statement {number})"))
+            .collect()
+    };
+    let (untrusted, trusted) = (named(true), named(false));
+    let rule = "A role that is not a superuser, such as the unprivileged roles that own NTNT's target and scratch databases, can create only trusted extensions (pg_trgm, citext, hstore, pgcrypto and uuid-ossp, for example), and only with CREATE privilege on the database; an untrusted extension, such as postgres_fdw, dblink or pg_stat_statements, needs a superuser.";
+    let message = if !untrusted.is_empty() {
+        format!(
+            "{} failed: PostgreSQL refused to create an untrusted extension for a role that is not a superuser (SQLSTATE 42501). {rule}",
+            untrusted.join(", ")
+        )
+    } else if !trusted.is_empty() {
+        format!(
+            "{} failed: PostgreSQL refused to create a trusted extension for a role without CREATE privilege on the database (SQLSTATE 42501). {rule}",
+            trusted.join(", ")
+        )
+    } else {
+        format!("CREATE EXTENSION (or ALTER EXTENSION ... UPDATE) failed for lack of privilege (SQLSTATE 42501), for an extension this migration installs in a DO block or as a requirement of one it creates with CASCADE. {rule}")
+    };
+    let mut d = Diagnostic::new("DB_EXTENSION_PRIVILEGE", &message);
+    d.next_action = "A migration cannot create an untrusted extension: replay runs it as the unprivileged scratch role. Use a trusted extension if one serves, or remove the CREATE EXTENSION from the migration. For a trusted extension, give the role CREATE privilege on the database (an owner has it). See docs/DATABASE_MIGRATIONS.md, Extensions.".into();
+    Some(d)
 }
 /// Expose only SQLSTATE, never server error payloads.
 fn driver_error(e: &tokio_postgres::Error) -> Diagnostic {
@@ -1041,6 +1102,24 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         // A custom implicit/assignment cast planted elsewhere could instead run
         // unreviewed code during ordinary DDL coercion, so it still blocks.
         self.reject_custom_casts().await?;
+        // Creating an extension this role may not create fails with a bare
+        // SQLSTATE 42501. Learn first which of the named ones are trusted,
+        // so that the failure can say why (#430).
+        let created = super::analysis::created_extensions(&migration.sql);
+        let facts = if created.is_empty() {
+            vec![]
+        } else {
+            let names: Vec<&str> = created.iter().map(|(_, name)| name.as_str()).collect();
+            self.rows("SELECT a.name::text, coalesce(v.superuser AND NOT v.trusted, false), a.installed_version IS NOT NULL FROM pg_catalog.pg_available_extensions a LEFT JOIN pg_catalog.pg_available_extension_versions v ON v.name=a.name AND v.version=a.default_version WHERE a.name::text=ANY($1::text[])", &[&names])
+                .await?
+                .iter()
+                .map(|r| ExtensionFacts {
+                    name: r.get(0),
+                    untrusted: r.get(1),
+                    installed: r.get(2),
+                })
+                .collect()
+        };
         // pg_catalog is implicitly searched first when omitted, while CREATE
         // uses the first explicit namespace. Never let app objects shadow builtins.
         // Inspection and checks use row_security=off so a policy can never
@@ -1053,9 +1132,10 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         ))
         .await?;
         // Do not split on semicolons: PostgreSQL receives the captured full script.
-        bounded_for(
+        bounded_classified(
             limit + SERVER_LIMIT_MARGIN,
             self.client.batch_execute(script),
+            |e| extension_privilege(e, &created, &facts),
         )
         .await
         .map_err(|mut d| {

@@ -1335,6 +1335,58 @@ fn checks_on_forced_row_security_tables_are_flagged_and_named() {
     assert_eq!(f.command("verify")["outcome"], "pass");
 }
 
+/// #430 (pg-09): the unprivileged roles NTNT requires can create only
+/// trusted extensions. Creating an untrusted one fails with a diagnostic
+/// that names the statement and the extension and explains trusted and
+/// untrusted extensions, instead of a bare SQLSTATE 42501. One created in a
+/// DO block is still explained, without a name.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn untrusted_extensions_fail_with_a_named_privilege_diagnostic() {
+    let f = Fixture::new();
+    let refusal = |r: &Value| -> Value {
+        assert_eq!(r["outcome"], "unknown", "{r}");
+        r["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["code"] == "DB_EXTENSION_PRIVILEGE")
+            .unwrap_or_else(|| panic!("a named privilege diagnostic: {r}"))
+            .clone()
+    };
+    f.sql(
+        "0001_fdw.sql",
+        "CREATE TABLE app.t (id int PRIMARY KEY);\nCREATE EXTENSION IF NOT EXISTS postgres_fdw SCHEMA app;",
+    );
+    let d = refusal(&f.command("plan"));
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("CREATE EXTENSION postgres_fdw (statement 2) failed: PostgreSQL refused to create an untrusted extension for a role that is not a superuser (SQLSTATE 42501)."),
+        "{d}"
+    );
+    assert!(message.contains("only trusted extensions"), "{d}");
+    assert_eq!(d["source"], "0001_fdw.sql", "{d}");
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("trusted extension"),
+        "{d}"
+    );
+    f.sql(
+        "0001_fdw.sql",
+        "DO $$ BEGIN CREATE EXTENSION postgres_fdw; END $$;",
+    );
+    let d = refusal(&f.command("plan"));
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("CREATE EXTENSION (or ALTER EXTENSION ... UPDATE) failed for lack of privilege (SQLSTATE 42501)"),
+        "{d}"
+    );
+}
+
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
 fn deferred_constraints_settle_at_each_migration_boundary() {
