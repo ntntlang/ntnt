@@ -2391,7 +2391,7 @@ pub(crate) struct CheckOperand {
 pub(crate) struct ComputedOperand {
     /// The operator it is an operand of, as in `CheckOperand`.
     pub operator: &'static str,
-    /// The operand as the check writes it.
+    /// The operand as the check writes it, with `?` for each literal.
     pub expression: String,
     /// What gives it its type: the PostgreSQL name of the operator that
     /// computes it (`+`), `count` for `count(*)` or `bool` for a Boolean
@@ -2510,6 +2510,36 @@ pub(crate) fn check_operand_sets(
             _ => None,
         }
     }
+    /// `e` as the check writes it, with `?` for each literal and `...` for
+    /// what a subquery reads, so that no report shows a value from the
+    /// check (#464 review).
+    fn shape(e: &Expr) -> String {
+        match e {
+            e if literal(e) => "?".into(),
+            Expr::Identifier(i) => i.to_string(),
+            Expr::Nested(e) => format!("({})", shape(e)),
+            Expr::BinaryOp { left, op, right } => {
+                format!("{} {op} {}", shape(left), shape(right))
+            }
+            Expr::UnaryOp {
+                op: UnaryOperator::Not,
+                expr,
+            } => format!("NOT {}", shape(expr)),
+            Expr::UnaryOp { op, expr } => format!("{op}{}", shape(expr)),
+            Expr::IsNull(e) => format!("{} IS NULL", shape(e)),
+            Expr::IsNotNull(e) => format!("{} IS NOT NULL", shape(e)),
+            Expr::Function(_) => "count(*)".into(),
+            Expr::Exists { .. } => "EXISTS (...)".into(),
+            Expr::Subquery(q) => match &*q.body {
+                SetExpr::Select(s) => match s.projection.as_slice() {
+                    [SelectItem::UnnamedExpr(item)] => format!("(SELECT {} ...)", shape(item)),
+                    _ => "(...)".into(),
+                },
+                _ => "(...)".into(),
+            },
+            _ => "?".into(),
+        }
+    }
     /// Whether `e` reads anything: a column, `count(*)` or a subquery.
     fn reads(e: &Expr) -> bool {
         match e {
@@ -2579,7 +2609,7 @@ pub(crate) fn check_operand_sets(
                         {
                             out.1.push(ComputedOperand {
                                 operator,
-                                expression: side.to_string(),
+                                expression: shape(side),
                                 computed_by,
                                 tables: tables.to_vec(),
                             });
@@ -2727,13 +2757,13 @@ mod tests {
             [
                 ComputedOperand {
                     operator: "<",
-                    expression: "n * 2".into(),
+                    expression: "n * ?".into(),
                     computed_by: "*",
                     tables: vec![t("app", "t")],
                 },
                 ComputedOperand {
                     operator: "=",
-                    expression: "id + 1".into(),
+                    expression: "id + ?".into(),
                     computed_by: "+",
                     tables: vec![t("app", "t")],
                 },
@@ -2758,8 +2788,8 @@ mod tests {
         assert_eq!(
             by,
             [
-                ("=", "(SELECT count(*) FROM app.t)", "count"),
-                (">", "(SELECT a * 2 FROM app.u)", "*"),
+                ("=", "(SELECT count(*) ...)", "count"),
+                (">", "(SELECT a * ? ...)", "*"),
             ]
         );
         assert_eq!(

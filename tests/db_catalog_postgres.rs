@@ -2030,7 +2030,7 @@ CREATE OPERATOR app.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = app.int
             "SELECT EXISTS (SELECT 1 FROM app.users WHERE id + 1 = 2)",
             &[
                 "compares column id of app.users (type integer) with =",
-                "compares id + 1 over app.users with =, and pg_catalog's + can give it type integer, which app.=(integer,integer) takes",
+                "compares id + ? over app.users with =, and pg_catalog's + can give it type integer, which app.=(integer,integer) takes",
             ][..],
         ),
         (

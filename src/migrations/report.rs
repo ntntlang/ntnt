@@ -554,11 +554,20 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
             .find_map(|v| v["extension"].as_str());
         match named {
             Some(e) => declared_changed.contains(e).then(|| e.to_owned()),
-            None => [expected.owners.get(k), observed.owners.get(k)]
-                .into_iter()
-                .flatten()
-                .find(|e| declared_changed.contains(e.as_str()))
-                .cloned(),
+            None => {
+                // Owners that disagree between the catalogs keep the
+                // relation on its own (#464 review).
+                let mut owners = [expected.owners.get(k), observed.owners.get(k)]
+                    .into_iter()
+                    .flatten();
+                let owner = owners.next()?;
+                if owners.any(|other| other != owner) {
+                    return None;
+                }
+                declared_changed
+                    .contains(owner.as_str())
+                    .then(|| owner.clone())
+            }
         }
     };
     let mut members: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
@@ -1277,6 +1286,13 @@ mod tests {
             json!({"comment": "stats"}),
             "{r}"
         );
+        // A relation whose owners disagree stays on its own.
+        let mut observed = catalog("extensions", "changed");
+        observed
+            .owners
+            .insert("view:fdw_view".into(), "pg_stat_statements".into());
+        let r = compare(&observed, &catalog("public", "stats"));
+        assert_eq!(r["differences"][0]["members"], json!(null), "{r}");
         // A relation whose owner is not known stays on its own.
         let mut observed = catalog("extensions", "changed");
         observed.owners.clear();

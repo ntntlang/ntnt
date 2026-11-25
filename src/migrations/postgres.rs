@@ -128,9 +128,9 @@ fn row_security_denial(e: &tokio_postgres::Error) -> Option<Diagnostic> {
     }
     let mut d = Diagnostic::new(
         "DB_CHECK_ROW_SECURITY",
-        "PostgreSQL refused a read of this check where row-level security applies to the role that reads, which does not bypass it (SQLSTATE 42501). Checks read with row_security=off so that no policy can silently filter what they see; a view reads as its owner.",
+        "PostgreSQL refused a read of this check where row-level security applies to the role that reads, which does not bypass it (SQLSTATE 42501). Checks read with row_security=off so that no policy can silently filter what they see. A view reads as its owner, unless it has security_invoker, when it reads as the role that reads it.",
     );
-    d.next_action = "As a superuser, give the role that reads the table BYPASSRLS (ALTER ROLE ... BYPASSRLS), then plan, review and approve again; or change the check so that it does not read that table. A failed check rolls back its transaction, so nothing from it was committed; progress shows each migration's state. See docs/DATABASE_MIGRATIONS.md, Checks and row-level security.".into();
+    d.next_action = "As a superuser, give the role that reads the table BYPASSRLS (ALTER ROLE ... BYPASSRLS): the migration role, or the owner of a view without security_invoker that reads it, then plan, review and approve again; or change the check so that it does not read that table. A failed check rolls back its transaction, so nothing from it was committed; progress shows each migration's state. See docs/DATABASE_MIGRATIONS.md, Checks and row-level security.".into();
     Some(d)
 }
 /// Expose only SQLSTATE, never server error payloads.
