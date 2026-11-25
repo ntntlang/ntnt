@@ -3914,9 +3914,10 @@ GRANT SELECT, UPDATE ON pg_catalog.ntnt_test_relay, pg_catalog.ntnt_test_writes 
 /// #460: plans saved before restore-stable values fingerprinted values as
 /// PostgreSQL stores them, and record canonicalization_version 1. Such a plan
 /// for a history whose stored values a restore changes still passes
-/// `verify --against` and migrates. Its fingerprints are the ones ntnt
-/// 91a7b9e (#458) recorded for this history; only the stored form of each
-/// catalog matches them.
+/// `verify --against` and migrates, from a target where part of the history
+/// is applied, so its base and its later states are both in stored form. Its
+/// fingerprints are the ones ntnt 91a7b9e (#458) recorded for this history;
+/// only the stored form of each catalog matches them.
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn plans_fingerprinting_values_as_stored_still_migrate() {
@@ -3925,6 +3926,9 @@ fn plans_fingerprinting_values_as_stored_still_migrate() {
         "0001_checks.sql",
         include_str!("fixtures/db_restore/0001_checks.sql"),
     );
+    let first = f.plan("first.json");
+    let r = f.apply("first.json", first["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
     f.sql(
         "0002_partitions.sql",
         include_str!("fixtures/db_restore/0002_partitions.sql"),
@@ -3962,12 +3966,12 @@ fn plans_fingerprinting_values_as_stored_still_migrate() {
     assert_eq!(plan_digest(&saved["plan"]), saved["plan_digest"]);
     let plan = &mut saved["plan"];
     assert_eq!(plan["binding"]["canonicalization_version"], 2, "{plan}");
+    assert_eq!(plan["binding"]["applied_count"], 1, "{plan}");
     assert_eq!(plan["execution"]["prefix_fingerprints"][0], empty, "{plan}");
-    assert_ne!(
-        plan["execution"]["prefix_fingerprints"][2], stored[2],
-        "{plan}"
-    );
+    assert_ne!(plan["binding"]["base_catalog_digest"], stored[1], "{plan}");
     plan["binding"]["canonicalization_version"] = 1.into();
+    plan["binding"]["base_catalog_digest"] = stored[1].into();
+    plan["binding"]["expected_base_digest"] = stored[1].into();
     plan["execution"]["prefix_fingerprints"] = stored.as_slice().into();
     plan["candidate"]["fingerprint"] = stored[2].into();
     let digest = plan_digest(&saved["plan"]);
