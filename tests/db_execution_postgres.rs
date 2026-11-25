@@ -3596,6 +3596,74 @@ CREATE VIEW app.recent AS SELECT id, msg FROM public.audit_log;",
     }
 }
 
+/// The foreign-key graph can change after the initial inspection. Hold the
+/// migration after its only write and change a dependency on a *different*
+/// table: neither a cascading action nor a timing race is needed to test the
+/// commit guard. The earlier migration must remain committed on refusal.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn recheck_incoming_foreign_keys_before_recording_a_migration() {
+    let mut f = Fixture::new();
+    f.sql(
+        "0001_initial.sql",
+        "CREATE TABLE app.markers (id int PRIMARY KEY);
+         CREATE TABLE public.accounts (id int PRIMARY KEY);
+         INSERT INTO public.accounts VALUES (7);",
+    );
+    migrate_all(&f, "initial.json");
+    let mut observer = f.target();
+    observer
+        .batch_execute(
+            "CREATE TABLE public.notes (account int); INSERT INTO public.notes VALUES (7)",
+        )
+        .unwrap();
+    f.sql(
+        "0002_marker.sql",
+        "INSERT INTO app.markers VALUES (2);
+         SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(447);",
+    );
+    let plan = f.plan("upgrade.json");
+    observer
+        .batch_execute("SELECT pg_advisory_lock(447)")
+        .unwrap();
+    let child = spawn_apply(&f, &plan);
+    let (_, _, query) = lock_waiter(&mut f);
+    assert!(query.contains("pg_advisory_xact_lock(447)"), "{query}");
+    observer
+        .batch_execute("ALTER TABLE public.notes ADD CONSTRAINT account_fk FOREIGN KEY (account) REFERENCES public.accounts(id)")
+        .unwrap();
+    observer
+        .batch_execute("SELECT pg_advisory_unlock(447)")
+        .unwrap();
+
+    let r = result_within(child);
+    assert!(code(&r, "DB_EXTERNAL_DEPENDENCY"), "{r}");
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+    assert_eq!(r["cleanup"], "pass", "{r}");
+    let state = || {
+        let row = f
+            .target()
+            .query_one(
+                "SELECT (SELECT count(*) FROM app.markers), (SELECT account FROM public.notes),
+                    (SELECT count(*) FROM _ntnt.schema_migrations_v2)",
+                &[],
+            )
+            .unwrap();
+        (
+            row.get::<_, i64>(0),
+            row.get::<_, i32>(1),
+            row.get::<_, i64>(2),
+        )
+    };
+    assert_eq!(state(), (0, 7, 1));
+    observer
+        .batch_execute("ALTER TABLE public.notes DROP CONSTRAINT account_fk")
+        .unwrap();
+    let retry = f.apply("upgrade.json", plan["plan_digest"].as_str());
+    assert_eq!(retry["outcome"], "pass", "{retry}");
+    assert_eq!(state(), (1, 7, 2));
+}
+
 /// CodeRabbit 4656058134 on #445: a table the history does not create, with
 /// a foreign key into a table the history creates outside the managed scope,
 /// blocks execution as one into the managed scope does, with the same

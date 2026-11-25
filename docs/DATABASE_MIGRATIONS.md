@@ -377,7 +377,7 @@ For each PostgreSQL migration, the runner:
 
 1. Begins a `READ COMMITTED READ WRITE` transaction with `lock_timeout = 1s`. It does not lock tables up front: each statement takes only the locks PostgreSQL requires for it.
 2. Takes fresh identity/history/catalog observations and validates the exact ordered planned prefix, captured source/policy and mutation-safe ledger.
-3. Locks the tables that the migration's `requires`/`ensures` checks read in `SHARE` mode (writers wait, readers do not), runs `requires`, executes the captured full SQL script within the statement limit (`statement_seconds`, 90 seconds by default), then runs `ensures`.
+3. Locks the tables that the migration's `requires`/`ensures` checks read in `SHARE` mode (writers wait, readers do not), runs `requires`, executes the captured full SQL script within the statement limit (`statement_seconds`, 90 seconds by default), then rechecks incoming foreign keys while the script's write locks are still held. If an untracked table now references a tracked table, the runner rolls back this migration with `DB_EXTERNAL_DEPENDENCY` and writes no ledger entry. Otherwise it runs `ensures`.
 4. Verifies the resulting catalog against that exact prefix fingerprint, records the relation locks the transaction holds in `progress[].locks`, and inserts the success ledger entry in the same transaction.
 5. Commits that migration before starting the next. Failure never rolls back an earlier committed migration.
 

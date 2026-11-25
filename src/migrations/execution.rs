@@ -680,6 +680,15 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                     inputs.limits().statement(),
                 )
                 .await?;
+                // READ COMMITTED now sees foreign keys committed since the
+                // prefix check. PostgreSQL still holds the script's write
+                // locks, which conflict with adding a key to a written table.
+                db.validate_execution_scope(
+                    &inputs.config.schema,
+                    &inputs.history_schemas,
+                    &outside,
+                )
+                .await?;
                 checks(
                     &db,
                     &migration.ensures,
