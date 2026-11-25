@@ -3634,7 +3634,7 @@ fn a_dba_grant_on_a_declared_extension_to_the_scratch_role_is_refused_by_name() 
 }
 
 /// A plan waiting for the replay lock, `pg_advisory_lock(1853124212, 430)`.
-const REPLAY_LOCK_WAITER: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1853124212 AND objid=430 AND objsubid=2 AND NOT granted)";
+const REPLAY_LOCK_WAITER: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1853124212 AND objid=430 AND objsubid=2 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
 
 /// #430: a plan waits for the replay lock before it reads scratch, so two
 /// replays of one scratch never interleave; past `migrator_wait_seconds`
@@ -4300,7 +4300,7 @@ fn a_setting_an_unfinished_replay_left_is_restored_before_the_mismatch() {
 
 /// The #460 history: expressions and partitions' constraints that a dump and
 /// restore stores differently, with controls it leaves as they are.
-const RESTORE_HISTORY: [(&str, &str); 2] = [
+const RESTORE_HISTORY: [(&str, &str); 3] = [
     (
         "0001_checks.sql",
         include_str!("fixtures/db_restore/0001_checks.sql"),
@@ -4309,14 +4309,18 @@ const RESTORE_HISTORY: [(&str, &str); 2] = [
         "0002_partitions.sql",
         include_str!("fixtures/db_restore/0002_partitions.sql"),
     ),
+    (
+        "0003_positional.sql",
+        include_str!("fixtures/db_restore/0003_positional.sql"),
+    ),
 ];
 
 /// `program` (`pg_dump`, `pg_restore`) of PostgreSQL `major`, the fixture
 /// server's (client tools older than the server refuse it), from the image
 /// `NTNT_DB_TEST_PG_IMAGE` (`{major}` replaced; CI's service image by
 /// default), run with docker on the host network as the fixture's
-/// administrator.
-fn pg_tool(major: i32, program: &str, args: &[&str]) -> Command {
+/// administrator, in container `name`.
+fn pg_tool(major: i32, program: &str, name: &str, args: &[&str]) -> Command {
     let image = std::env::var("NTNT_DB_TEST_PG_IMAGE")
         .unwrap_or_else(|_| "mirror.gcr.io/library/postgres:{major}".to_owned())
         .replace("{major}", &major.to_string());
@@ -4329,7 +4333,7 @@ fn pg_tool(major: i32, program: &str, args: &[&str]) -> Command {
         other => panic!("the fixture server must be reached over TCP, not {other:?}"),
     };
     let mut c = Command::new("docker");
-    c.args(["run", "--rm", "-i", "--network", "host"])
+    c.args(["run", "--rm", "-i", "--name", name, "--network", "host"])
         .args([
             "-e",
             "PGHOST",
@@ -4364,6 +4368,91 @@ fn pg_tool(major: i32, program: &str, args: &[&str]) -> Command {
     c
 }
 
+/// The longest one `pg_tool` run may take, pulling its image included.
+const PG_TOOL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// `child`'s exit status, or None once `deadline` passes, when it is killed
+/// and reaped.
+fn reap(
+    child: &mut std::process::Child,
+    deadline: std::time::Instant,
+) -> Option<std::process::ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The standard output of `program` (`pg_tool`) given `input`: standard
+/// input is written, and standard output and error are read, on their own
+/// threads, so a full pipe never blocks another. A run not done within
+/// `PG_TOOL_DEADLINE` is killed with its container, and the test fails with
+/// the program's name and standard error, as when it fails (#464 review).
+fn run_pg_tool(major: i32, program: &str, args: &[&str], input: Vec<u8>) -> Vec<u8> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let name = format!(
+        "ntnt-test-{program}-{}-{}",
+        std::process::id(),
+        RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let deadline = std::time::Instant::now() + PG_TOOL_DEADLINE;
+    let mut child = pg_tool(major, program, &name, args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("{program}: docker did not start: {e}"));
+    let mut stdin = child.stdin.take().unwrap();
+    // Dropped once written, which closes it.
+    std::thread::spawn(move || drop(stdin.write_all(&input)));
+    let read = |mut pipe: Box<dyn Read + Send>| {
+        let (tell, told) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = vec![];
+            let _ = pipe.read_to_end(&mut bytes);
+            let _ = tell.send(bytes);
+        });
+        told
+    };
+    let stdout = read(Box::new(child.stdout.take().unwrap()));
+    let stderr = read(Box::new(child.stderr.take().unwrap()));
+    let status = reap(&mut child, deadline);
+    if status.is_none() {
+        // Killing docker's client leaves its container running.
+        if let Ok(mut rm) = Command::new("docker")
+            .args(["rm", "-f", &name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            reap(
+                &mut rm,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            );
+        }
+    }
+    let rest = |told: std::sync::mpsc::Receiver<Vec<u8>>| {
+        told.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_default()
+    };
+    let (stdout, stderr) = (rest(stdout), rest(stderr));
+    let stderr = String::from_utf8_lossy(&stderr);
+    match status {
+        None => panic!("{program} did not finish within {PG_TOOL_DEADLINE:?}: {stderr}"),
+        Some(status) => assert!(status.success(), "{program} ({status}): {stderr}"),
+    }
+    stdout
+}
+
 /// A database restored with `pg_restore` from a `pg_dump -Fc` of `f`'s
 /// target, owned by its role and declared as target `restored`; dropped
 /// with the test.
@@ -4382,14 +4471,8 @@ impl<'a> Restored<'a> {
             )
             .unwrap()
             .get(0);
-        let dump = pg_tool(major, "pg_dump", &["-Fc", "-d", &f.target])
-            .output()
-            .unwrap();
-        assert!(
-            dump.status.success() && !dump.stdout.is_empty(),
-            "pg_dump: {}",
-            String::from_utf8_lossy(&dump.stderr)
-        );
+        let dump = run_pg_tool(major, "pg_dump", &["-Fc", "-d", &f.target], vec![]);
+        assert!(!dump.is_empty(), "pg_dump wrote no archive");
         let name = format!("{}_restored", f.target);
         admin
             .batch_execute(&format!(
@@ -4404,22 +4487,11 @@ impl<'a> Restored<'a> {
                 .replace(&format!("dbname={}", f.target), &format!("dbname={name}")),
             name,
         };
-        let mut restore = pg_tool(
+        run_pg_tool(
             major,
             "pg_restore",
             &["--exit-on-error", "-d", &restored.name],
-        )
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-        std::io::Write::write_all(&mut restore.stdin.take().unwrap(), &dump.stdout).unwrap();
-        let output = restore.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "pg_restore: {}",
-            String::from_utf8_lossy(&output.stderr)
+            dump,
         );
         let manifest = f.root.path().join("ntnt.toml");
         let text = std::fs::read_to_string(&manifest).unwrap();
@@ -4484,18 +4556,30 @@ fn a_database_restored_with_pg_dump_and_pg_restore_verifies() {
     // The restore did store them differently, as #460 found.
     const STORED: &str = "SELECT conname, pg_get_constraintdef(oid)||' '||connoinherit FROM pg_constraint \
         WHERE conname IN ('checks_executable_timeout','checks_not_between_or','observations_default_pkey','observations_2026_tenant_id_probe_run_id_observed_on_key') ORDER BY conname";
-    let rows = |mut client: Client| -> Vec<(String, String)> {
+    let rows = |mut client: Client, query: &str| -> Vec<(String, String)> {
         client
-            .query(STORED, &[])
+            .query(query, &[])
             .unwrap()
             .iter()
             .map(|r| (r.get(0), r.get(1)))
             .collect()
     };
-    let (before, after) = (rows(f.target()), rows(restored.client()));
+    let (before, after) = (rows(f.target(), STORED), rows(restored.client(), STORED));
     assert_eq!(before.len(), 4, "{before:?}");
     for (before, after) in before.iter().zip(&after) {
         assert_ne!(before, after);
+    }
+    // #464 review: so does it SQL-standard bodies that name an argument by
+    // its position.
+    const BODIES: &str = "SELECT proname::text, pg_get_functiondef(oid) FROM pg_proc \
+        WHERE proname IN ('in_range_positional','in_range_atomic') ORDER BY proname";
+    let (before, after) = (rows(f.target(), BODIES), rows(restored.client(), BODIES));
+    assert_eq!(before.len(), 2, "{before:?}");
+    for (before, after) in before.iter().zip(&after) {
+        assert!(
+            before.1.contains("$1") && before.1 != after.1,
+            "{before:?} {after:?}"
+        );
     }
     for command in ["status", "verify", "plan"] {
         let r = restored.command(command);
