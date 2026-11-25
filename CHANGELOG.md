@@ -9,6 +9,8 @@
 - `ntnt db` (PostgreSQL): recheck incoming foreign keys after the migration SQL
   runs. A newly visible key from an untracked table rolls back the migration
   instead of letting it commit changes outside the approved scope (#447).
+- `ntnt db` (PostgreSQL): reduce repeated catalog work when planning long
+  histories with similar tables, without changing plan digests (#421).
 
 ## 0.6.5
 

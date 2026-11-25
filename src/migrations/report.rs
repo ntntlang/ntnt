@@ -749,6 +749,12 @@ async fn replay_prefix(
                 .map_err(attribute)?;
             let fingerprint = plan.then(|| digests.digest(&catalog));
             (catalog.uncovered.clone(), Some(catalog), fingerprint)
+        } else if let Adapter::Postgres(pg) = scratch {
+            let (uncovered, fingerprint) = pg
+                .replay_catalog_state(schema, extra, &outside, role, plan.then_some(&mut digests))
+                .await
+                .map_err(attribute)?;
+            (uncovered, None, fingerprint)
         } else if plan {
             let (uncovered, fingerprint) = scratch
                 .fingerprint(schema, extra, &outside, role, &mut digests)
