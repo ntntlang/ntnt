@@ -630,6 +630,7 @@ Before anything runs, the script is tokenized (quoted and dollar-quoted text sta
 - session identity: `SET [LOCAL|SESSION] ROLE`, `SET SESSION AUTHORIZATION`, `SET session_replication_role`, `RESET ROLE|SESSION|ALL`, `DISCARD`;
 - non-transactional work: `VACUUM`, `CONCURRENTLY` operations (except the single-statement index migration described below), `REINDEX DATABASE|SYSTEM`;
 - server scope: `COPY`, `LOAD`, `CHECKPOINT`, `ALTER SYSTEM`, and creating/altering/dropping databases, tablespaces and roles;
+- user mappings: `CREATE`, `ALTER` and `DROP USER MAPPING` (`USER_MAPPING`), which hold a role's credentials for a foreign server; see [Foreign servers and user mappings](#extensions-a-superuser-installs);
 - explicit `CASCADE` drops, whose transitive effects are not bounded. `ON DELETE CASCADE` and `ON UPDATE CASCADE` foreign-key actions are allowed.
 
 Text inside `DO` and function bodies (quoted, or a SQL-standard `BEGIN ATOMIC ... END` body) is not inspected; it runs inside the same transaction with the migration role's privileges. Keep role creation out of migrations and provision roles separately. Database-wide custom implicit/assignment casts still block execution, because ordinary DDL coercion could run them without appearing in the reviewed script. Casts that belong to an extension installed in the managed scope, such as citext's, are the extension's own code, which its version covers, and do not block. Any other is refused before the next migration runs with `DB_CHECK_UNSUPPORTED`, whose `objects` field names each cast (`cast:app.mood AS text`) and whose `source` names that migration: drop the cast, or create it `AS EXPLICIT`.
@@ -706,7 +707,14 @@ CREATE EXTENSION pg_stat_statements SCHEMA public;
   managed scope are not inspected. When `public` is the managed schema, its
   members there are covered by its version, the relations it installs included,
   and they are not taken for an unrecognized history on a target without a
-  ledger.
+  ledger. When a declared extension itself differs (a superuser moved it to another
+  schema with `ALTER EXTENSION ... SET SCHEMA`, say), drift lists it once, as
+  `extension:<name>`, with the differences of its members, which moved with it,
+  under that entry's `members` rather than each on its own.
+- An extension in scratch that `extensions` does not declare is refused with
+  `DB_SCRATCH_NOT_EMPTY` naming it (`extension:hstore`); declare it (and install it
+  on the target too, at the same version and in the same schema) or have a
+  superuser drop it from the scratch database.
 - Scratch must hold each declared extension. One that is missing, or installed in
   `_ntnt`, a system schema or a managed schema other than `public`, is refused with
   `DB_SCRATCH_MISMATCH` naming it. Scratch's `public` and the declared extensions'
@@ -727,6 +735,23 @@ CREATE EXTENSION pg_stat_statements SCHEMA public;
   (`GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO PUBLIC`), which
   `DROP OWNED` keeps. Privileges on what declared extensions install are not
   compared, so the target's migration role keeps its own grant.
+- **Foreign servers and user mappings.** With a declared foreign-data wrapper's
+  extension (postgres_fdw), a migration may create a server
+  (`CREATE SERVER app_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (...)`); the
+  target role needs `USAGE` on the wrapper, and in scratch `PUBLIC` does. Servers are
+  database-wide. One the history creates is covered as `server:<name>`, by its
+  wrapper, type, version, owner, privileges, comment and options; options can hold
+  host names, so reports show only their digest. An out-of-band change to any of
+  these on the target (`ALTER SERVER ... OPTIONS`, `OWNER TO`) is drift on that
+  object. A server no migration creates (a DBA's) is uncovered by name, and so is a
+  foreign-data wrapper no extension installed (`other:foreign_data_wrapper.<name>`);
+  foreign tables are uncovered as relations. Scratch must hold no server before
+  replay. `CREATE`, `ALTER` and `DROP USER MAPPING` are refused in migrations with
+  `DB_REPLAY_UNSUPPORTED` (`USER_MAPPING` in `analysis.unknowns`): a user mapping
+  holds the credentials a role uses on the server and belongs to that role. Create
+  it outside the history, as a DBA step on the target (and in the scratch database
+  if replay needs it), with the credentials kept in the secrets provider. NTNT does
+  not inspect user mappings, so one created that way is neither drift nor uncovered.
 - A declared extension's casts do not block DDL, as an in-scope extension's do
   not.
 - The key is part of the plan's policy, so adding or changing it needs a new plan.

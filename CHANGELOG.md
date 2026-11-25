@@ -142,6 +142,20 @@
   install is refused by name (`DB_SCRATCH_UNSAFE`), since cleanup would revoke
   it, and the diagnostic says to grant it to `PUBLIC` in scratch instead.
   Manifests without the key keep their plan digests (#430).
+- `ntnt db` (PostgreSQL): a foreign server a migration creates is covered as
+  `server:<name>` (wrapper, owner, privileges and options, redacted to a
+  digest), so an out-of-band `ALTER SERVER ... OPTIONS` or `OWNER TO` on the
+  target is drift; a server no migration creates, and a foreign-data wrapper no
+  extension installed, are uncovered by name instead of ignored. Histories
+  without servers keep their digests (#430).
+- `ntnt db` (PostgreSQL): `CREATE`, `ALTER` and `DROP USER MAPPING` are refused
+  with their own reason (`USER_MAPPING`: credentials bound to a role) and a
+  next action (a DBA step outside the history, credentials in the secrets
+  provider) instead of as role DDL; user mappings are not inspected (#430).
+- `ntnt db` (PostgreSQL): an undeclared extension in scratch is named in
+  `DB_SCRATCH_NOT_EMPTY` (`extension:hstore`) with what to do, and a declared
+  extension moved to another schema is one drift entry, its members listed
+  under it (#430).
 
 ### Changed
 
