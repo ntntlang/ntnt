@@ -2650,6 +2650,53 @@ fn crash_during_replay(f: &Fixture) {
         .unwrap();
 }
 
+/// #430: a migration that sets the scratch database's connection limit to 0
+/// is refused before it commits. Cleanup would restore the limit, but a
+/// replay stopped before cleanup would leave the scratch role unable to
+/// connect, so no later plan could recover scratch. Another limit commits and
+/// is restored by cleanup, as before.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_migration_that_closes_scratch_to_connections_is_refused_before_it_commits() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    let limit = |f: &Fixture| -> i32 {
+        scratch_admin(f)
+            .query_one(
+                "SELECT datconnlimit FROM pg_database WHERE datname=current_database()",
+                &[],
+            )
+            .unwrap()
+            .get(0)
+    };
+    f.sql(
+        "0001_limit.sql",
+        "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT 0', current_database()); END $$;",
+    );
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["source"], "0001_limit.sql", "{d}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("connection limit to 0"),
+        "{d}"
+    );
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(limit(&f), -1);
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    f.sql(
+        "0001_limit.sql",
+        "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT 5', current_database()); END $$;",
+    );
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(limit(&f), -1);
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
 /// #430: a replay that never cleaned up (its process died between
 /// migrations) leaves committed migrations and NTNT's marker in scratch.
 /// The next plan cleans them up, passes and says so. A scratch with the
