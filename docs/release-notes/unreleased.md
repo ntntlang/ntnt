@@ -188,6 +188,30 @@
   Capabilities feed no digest: plans saved by earlier 0.6.x builds stay valid,
   and accepted histories keep their plan digests and fingerprints.
 
+- **Restored databases verify.** A database restored with `pg_dump` and
+  `pg_restore` behaves like the one it was dumped from but stores some values
+  differently, and `status`, `verify` and `plan` reported them as `DB_DRIFT`
+  until each was repaired by hand. `BETWEEN`, `NOT BETWEEN`, `IN` lists of
+  columns and row comparisons nest an `AND` or `OR` inside another, and a
+  restore merges one that comes first into the enclosing one: in CHECK
+  constraints (of tables and domains), `EXCLUDE` and index predicates, index
+  expressions, policies, column defaults and generated expressions, domain
+  defaults, views, triggers' `WHEN`, partition keys and SQL-standard routine
+  bodies. And partitions' PRIMARY KEY and UNIQUE constraints come back with
+  `connoinherit` set, which does nothing for them. Inspection now compares
+  both as a restore leaves them; a real change, such as another CHECK bound, is
+  still drift. See
+  [Restored databases](../DATABASE_MIGRATIONS.md#restored-databases) (#460).
+  - **Saved plans.** A plan for a history with such values now records
+    `canonicalization_version: 2`, and its fingerprints and `plan_digest`
+    differ from those an earlier version computed: a plan made after the
+    upgrade needs approving. A plan an earlier version saved still passes
+    `--against` and migrates, because saved fingerprints are matched in both
+    forms. Every other history keeps `canonicalization_version: 1`, its
+    fingerprints and its plan digest. The ledger records no fingerprint, so
+    applied history is unaffected. `capabilities.canonicalization_version` is
+    now 2.
+
 Catalogs that use none of these keep their fingerprints, so saved plans and
 applied history stay valid.
 

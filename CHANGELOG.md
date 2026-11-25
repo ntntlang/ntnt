@@ -8,6 +8,17 @@
 
 ### Fixed
 
+- `ntnt db` (PostgreSQL): a database restored with `pg_dump` and `pg_restore`
+  verifies. The restore re-associates `AND` and `OR` expressions that
+  `BETWEEN`, `NOT BETWEEN`, `IN` lists and row comparisons nest (in CHECK
+  constraints, `EXCLUDE` and index predicates, index expressions, policies,
+  defaults, generated columns, views, triggers' `WHEN`, domains, partition keys
+  and SQL-standard routine bodies), and sets `connoinherit` on partitions'
+  PRIMARY KEY and UNIQUE constraints; inspection compares both as a restore
+  leaves them, so neither is `DB_DRIFT`. Plans for histories with such values
+  record `canonicalization_version` 2 and new fingerprints, so a new plan
+  needs approving; other histories keep their fingerprints and plan digests,
+  and plans saved by earlier versions still migrate (#460).
 - `ntnt db` (PostgreSQL): enums, domains and composite types plan, migrate and
   verify, in the managed schema and in schemas the history creates; a change
   to one outside a migration is drift (#430).
