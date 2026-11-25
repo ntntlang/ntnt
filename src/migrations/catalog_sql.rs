@@ -248,6 +248,12 @@ SELECT t.typname::text,jsonb_build_object('kind',t.typtype,'owner',CASE WHEN ext
    WHERE ((dep.classid='pg_catalog.pg_type'::regclass AND dep.objid=t.oid) OR (dep.classid='pg_catalog.pg_constraint'::regclass AND dep.objid IN (SELECT k.oid FROM pg_catalog.pg_constraint k WHERE k.contypid=t.oid)))
    AND dep.refclassid='pg_catalog.pg_proc'::regclass AND pn.nspname<>'pg_catalog' AND pn.nspname<>ALL($2)
    AND (cardinality($3::text[])=0 OR quote_ident(pn.nspname)||'.routine:'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')'<>ALL($3)))
+  -- And the operators they use: pg_depend names an operator, not its function,
+  -- as for an exclusion constraint's operators (#458 review).
+  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend dep JOIN pg_catalog.pg_operator o ON o.oid=dep.refobjid JOIN pg_catalog.pg_namespace opn ON opn.oid=o.oprnamespace
+   WHERE ((dep.classid='pg_catalog.pg_type'::regclass AND dep.objid=t.oid) OR (dep.classid='pg_catalog.pg_constraint'::regclass AND dep.objid IN (SELECT k.oid FROM pg_catalog.pg_constraint k WHERE k.contypid=t.oid)))
+   AND dep.refclassid='pg_catalog.pg_operator'::regclass AND opn.nspname<>'pg_catalog' AND opn.nspname<>ALL($2)
+   AND (cardinality($3::text[])=0 OR quote_ident(opn.nspname)||'.other:operator.'||o.oprname||'('||CASE WHEN o.oprleft=0 THEN 'NONE' ELSE format_type(o.oprleft,NULL) END||','||CASE WHEN o.oprright=0 THEN 'NONE' ELSE format_type(o.oprright,NULL) END||')'<>ALL($3)))
  ELSE false END,
  CASE WHEN n.nspname<>$1 THEN quote_ident(n.nspname) END
 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace

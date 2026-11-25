@@ -51,6 +51,20 @@ pub(super) enum CheckHazard {
         base_type: String,
         operator: String,
     },
+    /// The check compares `expression`, which it computes from what it
+    /// reads (`analysis::ComputedOperand`), with `operator_name`;
+    /// `computed_by` can give it `result_type`, which `operator`, outside
+    /// pg_catalog, takes (#457 review). `relation` (catalog key `key`) is
+    /// the table of its query level, empty without one.
+    Computed {
+        key: String,
+        relation: String,
+        expression: String,
+        operator_name: &'static str,
+        computed_by: &'static str,
+        result_type: String,
+        operator: String,
+    },
     /// The check reads `view` (catalog key `key`), directly or through other
     /// views, and it calls `function`, a builtin that writes or takes locks.
     ViewWrites {
@@ -63,12 +77,14 @@ pub(super) enum CheckHazard {
 impl CheckHazard {
     fn key(&self) -> &str {
         match self {
-            Self::Operator { key, .. } | Self::ViewWrites { key, .. } => key,
+            Self::Operator { key, .. }
+            | Self::Computed { key, .. }
+            | Self::ViewWrites { key, .. } => key,
         }
     }
     fn relation(&self) -> &str {
         match self {
-            Self::Operator { relation, .. } => relation,
+            Self::Operator { relation, .. } | Self::Computed { relation, .. } => relation,
             Self::ViewWrites { view, .. } => view,
         }
     }
@@ -91,6 +107,27 @@ impl CheckHazard {
                 };
                 format!("compares column {column} of {relation} ({typ}) with {operator_name}. The application's {operator_name} there is {operator}, but checks resolve operators with search_path=pg_catalog, where it is not visible, so the check would compare with another operator (citext, for example, would compare as case-sensitive text) or fail")
             }
+            Self::Computed {
+                relation,
+                expression,
+                operator_name,
+                computed_by,
+                result_type,
+                operator,
+                ..
+            } => {
+                let by = match *computed_by {
+                    "count" => "count(*)".to_owned(),
+                    "bool" => "a Boolean expression".to_owned(),
+                    op => format!("pg_catalog's {op}"),
+                };
+                let over = if relation.is_empty() {
+                    String::new()
+                } else {
+                    format!(" over {relation}")
+                };
+                format!("compares {expression}{over} with {operator_name}, and {by} can give it type {result_type}, which {operator} takes. The application's {operator_name} there may be {operator}, but checks resolve operators with search_path=pg_catalog, where it is not visible, so the check would compare with another operator or fail")
+            }
             Self::ViewWrites { view, function, .. } => format!(
                 "reads view {view}, which calls {function}, a builtin that writes or takes locks; checks must not change anything"
             ),
@@ -100,6 +137,7 @@ impl CheckHazard {
     fn remedy(&self) -> &'static str {
         match self {
             Self::Operator { .. } => "Do the comparison in a view that a migration creates (a view keeps the operator chosen when it is created) and check the view, for example SELECT NOT EXISTS (SELECT 1 FROM app.admin_accounts); or use count(*) or IS NULL forms, which compare no value.",
+            Self::Computed { .. } => "Do the computation and the comparison in a view that a migration creates (a view keeps the operators chosen when it is created) and check the view, for example SELECT NOT EXISTS (SELECT 1 FROM app.admin_accounts).",
             Self::ViewWrites { .. } => "Read the view's underlying tables in the check instead.",
         }
     }
@@ -131,7 +169,11 @@ fn check_label(name: &str, phase: &str) -> String {
 /// `DB_CHECK_UNSUPPORTED`: check `name` of `phase` has `hazards` (#456), so
 /// it is refused before any check of its phase runs.
 pub(super) fn check_hazard_refusal(name: &str, phase: &str, hazards: &[CheckHazard]) -> Diagnostic {
-    let mut objects: Vec<String> = hazards.iter().map(|h| h.key().to_owned()).collect();
+    let mut objects: Vec<String> = hazards
+        .iter()
+        .map(|h| h.key().to_owned())
+        .filter(|key| !key.is_empty())
+        .collect();
     objects.sort();
     objects.dedup();
     let what: Vec<String> = hazards.iter().map(CheckHazard::describe).collect();
@@ -229,7 +271,9 @@ pub(super) fn check_warning(
     let (code, relation, message) = match finding {
         CheckFinding::Hazard(hazard) => (
             match hazard {
-                CheckHazard::Operator { .. } => "CHECK_OPERATOR_MISMATCH",
+                CheckHazard::Operator { .. } | CheckHazard::Computed { .. } => {
+                    "CHECK_OPERATOR_MISMATCH"
+                }
                 CheckHazard::ViewWrites { .. } => "CHECK_VIEW_WRITES",
             },
             hazard.relation(),

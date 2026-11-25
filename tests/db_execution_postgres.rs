@@ -1472,6 +1472,84 @@ fn a_check_with_several_hazards_gets_each_warning_and_is_refused() {
 }
 
 /// #430: a superuser session in the fixture database `db`.
+/// #457 review: only PostgreSQL's own row-security refusal is explained as
+/// one. A check reads a view that names a FORCE ROW LEVEL SECURITY table
+/// as a `regclass` constant, without reading it, and a table the migration
+/// role may lock (UPDATE) but not read (SELECT revoked): its SQLSTATE 42501
+/// is a missing privilege, reported as the server's.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn checks_keep_other_permission_failures_apart_from_row_security() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_tables.sql",
+        "CREATE TABLE app.secret (id BIGINT PRIMARY KEY);
+         ALTER TABLE app.secret ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE app.secret FORCE ROW LEVEL SECURITY;
+         CREATE VIEW app.names AS SELECT 'app.secret'::regclass AS r;
+         CREATE TABLE app.hidden (id BIGINT PRIMARY KEY);
+         REVOKE SELECT ON app.hidden FROM CURRENT_USER;
+         CREATE VIEW app.reader AS SELECT n.r, h.id FROM app.names n, app.hidden h;",
+    );
+    f.sql(
+        "0002_more.sql",
+        "CREATE TABLE app.more (id BIGINT PRIMARY KEY);",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_more.toml"),
+        "[requires]\nreader_empty = \"SELECT NOT EXISTS (SELECT 1 FROM app.reader)\"\n",
+    )
+    .unwrap();
+    let p = f.plan("plan.json");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "fail", "{r}");
+    let codes: Vec<&str> = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["code"].as_str().unwrap())
+        .collect();
+    assert!(!codes.contains(&"DB_CHECK_ROW_SECURITY"), "{r}");
+    let d = diagnostic(&r, "DB_POSTGRES");
+    assert!(
+        d["message"].as_str().unwrap().contains("(SQLSTATE 42501)"),
+        "{d}"
+    );
+    assert_eq!(r["progress"][1]["state"], "failed", "{r}");
+}
+
+/// #458 review: a domain whose constraint uses an operator outside the
+/// managed scope that inspection does not compare, here pg_trgm's `%` in
+/// `public` (a declared extension), is uncovered, as one whose constraint
+/// calls such a routine is: pg_depend names the operator, not its function.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn domains_using_uninspected_operators_are_uncovered() {
+    let f = Fixture::new();
+    for db in [&f.target, &f.scratch] {
+        superuser_in(db)
+            .batch_execute("CREATE EXTENSION pg_trgm SCHEMA public")
+            .unwrap();
+    }
+    declare_extensions(&f, Some("[\"pg_trgm\"]"));
+    f.sql(
+        "0001_words.sql",
+        "CREATE DOMAIN app.word AS text CHECK (VALUE OPERATOR(public.%) 'word' OR VALUE <> '');
+         CREATE TABLE app.words (w app.word);",
+    );
+    let r = f.command_args("plan", &["--out", "plan.json"]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_COVERAGE_INCOMPLETE");
+    assert!(
+        d["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o == "type:word"),
+        "{d}"
+    );
+}
+
 fn superuser_in(db: &str) -> postgres::Client {
     let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
         .unwrap()

@@ -115,6 +115,24 @@ fn extension_privilege(
     d.next_action = "A migration cannot create an untrusted extension: replay runs it as the unprivileged scratch role. Use a trusted extension if one serves, or remove the CREATE EXTENSION from the migration. For a trusted extension, give the role CREATE privilege on the database (an owner has it). See docs/DATABASE_MIGRATIONS.md, Extensions.".into();
     Some(d)
 }
+/// `DB_CHECK_ROW_SECURITY` when `e` is PostgreSQL refusing a check's read
+/// because row-level security applies and checks read with
+/// row_security=off: SQLSTATE 42501 raised by `check_enable_rls`. Another
+/// permission failure (a missing SELECT privilege, say) has the same
+/// SQLSTATE and stays `driver_error` (#457 review). The routine, unlike
+/// the message, is not translated.
+fn row_security_denial(e: &tokio_postgres::Error) -> Option<Diagnostic> {
+    let db = e.as_db_error()?;
+    if db.code().code() != "42501" || db.routine() != Some("check_enable_rls") {
+        return None;
+    }
+    let mut d = Diagnostic::new(
+        "DB_CHECK_ROW_SECURITY",
+        "PostgreSQL refused a read of this check where row-level security applies to the role that reads, which does not bypass it (SQLSTATE 42501). Checks read with row_security=off so that no policy can silently filter what they see; a view reads as its owner.",
+    );
+    d.next_action = "As a superuser, give the role that reads the table BYPASSRLS (ALTER ROLE ... BYPASSRLS), then plan, review and approve again; or change the check so that it does not read that table. A failed check rolls back its transaction, so nothing from it was committed; progress shows each migration's state. See docs/DATABASE_MIGRATIONS.md, Checks and row-level security.".into();
+    Some(d)
+}
 /// Expose only SQLSTATE, never server error payloads.
 fn driver_error(e: &tokio_postgres::Error) -> Diagnostic {
     match e.code().map(|c| c.code()) {
@@ -429,6 +447,29 @@ WHERE okn.nspname<>'pg_catalog'
   AND (ch.typ IN (o.oprleft, o.oprright)
     OR (tn.nspname<>'pg_catalog' AND ((lt.typtype='p' AND lt.typname LIKE 'any%') OR (rt.typtype='p' AND rt.typname LIKE 'any%'))))
 ORDER BY rc.oid, (o.oprleft=ch.typ AND o.oprright=ch.typ) DESC, ch.typ IN (o.oprleft, o.oprright) DESC, o.oid"#;
+
+/// What an operand a check computes (`analysis::ComputedOperand`: $1 the
+/// operator it meets, $2 what computes it, $3/$4 the tables of its query
+/// level, innermost first, $5 the managed schema) may meet outside
+/// pg_catalog (#457 review). Its type is one that a pg_catalog operator
+/// named $2 returns (bigint for count(*), boolean for a Boolean
+/// expression), so a binary operator named $1 in another schema that takes
+/// such a type, as either operand, is one the application may use. One row
+/// at most: the innermost table's catalog key and name (empty without one),
+/// that type and the operator.
+const CHECK_COMPUTED_HAZARDS: &str = r#"WITH results(typ) AS (
+  SELECT p.oprresult FROM pg_catalog.pg_operator p JOIN pg_catalog.pg_namespace pn ON pn.oid=p.oprnamespace WHERE pn.nspname='pg_catalog' AND p.oprname=$2
+  UNION SELECT 'pg_catalog.int8'::pg_catalog.regtype::pg_catalog.oid WHERE $2::text='count'
+  UNION SELECT 'pg_catalog.bool'::pg_catalog.regtype::pg_catalog.oid WHERE $2::text='bool'),
+named AS (SELECT n.nspname, c.relname FROM ROWS FROM (pg_catalog.unnest($3::text[]), pg_catalog.unnest($4::text[])) WITH ORDINALITY s(nsp, rel, ord)
+  JOIN pg_catalog.pg_namespace n ON n.nspname=s.nsp JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=s.rel ORDER BY s.ord LIMIT 1)
+SELECT coalesce((SELECT CASE WHEN nspname=$5 THEN '' ELSE pg_catalog.quote_ident(nspname)||'.' END||'relation:'||relname FROM named), ''),
+  coalesce((SELECT pg_catalog.quote_ident(nspname)||'.'||pg_catalog.quote_ident(relname) FROM named), ''),
+  pg_catalog.format_type(r.typ, NULL), o.oid::pg_catalog.regoperator::text
+FROM results r JOIN pg_catalog.pg_operator o ON o.oprname=$1 AND o.oprkind='b' AND r.typ IN (o.oprleft, o.oprright)
+JOIN pg_catalog.pg_namespace okn ON okn.oid=o.oprnamespace
+WHERE okn.nspname<>'pg_catalog'
+ORDER BY o.oid LIMIT 1"#;
 
 /// Views a check reads ($1/$2, the tables it names), directly or through
 /// other views, whose stored query calls a builtin that writes or takes
@@ -1340,7 +1381,8 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// any schema. Objects no check can reach leave checks alone. `extra` and
     /// `outside` scope the coverage check, as in every inspection.
     ///
-    /// A column's type may also be one in the managed scope, which the
+    /// A column's type may also be one in the managed scope, or one the
+    /// history created outside it (`outside`), which the
     /// coverage check has just found covered: an enum, a domain or composite
     /// type over covered types, or an extension's type. Reading or comparing
     /// such a value runs builtin code or the extension's own (covered by its
@@ -1383,7 +1425,13 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
           SELECT NOT EXISTS (
           SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
           WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind='r'
-          AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace WHERE t.oid=a.atttypid AND tn.nspname<>'pg_catalog' AND tn.nspname<>ALL($2)))
+          AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace WHERE t.oid=a.atttypid AND tn.nspname<>'pg_catalog' AND tn.nspname<>ALL($2)
+            -- A type the history created outside the scope, which inspection
+            -- covers by its key ($4): an array by its element type's, a
+            -- composite type by its relation's (#457 review).
+            AND coalesce((SELECT pg_catalog.quote_ident(rn.nspname)||CASE WHEN rt.typrelid<>0 THEN '.relation:'||rc.relname ELSE '.type:'||rt.typname END
+              FROM pg_catalog.pg_type rt JOIN pg_catalog.pg_namespace rn ON rn.oid=rt.typnamespace LEFT JOIN pg_catalog.pg_class rc ON rc.oid=rt.typrelid
+              WHERE rt.oid=CASE WHEN t.typelem<>0 AND t.typlen=-1 THEN t.typelem ELSE t.oid END),'')<>ALL($4::text[])))
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast k WHERE k.oid>=16384 AND k.castcontext IN ('i','a') AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
             WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND (en.nspname=ANY($2) OR e.extname=ANY($3::text[]))))
           -- A composite type (relkind c) holds no rows to read.
@@ -1394,7 +1442,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class v
             JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid
             JOIN pg_catalog.pg_proc p ON d.refclassid='pg_catalog.pg_proc'::regclass AND p.oid=d.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
-            WHERE v.oid IN (SELECT rel FROM reach) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema, &scope(schema, extra), &self.extensions]).await?;
+            WHERE v.oid IN (SELECT rel FROM reach) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema, &scope(schema, extra), &self.extensions, &outside]).await?;
         if !safe[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
@@ -1451,7 +1499,8 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
                 .unzip();
         let mut found = vec![];
         let mut seen = vec![];
-        for operand in super::analysis::check_operands(sql, schema) {
+        let (operands, computed) = super::analysis::check_operand_sets(sql, schema);
+        for operand in operands {
             // `users = users` names one operand twice.
             let operand_key = (
                 operand.column.clone(),
@@ -1487,6 +1536,34 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
                     column_type: row.get(2),
                     base_type: row.get(3),
                     operator: row.get(4),
+                });
+            }
+        }
+        // What a check computes has no column's type (#457 review).
+        for computed in computed {
+            let (named_schemas, named): (Vec<String>, Vec<String>) =
+                computed.tables.iter().cloned().unzip();
+            for row in self
+                .rows(
+                    CHECK_COMPUTED_HAZARDS,
+                    &[
+                        &computed.operator,
+                        &computed.computed_by,
+                        &named_schemas,
+                        &named,
+                        &schema,
+                    ],
+                )
+                .await?
+            {
+                found.push(super::CheckHazard::Computed {
+                    key: row.get(0),
+                    relation: row.get(1),
+                    expression: computed.expression.clone(),
+                    operator_name: computed.operator,
+                    computed_by: computed.computed_by,
+                    result_type: row.get(2),
+                    operator: row.get(3),
                 });
             }
         }
@@ -1565,23 +1642,27 @@ forced: r.get(2),
         // Relations are explicitly qualified by the validated contract grammar.
         // Only builtin functions/operators participate in unqualified lookup.
         self.batch("SET LOCAL search_path=pg_catalog").await?;
-        let passed = bounded(async {
-            let rows = self
-                .client
-                .query_raw(
-                    sql,
-                    std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>(),
-                )
-                .await?;
-            tokio::pin!(rows);
-            let first = rows.try_next().await?;
-            let second = rows.try_next().await?;
-            Ok(first.is_some_and(|row| {
-                row.len() == 1
-                    && row.columns()[0].type_() == &tokio_postgres::types::Type::BOOL
-                    && row.try_get::<_, Option<bool>>(0).ok() == Some(Some(true))
-            }) && second.is_none())
-        })
+        let passed = bounded_classified(
+            IO_TIMEOUT,
+            async {
+                let rows = self
+                    .client
+                    .query_raw(
+                        sql,
+                        std::iter::empty::<&(dyn tokio_postgres::types::ToSql + Sync)>(),
+                    )
+                    .await?;
+                tokio::pin!(rows);
+                let first = rows.try_next().await?;
+                let second = rows.try_next().await?;
+                Ok(first.is_some_and(|row| {
+                    row.len() == 1
+                        && row.columns()[0].type_() == &tokio_postgres::types::Type::BOOL
+                        && row.try_get::<_, Option<bool>>(0).ok() == Some(Some(true))
+                }) && second.is_none())
+            },
+            row_security_denial,
+        )
         .await?;
         if !passed {
             return Err(Diagnostic::new("DB_CHECK_FAILED", "Contract requires exactly one row containing one non-NULL Boolean true; values suppressed."));
@@ -1897,65 +1978,82 @@ impl RelationalAdapter for Postgres {
         if !declared.is_empty() {
             // The relations the declared extensions own in the scope, as
             // their keys are qualified: in the managed schema, none.
-            let relations: Vec<(Option<String>, String, String)> = self
+            let relations: Vec<(Option<String>, String, String, Option<String>)> = self
                 .rows(
-                    &format!("WITH RECURSIVE {} SELECT CASE WHEN n.nspname<>$2::text THEN pg_catalog.quote_ident(n.nspname) END, c.relname::text, pg_catalog.quote_ident(c.relname) FROM pg_catalog.pg_class c JOIN owned o ON o.classid='pg_catalog.pg_class'::pg_catalog.regclass AND o.objid=c.oid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY($3::text[])", super::catalog_sql::DECLARED_OWNED),
+                    &format!("WITH RECURSIVE {}, by(classid, objid, extname) AS (SELECT d.classid, d.objid, e.extname::text FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
+   WHERE d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extname=ANY($1::text[])
+  UNION SELECT d.classid, d.objid, b.extname FROM by b JOIN pg_catalog.pg_depend d ON d.refclassid=b.classid AND d.refobjid=b.objid WHERE d.deptype IN ('i','a'))
+ SELECT CASE WHEN n.nspname<>$2::text THEN pg_catalog.quote_ident(n.nspname) END, c.relname::text, pg_catalog.quote_ident(c.relname),
+  (SELECT CASE WHEN count(DISTINCT b.extname)=1 THEN min(b.extname) END FROM by b WHERE b.classid='pg_catalog.pg_class'::pg_catalog.regclass AND b.objid=c.oid)
+ FROM pg_catalog.pg_class c JOIN owned o ON o.classid='pg_catalog.pg_class'::pg_catalog.regclass AND o.objid=c.oid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY($3::text[])", super::catalog_sql::DECLARED_OWNED),
                     &[&declared, &schema, &scope],
                 )
                 .await?
                 .iter()
-                .map(|r| (r.get(0), r.get(1), r.get(2)))
+                .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
                 .collect();
-            catalog.owned = catalog
-                .objects
-                .iter()
-                .filter(|(key, value)| declared_owned(key, value, declared, &relations))
-                .map(|(key, _)| key.clone())
-                .collect();
+            for (key, value) in &catalog.objects {
+                if let Some(owner) = declared_owner(key, value, declared, &relations) {
+                    catalog.owned.insert(key.clone());
+                    if let Some(owner) = owner {
+                        catalog.owners.insert(key.clone(), owner);
+                    }
+                }
+            }
         }
         Ok(catalog)
     }
 }
 
 /// Whether catalog object `key` (`value`) is owned by a declared extension
-/// (#430): one of `declared` itself, a member (inspection marks routines,
-/// types and other objects with their extension), or one of its
-/// `relations` (qualifier, name, quoted name) with the columns,
-/// constraints, triggers, policies and rules that follow it.
-fn declared_owned(
+/// (#430), and by which when that is known: one of `declared` itself, a
+/// member (inspection marks routines, types and other objects with their
+/// extension), or one of its `relations` (qualifier, name, quoted name,
+/// the extension whose member it is or depends on, when only one is) with
+/// the columns, constraints, triggers, policies and rules that follow it.
+fn declared_owner(
     key: &str,
     value: &Value,
     declared: &[String],
-    relations: &[(Option<String>, String, String)],
-) -> bool {
+    relations: &[(Option<String>, String, String, Option<String>)],
+) -> Option<Option<String>> {
     let is_declared = |name: &str| declared.iter().any(|d| d == name);
     if let Some(name) = key.strip_prefix("extension:") {
-        return is_declared(name);
+        return is_declared(name).then(|| Some(name.to_owned()));
     }
-    if value["extension"].as_str().is_some_and(is_declared) {
-        return true;
+    if let Some(name) = value["extension"].as_str().filter(|name| is_declared(name)) {
+        return Some(Some(name.to_owned()));
     }
-    relations.iter().any(|(qualifier, name, quoted)| {
-        let key = match qualifier {
-            Some(qualifier) => match key.strip_prefix(&format!("{qualifier}.")) {
-                Some(key) => key,
-                None => return false,
-            },
-            None => key,
-        };
-        ["relation:", "index:", "view:", "sequence:"]
-            .iter()
-            .any(|kind| key.strip_prefix(kind) == Some(name.as_str()))
-            || [
-                "column:",
-                "constraint:",
-                "trigger:",
-                "policy:",
-                "other:rule.",
-            ]
-            .iter()
-            .any(|kind| key.starts_with(&format!("{kind}{quoted}.")))
-    })
+    let mut owners = relations
+        .iter()
+        .filter(|(qualifier, name, quoted, _)| {
+            let key = match qualifier {
+                Some(qualifier) => match key.strip_prefix(&format!("{qualifier}.")) {
+                    Some(key) => key,
+                    None => return false,
+                },
+                None => key,
+            };
+            ["relation:", "index:", "view:", "sequence:"]
+                .iter()
+                .any(|kind| key.strip_prefix(kind) == Some(name.as_str()))
+                || [
+                    "column:",
+                    "constraint:",
+                    "trigger:",
+                    "policy:",
+                    "other:rule.",
+                ]
+                .iter()
+                .any(|kind| key.starts_with(&format!("{kind}{quoted}.")))
+        })
+        .map(|(_, _, _, owner)| owner);
+    let first = owners.next()?;
+    Some(
+        first
+            .clone()
+            .filter(|first| owners.all(|o| o.as_ref() == Some(first))),
+    )
 }
 
 #[cfg(test)]

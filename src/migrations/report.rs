@@ -540,12 +540,10 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
         .collect();
     // Routines, types and other members name their extension; the
     // relations a declared extension installs (pg_stat_statements' views)
-    // and their columns do not, so they follow the one that differs, when
-    // only one does.
-    let sole = match declared_changed.iter().collect::<Vec<_>>().as_slice() {
-        [only] => Some(**only),
-        _ => None,
-    };
+    // and their columns do not, so they follow the extension inspection
+    // found owns them (`Catalog::owners`). One whose owner is not known
+    // stays on its own (#458 review): `owned` holds every declared
+    // extension's objects, not only the one that differs.
     let member_of = |k: &str| -> Option<String> {
         if k.starts_with("extension:") {
             return None;
@@ -556,10 +554,11 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
             .find_map(|v| v["extension"].as_str());
         match named {
             Some(e) => declared_changed.contains(e).then(|| e.to_owned()),
-            None if expected.owned.contains(k) || observed.owned.contains(k) => {
-                sole.map(str::to_owned)
-            }
-            None => None,
+            None => [expected.owners.get(k), observed.owners.get(k)]
+                .into_iter()
+                .flatten()
+                .find(|e| declared_changed.contains(e.as_str()))
+                .cloned(),
         }
     };
     let mut members: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
@@ -1227,6 +1226,79 @@ async fn inspect_observed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #458 review: with two declared extensions, a change to one's
+    /// relation is not listed among the members of the other when that
+    /// other moves; a relation follows the extension that owns it.
+    #[test]
+    fn declared_extension_drift_lists_only_its_own_relations() {
+        let catalog = |schema: &str, comment: &str| {
+            let mut c = Catalog::default();
+            for (key, value) in [
+                (
+                    "extension:postgres_fdw",
+                    json!({"schema": schema, "version": "1.1"}),
+                ),
+                (
+                    "extension:pg_stat_statements",
+                    json!({"schema": "public", "version": "1.10"}),
+                ),
+                ("view:pg_stat_statements", json!({"comment": comment})),
+                ("view:fdw_view", json!({"schema": schema})),
+            ] {
+                c.objects.insert(key.into(), value);
+                c.owned.insert(key.into());
+            }
+            c.owners.insert(
+                "view:pg_stat_statements".into(),
+                "pg_stat_statements".into(),
+            );
+            c.owners
+                .insert("view:fdw_view".into(), "postgres_fdw".into());
+            c
+        };
+        let r = compare(
+            &catalog("extensions", "changed"),
+            &catalog("public", "stats"),
+        );
+        let differences = r["differences"].as_array().unwrap();
+        let objects: Vec<&str> = differences
+            .iter()
+            .map(|d| d["object"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            objects,
+            ["extension:postgres_fdw", "view:pg_stat_statements"],
+            "{r}"
+        );
+        assert_eq!(differences[0]["members"], json!(["view:fdw_view"]), "{r}");
+        assert_eq!(
+            differences[1]["expected"],
+            json!({"comment": "stats"}),
+            "{r}"
+        );
+        // A relation whose owner is not known stays on its own.
+        let mut observed = catalog("extensions", "changed");
+        observed.owners.clear();
+        let mut expected = catalog("public", "stats");
+        expected.owners.clear();
+        let r = compare(&observed, &expected);
+        let objects: Vec<&str> = r["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["object"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            objects,
+            [
+                "extension:postgres_fdw",
+                "view:fdw_view",
+                "view:pg_stat_statements"
+            ],
+            "{r}"
+        );
+    }
 
     fn failure(code: &str) -> Diagnostic {
         Diagnostic::new(code, "test")

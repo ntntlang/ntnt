@@ -139,10 +139,12 @@ fn name(n: &ObjectName, schema: &str) -> bool {
         && match ids.as_slice() {
             [_] => true,
             [s, _] => {
+                // PostgreSQL folds only ASCII letters of an unquoted name
+                // in a UTF-8 database (`downcase_identifier`).
                 if s.quote_style.is_some() {
                     s.value == schema
                 } else {
-                    s.value.to_lowercase() == schema
+                    s.value.to_ascii_lowercase() == schema
                 }
             }
             _ => false,
@@ -2098,9 +2100,11 @@ pub(crate) fn protected_targets(sql: &str) -> Vec<(usize, String)> {
 
 /// The top-level statements of a PostgreSQL migration that create or alter
 /// an extension, in order: the 1-based statement number, the extension's
-/// name and whether the statement acts on that extension alone. That is a
-/// `CREATE EXTENSION [IF NOT EXISTS] name` without `CASCADE`; one with
-/// `CASCADE` may install others, and `ALTER EXTENSION name` may update it.
+/// name and whether the statement acts on that extension alone, at its
+/// default version. That is a `CREATE EXTENSION [IF NOT EXISTS] name`
+/// without `CASCADE` or `VERSION`; one with `CASCADE` may install others,
+/// one with `VERSION` installs a version whose privileges may differ, and
+/// `ALTER EXTENSION name` may update it.
 /// Read from tokens: sqlparser does not parse `SCHEMA s` without `WITH`.
 /// Extensions created in a `DO` block are not listed.
 pub(crate) fn created_extensions(sql: &str) -> Vec<(usize, String, bool)> {
@@ -2124,10 +2128,13 @@ pub(crate) fn created_extensions(sql: &str) -> Vec<(usize, String, bool)> {
             };
         if let Some(Token::Word(w)) = t.get(at) {
             let cascade = t.iter().skip(at + 1).any(|t| keyword(Some(t), "CASCADE"));
+            // Another version than the default may need other privileges,
+            // and the update path PostgreSQL takes to it is not known here.
+            let version = t.iter().skip(at + 1).any(|t| keyword(Some(t), "VERSION"));
             found.push((
                 index + 1,
                 folded(&w.value, w.quote_style.is_some()),
-                !alter && !cascade,
+                !alter && !cascade && !version,
             ));
         }
     }
@@ -2200,16 +2207,8 @@ pub(crate) fn check_tables(sql: &str, schema: &str) -> Vec<(String, String)> {
             if let TableFactor::Table { name, .. } = &t.relation {
                 let ids: Vec<_> = name.0.iter().filter_map(|p| p.as_ident()).collect();
                 if let [s, t] = ids.as_slice() {
-                    let schema = if s.quote_style.is_some() {
-                        s.value.clone()
-                    } else {
-                        s.value.to_lowercase()
-                    };
-                    let table = if t.quote_style.is_some() {
-                        t.value.clone()
-                    } else {
-                        t.value.to_lowercase()
-                    };
+                    let schema = folded(&s.value, s.quote_style.is_some());
+                    let table = folded(&t.value, t.quote_style.is_some());
                     out.push((schema, table));
                 }
             }
@@ -2384,17 +2383,56 @@ pub(crate) struct CheckOperand {
     pub tables: Vec<(String, String)>,
 }
 
+/// An operand that a check computes from what it reads, of a comparison or
+/// arithmetic operator: `id + 1` in `id + 1 = 2`, or `count(*)` (#457
+/// review). Its value has no column's type, so `CheckOperand` cannot screen
+/// the operator it meets.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ComputedOperand {
+    /// The operator it is an operand of, as in `CheckOperand`.
+    pub operator: &'static str,
+    /// The operand as the check writes it.
+    pub expression: String,
+    /// What gives it its type: the PostgreSQL name of the operator that
+    /// computes it (`+`), `count` for `count(*)` or `bool` for a Boolean
+    /// expression. Checks resolve operators with search_path=pg_catalog,
+    /// so its type is one that a pg_catalog operator of that name returns.
+    pub computed_by: &'static str,
+    /// The tables of its query level, as in `CheckOperand`.
+    pub tables: Vec<(String, String)>,
+}
+
 /// The column operands of the operators a check uses (`CheckOperand`).
 /// Only valid for SQL that `contract_supported` accepts; other input
 /// yields none.
+#[cfg(test)]
 pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
+    check_operand_sets(sql, schema).0
+}
+
+/// The operands of the operators a check uses: its columns
+/// (`CheckOperand`), and what it computes (`ComputedOperand`). A computed
+/// operand also counts each column it is computed from as an operand of
+/// its operator. Only valid for SQL that `contract_supported` accepts;
+/// other input yields none.
+pub(crate) fn check_operand_sets(
+    sql: &str,
+    schema: &str,
+) -> (Vec<CheckOperand>, Vec<ComputedOperand>) {
     type Tables = Vec<(String, String)>;
-    fn folded(i: &Ident) -> String {
-        if i.quote_style.is_some() {
-            i.value.clone()
-        } else {
-            i.value.to_lowercase()
+    fn fold(i: &Ident) -> String {
+        folded(&i.value, i.quote_style.is_some())
+    }
+    /// The names an identifier can fold to: PostgreSQL folds only ASCII
+    /// letters in a UTF-8 (or any multibyte) database, but in a
+    /// single-byte encoding also what the locale calls upper case, so a
+    /// column is looked up under both when they differ.
+    fn candidates(i: &Ident) -> Vec<String> {
+        let mut names = vec![fold(i)];
+        if i.quote_style.is_none() && i.value.to_lowercase() != names[0] {
+            names.push(i.value.to_lowercase());
         }
+        names
     }
     /// What a query level's columns can name: its table, then the
     /// enclosing levels' tables.
@@ -2404,7 +2442,7 @@ pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
             if let TableFactor::Table { name, .. } = &table.relation {
                 let ids: Vec<_> = name.0.iter().filter_map(|p| p.as_ident()).collect();
                 if let [schema, table] = ids.as_slice() {
-                    tables.insert(0, (folded(schema), folded(table)));
+                    tables.insert(0, (fold(schema), fold(table)));
                 }
             }
         }
@@ -2426,10 +2464,10 @@ pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
             _ => return None,
         })
     }
-    fn column(e: &Expr, tables: &[(String, String)]) -> Option<(String, Tables)> {
+    fn column<'a>(e: &'a Expr, tables: &[(String, String)]) -> Option<(&'a Ident, Tables)> {
         match e {
             Expr::Nested(e) => column(e, tables),
-            Expr::Identifier(i) => Some((folded(i), tables.to_vec())),
+            Expr::Identifier(i) => Some((i, tables.to_vec())),
             Expr::Subquery(q) => {
                 let SetExpr::Select(s) = &*q.body else {
                     return None;
@@ -2442,7 +2480,75 @@ pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
             _ => None,
         }
     }
-    fn query(q: &Query, outer: &[(String, String)], out: &mut Vec<CheckOperand>) {
+    /// What computes `e` (`ComputedOperand::computed_by`), when it is not
+    /// a column, a literal or a scalar subquery of one of those.
+    fn computed_by(e: &Expr) -> Option<&'static str> {
+        match e {
+            Expr::Nested(e) => computed_by(e),
+            Expr::BinaryOp { op, .. } => Some(operator(op).unwrap_or("bool")),
+            Expr::UnaryOp {
+                op: UnaryOperator::Minus,
+                ..
+            } => Some("-"),
+            Expr::UnaryOp {
+                op: UnaryOperator::Plus,
+                ..
+            } => Some("+"),
+            Expr::UnaryOp { .. } | Expr::IsNull(_) | Expr::IsNotNull(_) | Expr::Exists { .. } => {
+                Some("bool")
+            }
+            Expr::Function(_) => Some("count"),
+            Expr::Subquery(q) => {
+                let SetExpr::Select(s) = &*q.body else {
+                    return None;
+                };
+                match s.projection.as_slice() {
+                    [SelectItem::UnnamedExpr(item)] => computed_by(item),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    /// Whether `e` reads anything: a column, `count(*)` or a subquery.
+    fn reads(e: &Expr) -> bool {
+        match e {
+            Expr::Identifier(_) | Expr::Function(_) | Expr::Subquery(_) | Expr::Exists { .. } => {
+                true
+            }
+            Expr::Nested(e)
+            | Expr::IsNull(e)
+            | Expr::IsNotNull(e)
+            | Expr::UnaryOp { expr: e, .. } => reads(e),
+            Expr::BinaryOp { left, right, .. } => reads(left) || reads(right),
+            _ => false,
+        }
+    }
+    /// The columns a computed operand is computed from, each with the
+    /// tables it can name. A subquery's single output counts at its own
+    /// level; EXISTS yields a Boolean, whose comparisons `expr` finds.
+    fn columns_in(e: &Expr, tables: &[(String, String)], out: &mut Vec<(Vec<String>, Tables)>) {
+        match e {
+            Expr::Identifier(i) => out.push((candidates(i), tables.to_vec())),
+            Expr::Nested(e)
+            | Expr::IsNull(e)
+            | Expr::IsNotNull(e)
+            | Expr::UnaryOp { expr: e, .. } => columns_in(e, tables, out),
+            Expr::BinaryOp { left, right, .. } => {
+                columns_in(left, tables, out);
+                columns_in(right, tables, out);
+            }
+            Expr::Subquery(q) => {
+                let SetExpr::Select(s) = &*q.body else { return };
+                if let [SelectItem::UnnamedExpr(item)] = s.projection.as_slice() {
+                    columns_in(item, &level(s, tables), out);
+                }
+            }
+            _ => (),
+        }
+    }
+    type Out = (Vec<CheckOperand>, Vec<ComputedOperand>);
+    fn query(q: &Query, outer: &[(String, String)], out: &mut Out) {
         let SetExpr::Select(s) = &*q.body else { return };
         let tables = level(s, outer);
         for item in &s.projection {
@@ -2454,7 +2560,7 @@ pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
             expr(e, &tables, out);
         }
     }
-    fn expr(e: &Expr, tables: &[(String, String)], out: &mut Vec<CheckOperand>) {
+    fn expr(e: &Expr, tables: &[(String, String)], out: &mut Out) {
         match e {
             Expr::Exists { subquery, .. } | Expr::Subquery(subquery) => {
                 query(subquery, tables, out)
@@ -2466,12 +2572,27 @@ pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
             Expr::BinaryOp { left, op, right } => {
                 if let Some(operator) = operator(op) {
                     for side in [left, right] {
-                        if let Some((column, tables)) = column(side, tables) {
-                            out.push(CheckOperand {
+                        let mut columns = vec![];
+                        if let Some((ident, tables)) = column(side, tables) {
+                            columns.push((candidates(ident), tables));
+                        } else if let Some(computed_by) = computed_by(side).filter(|_| reads(side))
+                        {
+                            out.1.push(ComputedOperand {
                                 operator,
-                                column,
-                                tables,
+                                expression: side.to_string(),
+                                computed_by,
+                                tables: tables.to_vec(),
                             });
+                            columns_in(side, tables, &mut columns);
+                        }
+                        for (names, tables) in columns {
+                            for column in names {
+                                out.0.push(CheckOperand {
+                                    operator,
+                                    column,
+                                    tables: tables.clone(),
+                                });
+                            }
                         }
                     }
                 }
@@ -2481,7 +2602,7 @@ pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
             _ => (),
         }
     }
-    let mut out = vec![];
+    let mut out = (vec![], vec![]);
     if contract_supported(sql, schema) {
         if let Some(statements) = parse(sql) {
             if let [Statement::Query(q)] = statements.as_slice() {
@@ -2489,8 +2610,10 @@ pub(crate) fn check_operands(sql: &str, schema: &str) -> Vec<CheckOperand> {
             }
         }
     }
-    out.sort();
-    out.dedup();
+    out.0.sort();
+    out.0.dedup();
+    out.1.sort();
+    out.1.dedup();
     out
 }
 
@@ -2547,6 +2670,107 @@ pub(crate) fn enum_value_additions(sql: &str) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// #457 review: PostgreSQL folds only the ASCII letters of an unquoted
+    /// name in a UTF-8 database, so `Émail` names the column `Émail`; the
+    /// fully lowercased name is looked up too, for single-byte encodings
+    /// that fold by locale. A schema qualifier folds the same way.
+    #[test]
+    fn check_names_fold_like_postgresql() {
+        let t = |s: &str, n: &str| (s.to_owned(), n.to_owned());
+        let columns: Vec<String> = check_operands(
+            "SELECT NOT EXISTS (SELECT 1 FROM app.Ünits WHERE Émail = 'admin@example.com')",
+            "app",
+        )
+        .into_iter()
+        .map(|o| {
+            assert_eq!(o.tables, [t("app", "Ünits")]);
+            o.column
+        })
+        .collect();
+        assert_eq!(columns, ["Émail", "émail"]);
+        assert_eq!(
+            check_tables("SELECT NOT EXISTS (SELECT 1 FROM APP.Ünits)", "app"),
+            [t("app", "Ünits")]
+        );
+        assert!(!contract_supported(
+            "SELECT NOT EXISTS (SELECT 1 FROM ÄPP.t)",
+            "äpp"
+        ));
+        assert!(contract_supported(
+            "SELECT NOT EXISTS (SELECT 1 FROM ÄPP.t)",
+            "Äpp"
+        ));
+        assert!(contract_supported(
+            "SELECT NOT EXISTS (SELECT 1 FROM \"äpp\".t)",
+            "äpp"
+        ));
+    }
+
+    /// #457 review: an operand a check computes (`id + 1`, `count(*)`) is
+    /// screened by what computes it, and each column it is computed from
+    /// counts as an operand of the operator it meets. A computation that
+    /// reads nothing is not.
+    #[test]
+    fn computed_check_operands_name_what_computes_them() {
+        let t = |s: &str, n: &str| (s.to_owned(), n.to_owned());
+        let (operands, computed) = check_operand_sets(
+            "SELECT EXISTS (SELECT 1 FROM app.t WHERE id + 1 = 2 AND n * 2 < 0)",
+            "app",
+        );
+        let named: Vec<(&str, &str)> = operands
+            .iter()
+            .map(|o| (o.operator, o.column.as_str()))
+            .collect();
+        assert_eq!(named, [("*", "n"), ("+", "id"), ("<", "n"), ("=", "id")]);
+        assert_eq!(
+            computed,
+            [
+                ComputedOperand {
+                    operator: "<",
+                    expression: "n * 2".into(),
+                    computed_by: "*",
+                    tables: vec![t("app", "t")],
+                },
+                ComputedOperand {
+                    operator: "=",
+                    expression: "id + 1".into(),
+                    computed_by: "+",
+                    tables: vec![t("app", "t")],
+                },
+            ]
+        );
+        let (operands, computed) = check_operand_sets(
+            "SELECT (SELECT count(*) FROM app.t) = 0 AND (SELECT a * 2 FROM app.u) > 1",
+            "app",
+        );
+        let named: Vec<(&str, &str)> = operands
+            .iter()
+            .map(|o| {
+                assert_eq!(o.tables, [t("app", "u")]);
+                (o.operator, o.column.as_str())
+            })
+            .collect();
+        assert_eq!(named, [("*", "a"), (">", "a")]);
+        let by: Vec<(&str, &str, &str)> = computed
+            .iter()
+            .map(|c| (c.operator, c.expression.as_str(), c.computed_by))
+            .collect();
+        assert_eq!(
+            by,
+            [
+                ("=", "(SELECT count(*) FROM app.t)", "count"),
+                (">", "(SELECT a * 2 FROM app.u)", "*"),
+            ]
+        );
+        assert_eq!(
+            check_operand_sets("SELECT 1 + 1 = 2", "app"),
+            (vec![], vec![])
+        );
+        assert!(check_operand_sets("SELECT count(*) = 0 FROM app.t", "app")
+            .0
+            .is_empty());
+    }
+
     /// #456: the columns a check compares or computes with, each with the
     /// tables it can name, innermost query level first. A scalar
     /// subquery's single output counts as its column; IS NULL, count(*)
@@ -2585,6 +2809,8 @@ mod tests {
                 op("+", "total", vec![t("app", "users"), t("app", "orders")]),
                 op("=", "id", vec![t("app", "users"), t("app", "orders")]),
                 op("=", "owner", vec![t("app", "users"), t("app", "orders")]),
+                // #457 review: `total + 1` is computed from total.
+                op(">", "total", vec![t("app", "users"), t("app", "orders")]),
             ]
         );
         for sql in [
@@ -2816,6 +3042,16 @@ mod tests {
         assert_eq!(
             created_extensions("ALTER EXTENSION pg_trgm UPDATE"),
             [(1, "pg_trgm".to_string(), false)]
+        );
+        // #457 review: another version may need other privileges.
+        assert_eq!(
+            created_extensions(
+                "CREATE EXTENSION citext VERSION '1.4';\nCREATE EXTENSION hstore WITH SCHEMA app VERSION '1.8'"
+            ),
+            [
+                (1, "citext".to_string(), false),
+                (2, "hstore".to_string(), false)
+            ]
         );
     }
     #[test]
