@@ -1263,7 +1263,7 @@ role="target_role"
                 error.message
             );
         }
-        for schema in ["public", "app", "_ntnt_app", "ntnt_replay"] {
+        for schema in ["public", "app", "ntnt", "ntnt_replay"] {
             std::fs::write(
                 &manifest,
                 text.replace("schema=\"app\"", &format!("schema=\"{schema}\"")),

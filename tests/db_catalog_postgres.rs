@@ -2734,16 +2734,25 @@ fn a_migration_that_revokes_the_scratch_roles_connect_is_refused_before_it_commi
         scratch_admin(&f)
             .batch_execute(&baseline.replace("{db}", &f.scratch))
             .unwrap();
+        // Cleanup restores privileges as a set, so compare them as one; the
+        // rest of what scratch holds must be as it was.
         let acl = |f: &Fixture| -> Option<String> {
             scratch_admin(f)
                 .query_one(
-                    "SELECT datacl::text FROM pg_database WHERE datname=current_database()",
+                    "SELECT (SELECT string_agg(a::text, ',' ORDER BY a::text) FROM unnest(datacl) a) FROM pg_database WHERE datname=current_database()",
                     &[],
                 )
                 .unwrap()
                 .get(0)
         };
-        let before = (acl(&f), scratch_leftovers(&f, &public));
+        let state = |f: &Fixture| {
+            let others: Vec<String> = scratch_leftovers(f, &public)
+                .into_iter()
+                .filter(|x| !x.starts_with("database "))
+                .collect();
+            (acl(f), others)
+        };
+        let before = state(&f);
         assert!(before.0.is_some(), "{baseline}: {before:?}");
         f.sql("0001_connect.sql", refused);
         let r = f.command("plan");
@@ -2756,12 +2765,12 @@ fn a_migration_that_revokes_the_scratch_roles_connect_is_refused_before_it_commi
             "{d}"
         );
         assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
-        assert_eq!((acl(&f), scratch_leftovers(&f, &public)), before);
+        assert_eq!(state(&f), before);
         f.sql("0001_connect.sql", &kept);
         let r = f.command("plan");
         assert_eq!(r["outcome"], "pass", "{baseline}: {r}");
         assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
-        assert_eq!((acl(&f), scratch_leftovers(&f, &public)), before);
+        assert_eq!(state(&f), before);
         // The scratch role can still connect, and the next plan passes.
         Client::connect(&f.scratch_url, NoTls).unwrap();
         assert_eq!(f.command("plan")["outcome"], "pass");
