@@ -50,10 +50,21 @@ pub(crate) fn json_digest(value: &impl Serialize) -> String {
 #[derive(Default)]
 pub(crate) struct CatalogDigests {
     objects: std::collections::HashMap<String, (serde_json::Value, Vec<u8>)>,
+    /// Whether a restore-stable value replaced a stored one in any catalog
+    /// digested (#460): a plan of these catalogs has canonicalization_version 2.
+    pub stabilized: bool,
 }
 impl CatalogDigests {
+    /// `catalog`'s `Fingerprint`, its restore-stable digest from `digest`.
+    pub fn fingerprint(&mut self, catalog: &super::model::Catalog) -> Fingerprint {
+        Fingerprint {
+            stable: self.digest(catalog),
+            stored: catalog.stored_digest(),
+        }
+    }
     /// Exactly `json_digest(catalog)`.
     pub fn digest(&mut self, catalog: &super::model::Catalog) -> String {
+        self.stabilized |= !catalog.stored.is_empty();
         // `json_digest` sorts object keys; `serde_json` maps already iterate in
         // key order, as does the catalog's own map, so each object serializes
         // to the same bytes on its own.
@@ -77,6 +88,36 @@ impl CatalogDigests {
                 .map(|key| self.objects[key].1.as_slice()),
             &catalog.uncovered,
         )
+    }
+}
+
+/// A catalog's fingerprints, as a saved plan's are compared with them
+/// (#460): the digest of its restore-stable values, `json_digest`, and,
+/// when any differs from the value PostgreSQL stores, the digest of the
+/// stored values.
+#[derive(Clone, Debug)]
+pub(crate) struct Fingerprint {
+    pub stable: String,
+    pub stored: Option<String>,
+}
+impl Fingerprint {
+    pub fn of(catalog: &super::model::Catalog) -> Self {
+        Self {
+            stable: json_digest(catalog),
+            stored: catalog.stored_digest(),
+        }
+    }
+    /// Whether `planned`, a fingerprint a saved plan recorded, is this
+    /// catalog's in either form. Plans with canonicalization_version 1
+    /// recorded stored values, as NTNT did before #460, and plans with 2
+    /// restore-stable ones. Either match is the planned state: a catalog
+    /// whose stored form equals another's restore-stable form is
+    /// restore-stable itself, and equal restore-stable forms differ at most
+    /// as a dump and restore leaves a catalog, which behaves the same.
+    pub fn matches(&self, planned: &serde_json::Value) -> bool {
+        planned.as_str().is_some_and(|planned| {
+            planned == self.stable || self.stored.as_deref() == Some(planned)
+        })
     }
 }
 

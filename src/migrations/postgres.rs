@@ -9,6 +9,7 @@ use std::time::Duration;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::{Client, Config, NoTls, Row};
 
+mod restore;
 mod scratch;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1832,7 +1833,7 @@ fn canonical_roles(value: &mut Value, role: &str) {
 }
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
-        json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":1,"server_version_num":version,
+        json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":2,"server_version_num":version,
             "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"per_migration_commits_on_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"lone_named_create_index_concurrently", "baseline_adoption":"reviewed_prefix_checkpoint"},
             "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "enums_domains_composite_types_operators_exclusion_constraints":"definition_fingerprints", "managed_schema_extensions":"version_covers_members", "range_and_base_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
@@ -1861,6 +1862,9 @@ impl RelationalAdapter for Postgres {
                 let mut value: Value = r.get(1);
                 let supported: bool = r.get(2);
                 canonical_roles(&mut value, role);
+                // Compared as a dump and restore leaves it; plans saved
+                // before #460 fingerprinted the stored form.
+                let (mut value, stored) = restore::restore_stable(kind, value);
                 protect_definitions(&mut value);
                 // Keys in the managed schema stay unqualified; keys anywhere
                 // else lead with the quoted schema name.
@@ -1877,6 +1881,10 @@ impl RelationalAdapter for Postgres {
                         "Two catalog objects share one key; inspection is incomplete.",
                     )
                     .with_objects(&[key]));
+                }
+                if let Some(mut stored) = stored {
+                    protect_definitions(&mut stored);
+                    catalog.stored.insert(key.clone(), stored);
                 }
                 catalog.objects.insert(key, value);
             }

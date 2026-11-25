@@ -13,6 +13,31 @@ pub(crate) struct Catalog {
     /// serialized; empty without declared extensions.
     #[serde(skip)]
     pub owned: BTreeSet<String>,
+    /// PostgreSQL: for each object whose restore-stable value (#460,
+    /// `postgres::restore`) is not the value as PostgreSQL stores it, the
+    /// stored value, which plans with canonicalization_version 1
+    /// fingerprinted. Not part of the catalog's identity, so never
+    /// serialized; empty when every value is stored restore-stable.
+    #[serde(skip)]
+    pub stored: BTreeMap<String, Value>,
+}
+impl Catalog {
+    /// `json_digest` of this catalog with its values as stored, when any
+    /// differs from its restore-stable value.
+    pub fn stored_digest(&self) -> Option<String> {
+        if self.stored.is_empty() {
+            return None;
+        }
+        let mut objects = self.objects.clone();
+        for (key, value) in &self.stored {
+            objects.insert(key.clone(), value.clone());
+        }
+        Some(super::inventory::json_digest(&Catalog {
+            objects,
+            uncovered: self.uncovered.clone(),
+            ..Catalog::default()
+        }))
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct HistoryEntry {

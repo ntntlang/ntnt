@@ -1105,6 +1105,10 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             }
         }
     }
+    // Only `--against` above reads it.
+    if let Some(report) = report.as_object_mut() {
+        report.remove(report::STORED_BINDING);
+    }
     if let Some(filter) = &options.object {
         if let Some(objects) = report["catalog"]["objects"].as_object_mut() {
             objects.retain(|key, _| key.contains(filter));
