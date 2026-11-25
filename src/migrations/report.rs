@@ -538,13 +538,29 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
         .filter(|k| expected.owned.contains(**k) || observed.owned.contains(**k))
         .filter_map(|k| k.strip_prefix("extension:"))
         .collect();
+    // Routines, types and other members name their extension; the
+    // relations a declared extension installs (pg_stat_statements' views)
+    // and their columns do not, so they follow the one that differs, when
+    // only one does.
+    let sole = match declared_changed.iter().collect::<Vec<_>>().as_slice() {
+        [only] => Some(**only),
+        _ => None,
+    };
     let member_of = |k: &str| -> Option<String> {
-        [expected.objects.get(k), observed.objects.get(k)]
+        if k.starts_with("extension:") {
+            return None;
+        }
+        let named = [expected.objects.get(k), observed.objects.get(k)]
             .into_iter()
             .flatten()
-            .find_map(|v| v["extension"].as_str())
-            .filter(|e| declared_changed.contains(e))
-            .map(str::to_owned)
+            .find_map(|v| v["extension"].as_str());
+        match named {
+            Some(e) => declared_changed.contains(e).then(|| e.to_owned()),
+            None if expected.owned.contains(k) || observed.owned.contains(k) => {
+                sole.map(str::to_owned)
+            }
+            None => None,
+        }
     };
     let mut members: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
     for k in &differing {
