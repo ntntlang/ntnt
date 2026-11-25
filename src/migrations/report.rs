@@ -526,9 +526,45 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
         .keys()
         .chain(expected.objects.keys())
         .collect();
-    let differences: Vec<_>=keys.into_iter().filter(|k| observed.objects.get(*k)!=expected.objects.get(*k)).map(|k| json!({
-        "object":k,"change":match (expected.objects.contains_key(k),observed.objects.contains_key(k)) {(true,false)=>"missing",(false,true)=>"unexpected",_=>"changed"},
-        "expected":expected.objects.get(k),"observed":observed.objects.get(k)})).collect();
+    let differing: Vec<&String> = keys
+        .into_iter()
+        .filter(|k| observed.objects.get(*k) != expected.objects.get(*k))
+        .collect();
+    // A declared extension that differs (moved to another schema, say)
+    // lists its members' differences under it, as `members`, rather than
+    // each on its own (#430): its members follow it.
+    let declared_changed: std::collections::BTreeSet<&str> = differing
+        .iter()
+        .filter(|k| expected.owned.contains(**k) || observed.owned.contains(**k))
+        .filter_map(|k| k.strip_prefix("extension:"))
+        .collect();
+    let member_of = |k: &str| -> Option<String> {
+        [expected.objects.get(k), observed.objects.get(k)]
+            .into_iter()
+            .flatten()
+            .find_map(|v| v["extension"].as_str())
+            .filter(|e| declared_changed.contains(e))
+            .map(str::to_owned)
+    };
+    let mut members: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
+    for k in &differing {
+        if let Some(extension) = member_of(k.as_str()) {
+            members.entry(extension).or_default().push(*k);
+        }
+    }
+    let differences: Vec<_> = differing
+        .into_iter()
+        .filter(|k| member_of(k.as_str()).is_none())
+        .map(|k| {
+            let mut d = json!({
+                "object":k,"change":match (expected.objects.contains_key(k),observed.objects.contains_key(k)) {(true,false)=>"missing",(false,true)=>"unexpected",_=>"changed"},
+                "expected":expected.objects.get(k),"observed":observed.objects.get(k)});
+            if let Some(list) = k.strip_prefix("extension:").and_then(|e| members.get(e)) {
+                d["members"] = json!(list);
+            }
+            d
+        })
+        .collect();
     let outcome = if !observed.uncovered.is_empty() || !expected.uncovered.is_empty() {
         "unknown"
     } else if differences.is_empty() {

@@ -1203,6 +1203,26 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             d.next_action = "As a superuser, install each declared extension in the scratch database with the target's version and schema (CREATE EXTENSION name VERSION 'v' SCHEMA s), then run the command again. See docs/DATABASE_MIGRATIONS.md, Extensions.".into();
             return Err(d);
         }
+        // An extension nothing declares is named, with what to do about it.
+        let undeclared: Vec<String> = self
+            .rows("SELECT 'extension:'||e.extname FROM pg_catalog.pg_extension e WHERE e.extname<>'plpgsql' AND e.extname<>ALL($1::text[]) ORDER BY 1", &[&declared])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        if !undeclared.is_empty() {
+            let names: Vec<&str> = undeclared
+                .iter()
+                .map(|k| k.trim_start_matches("extension:"))
+                .collect();
+            let mut d = Diagnostic::new(
+                "DB_SCRATCH_NOT_EMPTY",
+                &format!("Scratch holds the extension(s) {}, which [databases.<name>] extensions does not declare (its objects field names them). Scratch must be empty but for the declared extensions, which a superuser installs in both databases.", names.join(", ")),
+            )
+            .with_objects(&undeclared);
+            d.next_action = format!("Either declare it in [databases.<name>] extensions and have a superuser install it on the target too, at the same version and in the same schema, or have a superuser drop it from the scratch database (DROP EXTENSION {}). Then run the command again.", names.join(", "));
+            return Err(d);
+        }
         // `public` and the declared extensions' schemas hold only what the
         // declared extensions own (`DECLARED_OWNED`). With none declared,
         // `public` is empty and no other schema exists, as before. Below,
@@ -1218,6 +1238,7 @@ SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication O
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_event_trigger)
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname<>'plpgsql' AND extname<>ALL($1::text[]))
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_default_acl)
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_foreign_server)
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname NOT IN ('public','information_schema') AND n.nspname NOT LIKE 'pg_%' AND n.oid NOT IN (SELECT oid FROM prepared))
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_class'::pg_catalog.regclass AND o.objid=c.oid))
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_proc'::pg_catalog.regclass AND o.objid=p.oid))
@@ -1597,8 +1618,13 @@ forced: r.get(2),
             d.source = Some(migration.name.clone());
             return Err(d);
         }
-        if !super::analysis::analyze(&migration.sql, schema).replay_supported {
-            let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.");
+        let analysis = super::analysis::analyze(&migration.sql, schema);
+        if !analysis.replay_supported {
+            let mut d = if analysis.unknowns.iter().any(|u| u == "USER_MAPPING") {
+                user_mapping_refused()
+            } else {
+                Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.")
+            };
             d.source = Some(migration.name.clone());
             return Err(d);
         }
@@ -1728,6 +1754,17 @@ forced: r.get(2),
 
 /// Replace potentially sensitive deparsed definitions with identities before reporting.
 /// Structural metadata remains available for object-level differences.
+/// `DB_REPLAY_UNSUPPORTED` for a migration that creates, alters or drops a
+/// user mapping (analysis `USER_MAPPING`, #430): it holds the credentials a
+/// role uses on a foreign server, so it stays out of the history.
+fn user_mapping_refused() -> Diagnostic {
+    let mut d = Diagnostic::new(
+        "DB_REPLAY_UNSUPPORTED",
+        "Migration creates, alters or drops a user mapping (USER_MAPPING in analysis.unknowns). A user mapping holds the credentials a role uses on a foreign server and belongs to that role, so NTNT keeps user mappings out of migration histories, which are reviewed, recorded and replayed as plain text.",
+    );
+    d.next_action = "Remove the statement from the migration. Create the user mapping outside the history, as a DBA step on the target, and in the scratch database too if replay needs it, with the credentials kept in the secrets provider rather than written into SQL. NTNT does not inspect user mappings, so one created that way is neither drift nor uncovered.".into();
+    d
+}
 fn protect_definitions(value: &mut Value) {
     // Engine-deparsed SQL may itself contain credentials (for example a view
     // invoking a remote database). Keep exact-byte identities, never literals or

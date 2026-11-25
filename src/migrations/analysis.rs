@@ -1516,6 +1516,11 @@ fn escapes_transaction(words: &[Option<String>]) -> Option<&'static str> {
         }
         "COPY" | "LOAD" | "CHECKPOINT" => Some("SERVER_SCOPE"),
         "ALTER" if w(1) == Some("SYSTEM") => Some("SERVER_SCOPE"),
+        // A user mapping holds a role's credentials for a foreign server: it
+        // is refused by name, not taken for role DDL (`CREATE USER`).
+        "CREATE" | "ALTER" | "DROP" if w(1) == Some("USER") && w(2) == Some("MAPPING") => {
+            Some("USER_MAPPING")
+        }
         "CREATE" | "ALTER" | "DROP"
             if matches!(
                 w(1),
@@ -2768,6 +2773,19 @@ mod tests {
             ("COPY app.t FROM PROGRAM 'id'", "SERVER_SCOPE"),
             ("ALTER SYSTEM SET work_mem = '1GB'", "SERVER_SCOPE"),
             ("CREATE DATABASE other", "SERVER_SCOPE"),
+            ("CREATE USER other", "SERVER_SCOPE"),
+            (
+                "CREATE USER MAPPING FOR CURRENT_USER SERVER s OPTIONS (user 'u')",
+                "USER_MAPPING",
+            ),
+            (
+                "ALTER USER MAPPING FOR PUBLIC SERVER s OPTIONS (SET user 'v')",
+                "USER_MAPPING",
+            ),
+            (
+                "DROP USER MAPPING IF EXISTS FOR CURRENT_USER SERVER s",
+                "USER_MAPPING",
+            ),
             (
                 "DO $$ BEGIN END $$; DROP TABLE app.t CASCADE",
                 "SQL_UNSUPPORTED",

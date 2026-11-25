@@ -263,6 +263,26 @@ FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extname
 "#,
     ),
     (
+        // Foreign servers are database-wide (#430). One the history creates
+        // (in `$3`, as replay finds it) is covered by its wrapper, type,
+        // version, owner, privileges, comment and options; options can hold
+        // host names, so `protect_definitions` reduces them to a digest. Any
+        // other server is uncovered. A server is database-wide, so `external`
+        // (as an extension outside the scope): never a sign of a history or
+        // a ledger's content. User mappings hold credentials and are not
+        // inspected. Without servers this returns nothing.
+        "server",
+        r#"
+SELECT s.srvname::text,jsonb_build_object('wrapper',w.fdwname,'type',s.srvtype,'version',s.srvversion,'owner',pg_get_userbyid(s.srvowner),
+ 'grants',(SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
+ FROM aclexplode(coalesce(s.srvacl,acldefault('S',s.srvowner))) a),
+ 'options',to_jsonb(s.srvoptions),'comment',obj_description(s.oid,'pg_foreign_server'),'external',true),
+ cardinality($3::text[])>0 AND 'server:'||s.srvname=ANY($3),NULL::text
+FROM pg_catalog.pg_foreign_server s JOIN pg_catalog.pg_foreign_data_wrapper w ON w.oid=s.srvfdw
+WHERE $1::text IS NOT NULL AND $2::text[] IS NOT NULL ORDER BY s.srvname LIMIT 10001
+"#,
+    ),
+    (
         // Members of an extension installed in the scope follow its version,
         // as its routines and types do; owner and grants are the installer's.
         // An operator is keyed with its argument types, as a routine is, and
@@ -291,6 +311,8 @@ UNION ALL SELECT 'text_search_parser.'||quote_ident(p.prsname),jsonb_build_objec
 UNION ALL SELECT 'text_search_template.'||quote_ident(t.tmplname),jsonb_build_object('kind','text_search'),false,n.nspname,'pg_catalog.pg_ts_template'::regclass::oid,t.oid FROM pg_catalog.pg_ts_template t JOIN pg_catalog.pg_namespace n ON n.oid=t.tmplnamespace WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.other:text_search_template.'||quote_ident(t.tmplname)=ANY($3))
 UNION ALL SELECT 'security_label.'||pg_describe_object(s.classoid,s.objoid,s.objsubid)||'.'||s.provider,jsonb_build_object('kind','security_label','definition',s.label,'external',true),false,NULL,NULL,NULL FROM pg_catalog.pg_seclabel s
 UNION ALL SELECT 'shared_security_label.'||pg_describe_object(s.classoid,s.objoid,0)||'.'||s.provider,jsonb_build_object('kind','security_label','definition',s.label,'external',true),false,NULL,NULL,NULL FROM pg_catalog.pg_shseclabel s
+UNION ALL SELECT 'foreign_data_wrapper.'||quote_ident(w.fdwname),jsonb_build_object('kind','foreign_data_wrapper','external',true),false,NULL,'pg_catalog.pg_foreign_data_wrapper'::regclass::oid,w.oid FROM pg_catalog.pg_foreign_data_wrapper w
+ WHERE NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_foreign_data_wrapper'::regclass AND d.objid=w.oid AND d.deptype='e')
 UNION ALL SELECT 'event_trigger.'||quote_ident(e.evtname),jsonb_build_object('kind','event_trigger','enabled',e.evtenabled,'external',true),false,NULL,NULL,NULL FROM pg_catalog.pg_event_trigger e
 UNION ALL SELECT 'statistics.'||s.stxname,jsonb_build_object('kind','statistics'),false,n.nspname,'pg_catalog.pg_statistic_ext'::regclass::oid,s.oid FROM pg_catalog.pg_statistic_ext s JOIN pg_catalog.pg_namespace n ON n.oid=s.stxnamespace WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.other:statistics.'||s.stxname=ANY($3))
 UNION ALL SELECT 'text_search_config.'||c.cfgname,jsonb_build_object('kind','text_search'),false,n.nspname,'pg_catalog.pg_ts_config'::regclass::oid,c.oid FROM pg_catalog.pg_ts_config c JOIN pg_catalog.pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.other:text_search_config.'||c.cfgname=ANY($3))
@@ -321,7 +343,9 @@ pub(super) const DECLARED_OWNED: &str = declared_owned!("$1");
 ///   scratch was prepared with, such as `public`, which it did not create);
 /// - in any other schema but PostgreSQL's, `_ntnt` and NTNT's replay marker
 ///   `_ntnt_replay`: its relations other than indexes, routines, types and
-///   other namespace objects.
+///   other namespace objects;
+/// - each foreign server it created (`server:<name>`; scratch holds none
+///   before replay).
 ///
 /// A relation's indexes, constraints, triggers, policies and rules follow
 /// it, and an extension's members follow the extension, which `QUERIES`
@@ -366,6 +390,7 @@ UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_config.'||x.cfgname
  WHERE NOT EXISTS(SELECT 1 FROM e WHERE e.classid='pg_catalog.pg_ts_config'::regclass AND e.objid=x.oid)
 UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_dictionary.'||x.dictname FROM pg_catalog.pg_ts_dict x JOIN o ON o.oid=x.dictnamespace
  WHERE NOT EXISTS(SELECT 1 FROM e WHERE e.classid='pg_catalog.pg_ts_dict'::regclass AND e.objid=x.oid)
+UNION ALL SELECT 'server:'||s.srvname FROM pg_catalog.pg_foreign_server s
 ORDER BY 1 LIMIT 10001
 "#,
 );

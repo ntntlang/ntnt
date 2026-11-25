@@ -1492,10 +1492,7 @@ impl Postgres {
                 Some(_) => return Err(not_empty()),
             };
             self.clean(&marker).await?;
-            self.check_empty(
-                self.replay.bypass_rls.get().copied().unwrap_or(false),
-                None,
-            )
+            self.check_empty(self.replay.bypass_rls.get().copied().unwrap_or(false), None)
                 .await?;
             self.batch("COMMIT").await.map(|()| true)
         };
