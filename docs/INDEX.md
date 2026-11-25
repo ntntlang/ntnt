@@ -39,6 +39,7 @@ Source files:
 | Document | Description |
 |----------|-------------|
 | [Roadmap](../ROADMAP.md) | Implementation phases and progress |
+| [v0.6.5 Release Notes](release-notes/v0.6.5.md) | Database migrations for more SQLite and PostgreSQL schemas, safer PostgreSQL replay and a security update |
 | [v0.6.4 Release Notes](release-notes/v0.6.4.md) | Safer database migrations and adoption, runtime error locations and a security update |
 | [v0.6.3 Release Notes](release-notes/v0.6.3.md) | Security fixes and verified TLS for PostgreSQL and Redis |
 | [v0.6.2 Release Notes](release-notes/v0.6.2.md) | Database setup (`ntnt db init`/`new`), PostgreSQL TLS and migration time limits |
