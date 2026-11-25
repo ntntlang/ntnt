@@ -3910,3 +3910,77 @@ GRANT SELECT, UPDATE ON pg_catalog.ntnt_test_relay, pg_catalog.ntnt_test_writes 
         "the function ran"
     );
 }
+
+/// #460: plans saved before restore-stable values fingerprinted values as
+/// PostgreSQL stores them, and record canonicalization_version 1. Such a plan
+/// for a history whose stored values a restore changes still passes
+/// `verify --against` and migrates. Its fingerprints are the ones ntnt
+/// 91a7b9e (#458) recorded for this history; only the stored form of each
+/// catalog matches them.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn plans_fingerprinting_values_as_stored_still_migrate() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_checks.sql",
+        include_str!("fixtures/db_restore/0001_checks.sql"),
+    );
+    f.sql(
+        "0002_partitions.sql",
+        include_str!("fixtures/db_restore/0002_partitions.sql"),
+    );
+    f.plan("plan.json");
+    let major: i32 = f
+        .target()
+        .query_one(
+            "SELECT current_setting('server_version_num')::int / 10000",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let empty = "e0b5e359882940c7b4bc8008309032618468ec05ea2b92f0435e3d4ae3ec82d7";
+    let stored = match major {
+        16 => [
+            empty,
+            "ca8e5d115ffcab53308efc104bebaf22a3b23597cfdab79a084c4c4167e70e2e",
+            "43b7d6b8ad0dfcabff3e8f5004f5789859fc6835ce0f3e45674468660cce3853",
+        ],
+        17 => [
+            empty,
+            "fd0e7fb81e8a58748f19c50c093c80d5fbc88e2ba1aeb770dda2ee93b2e34536",
+            "6797963ab3e9e5fdaf01fe66378e79593854a2e47c925441fd484274cd1e4a07",
+        ],
+        18 => [
+            empty,
+            "e04d0d3b307f6254bf46ff20f2a6f9735c41071e521c7996645fa5564c34fb39",
+            "1da48c526a2715ee7dd2c65ce4be2b427f9e6ebb69acf5ba514c6f5b8fc66f9e",
+        ],
+        other => panic!("no recorded fingerprints for PostgreSQL {other}"),
+    };
+    let mut saved: Value =
+        serde_json::from_slice(&std::fs::read(f.root.path().join("plan.json")).unwrap()).unwrap();
+    assert_eq!(plan_digest(&saved["plan"]), saved["plan_digest"]);
+    let plan = &mut saved["plan"];
+    assert_eq!(plan["binding"]["canonicalization_version"], 2, "{plan}");
+    assert_eq!(plan["execution"]["prefix_fingerprints"][0], empty, "{plan}");
+    assert_ne!(
+        plan["execution"]["prefix_fingerprints"][2], stored[2],
+        "{plan}"
+    );
+    plan["binding"]["canonicalization_version"] = 1.into();
+    plan["execution"]["prefix_fingerprints"] = stored.as_slice().into();
+    plan["candidate"]["fingerprint"] = stored[2].into();
+    let digest = plan_digest(&saved["plan"]);
+    saved["plan_digest"] = Value::String(digest.clone());
+    std::fs::write(
+        f.root.path().join("stored.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    let checked = f.command_args("verify", &["--against", "stored.json"]);
+    assert_eq!(checked["plan_validation"]["outcome"], "pass", "{checked}");
+    let r = f.apply("stored.json", Some(&digest));
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let verified = f.command("verify");
+    assert_eq!(verified["outcome"], "pass", "{verified}");
+}
