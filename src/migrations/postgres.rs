@@ -175,8 +175,10 @@ fn quote(identifier: &str) -> String {
 pub(crate) struct Postgres {
     client: Client,
     task: tokio::task::JoinHandle<()>,
-    /// sslmode, trust source and the TLS version this client negotiated.
-    transport: Value,
+    /// sslmode, trust source and the TLS version this client negotiated,
+    /// boxed, like `replay` and `extensions`, so that `Adapter`'s variants
+    /// stay alike in size.
+    transport: Box<Value>,
     /// Set once `prepare_scratch` validated this session as scratch.
     scratch: std::sync::OnceLock<Box<ScratchScope>>,
     /// The declared extensions (`[databases.<name>] extensions`, #430): a
@@ -535,7 +537,7 @@ impl Postgres {
         Ok(Self {
             client,
             task,
-            transport,
+            transport: Box::new(transport),
             scratch: std::sync::OnceLock::new(),
             extensions: Box::default(),
             replay: Box::new(scratch::Replay::new(cancel_tls)),
@@ -607,7 +609,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         ))
         .await?
         .get(0);
-        let mut transport = self.transport.clone();
+        let mut transport = Value::clone(&self.transport);
         if transport.get("tls_version").is_none() {
             transport["tls_version"] = Value::Null;
         }
