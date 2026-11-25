@@ -29,6 +29,62 @@ fn cycle(f: &Fixture, plan: &str) -> Value {
     verified
 }
 
+/// #426: the trigger body is one part of CREATE TRIGGER, not two top-level
+/// INSERTs; the following seed INSERT must run outside the trigger.
+#[test]
+fn sqlite_native_migration_grammar_preserves_trigger_behavior() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_native.sql",
+        "CREATE TABLE items(k TEXT PRIMARY KEY CHECK (k GLOB 'item-*'), value TEXT) STRICT, WITHOUT ROWID;\n\
+         CREATE TABLE changes(note TEXT NOT NULL);\n\
+         CREATE TRIGGER record_change AFTER UPDATE OF value ON items\n\
+         WHEN OLD.value IS NOT NEW.value BEGIN\n\
+           INSERT INTO changes VALUES ('changed;once');\n\
+           INSERT INTO changes VALUES ('done');\n\
+         END;\n\
+         INSERT INTO items VALUES ('item-1', NULL);",
+    );
+    cycle(&f, "native.json");
+    let db = f.target();
+    db.execute_batch("UPDATE items SET value = NULL; UPDATE items SET value = 'new'; UPDATE items SET value = 'new';").unwrap();
+    let notes: Vec<String> = db
+        .prepare("SELECT note FROM changes ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(notes, ["changed;once", "done"]);
+    assert_eq!(
+        db.execute("INSERT INTO items VALUES ('invalid', NULL)", [])
+            .unwrap_err()
+            .sqlite_error_code(),
+        Some(rusqlite::ErrorCode::ConstraintViolation)
+    );
+}
+
+/// An initial BOM and more than 4,096 tokens do not disqualify an otherwise
+/// valid seed migration. Check the data, not just its schema fingerprint.
+#[test]
+fn sqlite_native_seed_accepts_bom_and_large_statement_count() {
+    let f = Fixture::new();
+    let mut sql = String::from("\u{feff}CREATE TABLE tags (n UNSIGNED BIG INT, label VARYING CHARACTER(50), UNIQUE (n) ON CONFLICT IGNORE);\n");
+    for i in 0..400 {
+        sql.push_str(&format!("INSERT INTO tags VALUES ({i}, 'seed');\n"));
+    }
+    sql.push_str("INSERT INTO tags VALUES (0, 'duplicate');\n");
+    f.sql("0001_seed.sql", &sql);
+    cycle(&f, "seed.json");
+    let count: i64 = f
+        .target()
+        .query_row("SELECT count(*) FROM tags WHERE label = 'seed'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 400);
+}
+
 fn schema_objects(f: &Fixture) -> i64 {
     f.target()
         .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0))

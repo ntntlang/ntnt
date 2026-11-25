@@ -1082,6 +1082,28 @@ async fn inspect_observed(
             outcome
         }
         .await;
+        // Only refine the source classification for syntax/statement-kind
+        // refusals. A supported kind can still be refused by the native
+        // authorizer (DB_SQL_UNSUPPORTED); the diagnostic records that separate
+        // fact and the plan remains blocked.
+        if inputs.config.engine == "sqlite" {
+            if let Err(d) = &replay {
+                if d.code == "DB_REPLAY_UNSUPPORTED" {
+                    if let Some(i) = inputs
+                        .migrations
+                        .iter()
+                        .position(|m| d.source.as_ref() == Some(&m.name))
+                    {
+                        let analysis = &mut report["source"]["migrations"][i]["analysis"];
+                        if analysis["replay_supported"] == true {
+                            analysis["replay_supported"] = json!(false);
+                            analysis["unknowns"] =
+                                json!(["SQLITE_EFFECTS_NOT_INFERRED", "SQL_UNSUPPORTED"]);
+                        }
+                    }
+                }
+            }
+        }
         record_replay(&mut report, replay, cleanup_failure);
         // After cleanup finished, which it does not change.
         if let Some(d) = unlock_failure {
@@ -1180,25 +1202,6 @@ async fn inspect_observed(
             "expected_base_digest": expected.as_ref().zip(stored_expected).map(|(e, stored)| stored.unwrap_or_else(|| json_digest(e))),
         });
     }
-    let pending: Vec<_> = inputs
-        .migrations
-        .iter()
-        .skip(if adoption.is_some() {
-            inputs.migrations.len()
-        } else {
-            applied
-        })
-        .map(|m| {
-            let mut v = m.summary();
-            v["analysis"] = json!(analyze_in_scope(
-                &inputs.config.engine,
-                &m.sql,
-                &inputs.config.schema,
-                &inputs.history_schemas
-            ));
-            v
-        })
-        .collect();
     let candidate_outcome = if command != "plan" {
         "not_run"
     } else if candidate.as_ref().is_some_and(|c| c.uncovered.is_empty()) {
@@ -1208,6 +1211,14 @@ async fn inspect_observed(
     };
     report["binding"] = binding.clone();
     if command == "plan" {
+        // These must be the same analyses the source inventory reports,
+        // including a native SQLite refusal during replay.
+        let inventory = report["source"]["migrations"].as_array().unwrap();
+        let pending = &inventory[if adoption.is_some() {
+            inventory.len()
+        } else {
+            applied
+        }..];
         let mut execution = json!({"format":if adoption.is_some() {super::adoption::format(&inputs.config.engine)} else {adapter::execution_format(&inputs.config.engine)},"prefix_fingerprints":fingerprints});
         // The limits migrate will use are part of what is reviewed and approved.
         if let Some(limits) = inputs.plan_limits() {

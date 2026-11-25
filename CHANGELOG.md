@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-No changes recorded since 0.6.5.
+### Fixed
+
+- `ntnt db` (SQLite): migrations can use `IS NOT` in a trigger, `GLOB` in a
+  `CHECK`, and `STRICT, WITHOUT ROWID` on the same table (#426).
 
 ## 0.6.5
 

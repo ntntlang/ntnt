@@ -112,7 +112,7 @@ fn sql_error(error: rusqlite::Error) -> Diagnostic {
     }
     d
 }
-fn reserved(name: &str) -> bool {
+pub(super) fn reserved(name: &str) -> bool {
     name.to_ascii_lowercase().starts_with("_ntnt")
 }
 fn internal(name: &str) -> bool {
@@ -537,6 +537,15 @@ fn denial(action: &AuthAction<'_>) -> String {
 fn denial_advice(number: usize, refused: &str) -> String {
     format!("Rewrite statement {number} of the migration named in source without {refused}, then plan again. A SQLite migration can use the tables and views of `main`, SQLite's built-in functions except load_extension and sqlite_log, the JSON table-valued functions, SQLite's AUTOINCREMENT counters and planner statistics, and ANALYZE. It cannot use ntnt's ledger, other virtual tables, temporary objects, functions an extension or application registers, ATTACH or PRAGMAs (docs/DATABASE_MIGRATIONS.md, Supported SQL and catalog coverage).")
 }
+pub(super) fn denied_statement(number: usize, refused: &str) -> Diagnostic {
+    let mut d = Diagnostic::new(
+        "DB_SQL_UNSUPPORTED",
+        &format!("Statement {number} uses {refused}, which SQLite migrations cannot use."),
+    );
+    d.next_action = denial_advice(number, refused);
+    d
+}
+
 type AuthScope = Option<(Policy, std::collections::HashSet<String>)>;
 
 /// One native authorizer is installed per connection (rusqlite requires
@@ -673,6 +682,7 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
     // created, so the triggers a RAISE may come from are read before any
     // statement runs (review r1).
     let triggers = trigger_sql(conn);
+    let mut projected = super::sqlite_sql::statements(sql);
     let mut batch = rusqlite::Batch::new(conn, sql);
     let mut statement = 0usize;
     loop {
@@ -682,8 +692,19 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
         let mut failure = Failure::default();
         let mut dropped = Vec::new();
         let result = (|| {
-            let Some(mut statement) = batch.next().map_err(|e| failure.record(e))? else {
-                return Ok(false);
+            let source = projected.next();
+            if let Some(sql) = source {
+                super::sqlite_sql::before_prepare(sql, number)?;
+            }
+            let Some(mut statement) = batch.next().map_err(|e| {
+                super::sqlite_sql::syntax_error(&e, number).unwrap_or_else(|| failure.record(e))
+            })?
+            else {
+                return if source.is_none() {
+                    Ok(false)
+                } else {
+                    Err(super::sqlite_sql::boundary_error(number))
+                };
             };
             if statement.parameter_count() != 0 {
                 return Err(Diagnostic::new(
@@ -691,6 +712,7 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                     "Migration SQL cannot contain uncaptured bind parameters.",
                 ));
             }
+            super::sqlite_sql::check_prepared(&statement, source, number)?;
             dropped = state.auth.take_dropped();
             if !dropped.is_empty() {
                 refuse_on_delete_drops(state, number, &dropped)?;
@@ -707,18 +729,14 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
             // authorizer's record of what it refused decides the diagnostic.
             Err(mut error) => {
                 return Err(match state.auth.take_denial() {
-                    Some(refused) => {
-                        let mut d = Diagnostic::new(
-                            "DB_SQL_UNSUPPORTED",
-                            &format!(
-                            "Statement {statement} uses {refused}, which SQLite migrations cannot use."
-                        ),
-                        );
-                        d.next_action = denial_advice(statement, &refused);
-                        d
+                    Some(refused) => denied_statement(statement, &refused),
+                    // These refusals already name their statement.
+                    None if error.code == "DB_REBUILD_REQUIRED"
+                        || error.code == "DB_REPLAY_UNSUPPORTED"
+                        || error.message.starts_with("Statement ") =>
+                    {
+                        error
                     }
-                    // This refusal already names its statement.
-                    None if error.code == "DB_REBUILD_REQUIRED" => error,
                     // The session's file, not this statement, failed (#424).
                     None if error.message.starts_with(FILE_SUBJECT) => error,
                     // SQLite interrupted the statement at its deadline.
@@ -728,14 +746,7 @@ fn execute_script(state: &State, sql: &str, limit: Duration, replay: bool) -> Re
                     None if failure.missing_function().is_some() => {
                         let function = failure.missing_function().unwrap_or_default();
                         let refused = format!("SQLite function `{function}`");
-                        let mut d = Diagnostic::new(
-                            "DB_SQL_UNSUPPORTED",
-                            &format!(
-                                "Statement {statement} uses {refused}, which SQLite migrations cannot use."
-                            ),
-                        );
-                        d.next_action = denial_advice(statement, &refused);
-                        d
+                        denied_statement(statement, &refused)
                     }
                     None => {
                         if let Some(text) = failure.raised.take() {
@@ -842,12 +853,12 @@ fn raised_literal(
     text: &str,
 ) -> bool {
     let literal = |trigger: &String| {
-        super::analysis::sqlite_raise_messages(trigger)
+        super::sqlite_sql::raise_messages(trigger)
             .iter()
             .any(|m| m == text)
     };
     before.iter().chain(&trigger_sql(conn)).any(literal)
-        || super::analysis::sqlite_created_raise_messages(sql, number.saturating_sub(1))
+        || super::sqlite_sql::created_raise_messages(sql, number.saturating_sub(1))
             .iter()
             .any(|m| m == text)
 }
@@ -962,46 +973,6 @@ fn list(items: &[String]) -> String {
         [one] => one.clone(),
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
-}
-
-/// DB_REPLAY_UNSUPPORTED for a migration the SQLite parser gate refuses
-/// (#424): the statement and the cause, with advice for that cause.
-fn replay_unsupported(sql: &str) -> Diagnostic {
-    use super::analysis::SqliteRefusal::*;
-    let Some(refusal) = super::analysis::sqlite_refusal(sql) else {
-        return Diagnostic::new(
-            "DB_REPLAY_UNSUPPORTED",
-            "Migration is outside the supported SQLite subset.",
-        );
-    };
-    let (message, next_action) = match refusal {
-        Syntax { statement, near } => (
-            match near {
-                Some(near) => format!("Statement {statement} has a syntax error near {near}."),
-                None => format!("Statement {statement} has a syntax error."),
-            },
-            format!("Correct statement {statement} in the migration named in source, then rerun plan. Nothing in this migration ran."),
-        ),
-        TokenLimit { statement, limit } => (
-            format!("Statement {statement} passes the {limit}-token limit for one SQLite migration file (whitespace and comments count), so the file is not read further."),
-            format!("Split the migration into smaller migration files that keep its statements in order, each within {limit} tokens, then rerun plan. Nothing in this migration ran."),
-        ),
-        Pragma { statement, name } => (
-            format!("Statement {statement} is PRAGMA {name}; migrations cannot run PRAGMAs."),
-            "Remove the PRAGMA from the migration, then rerun plan. ntnt db sets foreign_keys and recursive_triggers on its own connections, and file settings such as journal_mode belong to the application's connection, not to a migration. Nothing in this migration ran.".to_owned(),
-        ),
-        Unsupported { statement, construct } => (
-            if construct.is_empty() {
-                format!("Statement {statement} is outside the supported SQLite subset.")
-            } else {
-                format!("Statement {statement} (`{construct}`) is outside the supported SQLite subset.")
-            },
-            format!("Rewrite statement {statement} with the statements SQLite migrations support: CREATE, ALTER and DROP TABLE; CREATE and DROP INDEX, VIEW and TRIGGER; INSERT, UPDATE and DELETE (write CREATE TABLE ... AS SELECT as CREATE TABLE, then INSERT ... SELECT); and ANALYZE, as docs/DATABASE_MIGRATIONS.md describes under Supported SQL and catalog coverage. Then rerun plan. Nothing in this migration ran."),
-        ),
-    };
-    let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", &message);
-    d.next_action = next_action;
-    d
 }
 
 /// A statement SQLite interrupted at the migration's deadline (#429).
@@ -2075,7 +2046,7 @@ fn autoincrement(state: &State, name: &str) -> Result<bool> {
     )?
     .first()
     .and_then(|row| row[0].as_str())
-    .is_some_and(super::analysis::sqlite_autoincrement))
+    .is_some_and(super::sqlite_sql::autoincrement))
 }
 
 /// The table the migration renamed to `table`, which held the copied rows
@@ -2084,7 +2055,7 @@ fn replacement_name(state: &State, table: &str) -> String {
     state
         .migration_sql
         .as_deref()
-        .and_then(|sql| super::analysis::sqlite_renamed_to(sql, table))
+        .and_then(|sql| super::sqlite_sql::renamed_to(sql, table))
         .unwrap_or_else(|| "<replacement table>".to_owned())
 }
 
@@ -2396,8 +2367,12 @@ impl Sqlite {
             if super::analysis::is_empty(&migration.sql, "sqlite") {
                 return Err(super::empty_migration());
             }
-            if !super::analysis::analyze_for("sqlite", &migration.sql, "main").replay_supported {
-                return Err(replay_unsupported(&migration.sql));
+            // sqlite3_prepare treats a NUL as the end of SQL, not a separator.
+            if migration.sql.contains('\0') {
+                return Err(Diagnostic::new(
+                    "DB_REPLAY_UNSUPPORTED",
+                    "SQLite migration SQL cannot contain a NUL byte.",
+                ));
             }
             let guard = migration
                 .sqlite_rebuild
