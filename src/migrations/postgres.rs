@@ -1131,6 +1131,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             .rows(scratch::LEFTOVER_TABLES, &[])
             .await?
             .iter()
+            .filter(|r| r.get::<_, bool>(4))
             .map(|r| r.get(0))
             .collect();
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;

@@ -192,13 +192,18 @@ ORDER BY c.oid"#;
 
 /// The scratch role's tables, but the marker's and temporary ones, when
 /// scratch holds a marker: what an unfinished replay may have left, by
-/// qualified name, as `pg_describe_object` names it, and whether this
-/// session holds a lock on it that keeps other sessions from writing it
-/// (`prepare_scratch` takes SHARE).
+/// qualified name, as `pg_describe_object` names it, whether this session
+/// holds a lock on it that keeps other sessions from writing it, whether
+/// row-level security is forced on its owner, whether the scratch role can
+/// lock it (`prepare_scratch` takes SHARE, which needs its schema's USAGE and
+/// UPDATE, DELETE or TRUNCATE on it), and whether it lacks SELECT on it: a
+/// migration may revoke the owner's own privileges.
 pub(super) const LEFTOVER_TABLES: &str = r#"SELECT pg_catalog.format('%I.%I', n.nspname, c.relname), pg_catalog.pg_describe_object('pg_catalog.pg_class'::pg_catalog.regclass, c.oid, 0),
  EXISTS (SELECT 1 FROM pg_catalog.pg_locks l WHERE l.locktype='relation' AND l.relation=c.oid AND l.pid=pg_catalog.pg_backend_pid() AND l.granted
   AND l.mode IN ('ShareLock','ShareRowExclusiveLock','ExclusiveLock','AccessExclusiveLock')),
- c.relrowsecurity AND c.relforcerowsecurity
+ c.relrowsecurity AND c.relforcerowsecurity,
+ pg_catalog.has_schema_privilege(n.oid, 'USAGE') AND pg_catalog.has_table_privilege(c.oid, 'UPDATE, DELETE, TRUNCATE'),
+ NOT pg_catalog.has_table_privilege(c.oid, 'SELECT')
 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
 JOIN pg_catalog.pg_roles me ON me.oid=c.relowner AND me.rolname=session_user
 WHERE c.relkind='r' AND n.nspname<>'_ntnt_replay' AND n.nspname !~ '^pg_(toast_)?temp_[0-9]+$'
@@ -1383,12 +1388,18 @@ impl Postgres {
     /// `prepare_scratch` locked them before this transaction's snapshot, so
     /// every row committed before is seen here and no session can write them
     /// until it ends. Row-level security forced on their owner is lifted for
-    /// the read, inside this transaction, which drops them.
+    /// the read, and SELECT a migration revoked from the owner granted back,
+    /// inside this transaction, which drops them.
     async fn check_leftover_rows(&self, marker: &Marker) -> Result<()> {
         let rows = self.rows(LEFTOVER_TABLES, &[]).await?;
         let tables: Vec<(String, String, bool, bool)> = rows
             .iter()
             .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+            .collect();
+        let unreadable: Vec<String> = rows
+            .iter()
+            .filter(|r| r.get::<_, bool>(5))
+            .map(|r| r.get(0))
             .collect();
         if tables.is_empty() {
             return Ok(());
@@ -1401,9 +1412,13 @@ impl Postgres {
         if !unlocked.is_empty() {
             return Err(unproven(
                 marker,
-                &format!("{} table(s) there (its objects field names them) appeared while recovery started, so it could not keep other sessions from writing them.", unlocked.len()),
+                &format!("recovery could not lock {} table(s) there (its objects field names them) against writes: the scratch role holds neither UPDATE, DELETE nor TRUNCATE on them, or no USAGE on their schema, or they appeared while recovery started.", unlocked.len()),
                 &unlocked,
             ));
+        }
+        for name in &unreadable {
+            self.batch(&format!("GRANT SELECT ON TABLE {name} TO CURRENT_USER"))
+                .await?;
         }
         for (name, _, _, forced) in &tables {
             if *forced {

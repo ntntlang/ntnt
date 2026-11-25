@@ -2991,6 +2991,18 @@ fn recovery_keeps_rows_written_outside_the_replay() {
     assert_eq!(r["outcome"], "pass", "{r}");
     assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+
+    // A migration may revoke the owner's own SELECT (#465 review): recovery
+    // grants it back to read the rows, in the transaction that drops them.
+    f.sql(
+        "0002_rows.sql",
+        "INSERT INTO app.t VALUES (3); REVOKE SELECT ON app.t FROM CURRENT_USER;",
+    );
+    crash_during_replay(&f);
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
 }
 
 /// #457 review: a marker whose transaction list holds a NULL is not NTNT's.
