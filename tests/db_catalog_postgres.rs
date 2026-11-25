@@ -3491,6 +3491,96 @@ fn a_committed_marker_that_disappears_fails_cleanup() {
         .get::<_, bool>(0));
 }
 
+/// The plan's report; a plan still running after LOCK_WAIT_DEADLINE is
+/// killed and fails the test (its output is read meanwhile, so a full pipe
+/// cannot hold it up).
+fn report_within(child: std::process::Child, what: &str) -> Value {
+    let id = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(LOCK_WAIT_DEADLINE) {
+        Ok(output) => {
+            let output = output.unwrap();
+            serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+        }
+        Err(_) => {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &id.to_string()])
+                .status();
+            panic!("{what}: the plan did not return within {LOCK_WAIT_DEADLINE:?}");
+        }
+    }
+}
+
+/// #430 round 2: cleanup waits at most 2 seconds for each of its locks. A
+/// session that holds a lock on a table the replay committed, until the plan
+/// has returned, makes cleanup fail with DB_SCRATCH_CLEANUP naming that
+/// session, and keep what the replay committed and the marker; a cleanup
+/// that waited for the lock would never return before the hang guard. Once
+/// the lock is gone, the next plan recovers.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_lock_on_a_replayed_table_fails_cleanup_fast_and_the_next_plan_recovers() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql("0001_base.sql", "CREATE TABLE app.t (id int);");
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    let mut holder = scratch_admin(&f);
+    holder
+        .batch_execute("SELECT pg_advisory_lock(4242)")
+        .unwrap();
+    let mut child = spawn_plan(&f);
+    let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
+    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    let mut blocker = scratch_admin(&f);
+    blocker
+        .batch_execute("BEGIN; LOCK TABLE app.t IN ACCESS SHARE MODE")
+        .unwrap();
+    let row = blocker
+        .query_one("SELECT pg_backend_pid(), current_user::text", &[])
+        .unwrap();
+    let (pid, role): (i32, String) = (row.get(0), row.get(1));
+    holder
+        .batch_execute("SELECT pg_advisory_unlock(4242)")
+        .unwrap();
+    let r = report_within(child, "cleanup blocked by a lock on app.t");
+    let d = diagnostic(&r, "DB_SCRATCH_CLEANUP").unwrap_or_else(|| panic!("{r}"));
+    let message = d["message"].as_str().unwrap();
+    assert!(message.contains("55P03"), "{d}");
+    assert!(message.contains(&format!("pid {pid} (role {role})")), "{d}");
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("rerun plan, status or verify"),
+        "{d}"
+    );
+    assert_eq!(r["scratch"]["cleanup"], "unknown", "{r}");
+    let kept: bool = holder
+        .query_one(
+            "SELECT to_regclass('app.t') IS NOT NULL AND to_regnamespace('_ntnt_replay') IS NOT NULL",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        kept,
+        "cleanup dropped what the replay committed, or its marker"
+    );
+    blocker.batch_execute("ROLLBACK").unwrap();
+    std::fs::remove_file(f.root.path().join("migrations/0002_wait.sql")).unwrap();
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
 /// #430 review: replay has its own deadline inside inspection, so a plan
 /// whose replay runs past it is cut short (its statement cancelled) with
 /// DB_TIMEOUT, and cleanup still runs and empties scratch. Each migration

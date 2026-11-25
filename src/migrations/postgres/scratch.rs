@@ -542,6 +542,69 @@ fn limit() -> Duration {
     Limits::default().statement()
 }
 
+/// Cleanup's statements wait at most 2 seconds for each lock and run at most
+/// 5 seconds, NTNT's limits for catalog exchanges; `DROP OWNED`, whose work
+/// grows with the history, has `DROP_OWNED_LIMIT` (#430).
+const CLEANUP_LIMITS: &str = "SET LOCAL statement_timeout=5000; SET LOCAL lock_timeout='2s';";
+/// Dropping what an 800-migration history commits takes well under a second.
+const DROP_OWNED_LIMIT: Duration = Duration::from_secs(10);
+/// A lock wait `DROP OWNED` gives up on is tried again only when no session
+/// holds a lock on scratch's objects any more: autovacuum gives way to a
+/// waiting lock after `deadlock_timeout`.
+const DROP_OWNED_ATTEMPTS: usize = 3;
+/// Cleanup's transaction stops after this, leaving the cancel, rollback and
+/// unlock exchanges their 5 seconds each within its 30 seconds
+/// (`report::SCRATCH_CLEANUP_RESERVE`).
+const CLEANUP_WORK: Duration = Duration::from_secs(15);
+/// Sessions other than this one that hold a lock on a relation the scratch
+/// role owns, or on another object, in the scratch database: whatever
+/// `DROP OWNED` could wait for. The role is NULL for a background process
+/// (autovacuum). Statistics are read fresh, not from the transaction's
+/// snapshot of them.
+const LOCK_HOLDERS: &str = r#"SELECT DISTINCT l.pid, a.usename::text, a.usename=session_user
+FROM pg_catalog.pg_locks l LEFT JOIN pg_catalog.pg_stat_activity a ON a.pid=l.pid
+WHERE l.granted AND l.pid<>pg_catalog.pg_backend_pid()
+  AND l.database=(SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database())
+  AND (l.locktype='object' OR (l.locktype IN ('relation','page','tuple') AND l.relation IN
+       (SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_roles me ON me.oid=c.relowner WHERE me.rolname=session_user)))
+ORDER BY l.pid"#;
+
+/// `DB_SCRATCH_CLEANUP` for a `DROP OWNED` that could not take its locks
+/// within the lock limit: it names the sessions that hold locks on what the
+/// replay committed, and says the next replay recovers once they are gone.
+fn cleanup_blocked(holders: &[(i32, Option<String>, Option<bool>)], attempts: usize) -> Diagnostic {
+    let named: Vec<String> = holders
+        .iter()
+        .map(|(pid, role, mine)| match (role, mine) {
+            (Some(role), Some(true)) => format!("pid {pid} (the scratch role {role})"),
+            (Some(role), _) => format!("pid {pid} (role {role})"),
+            (None, _) => format!("pid {pid} (a background process, such as autovacuum)"),
+        })
+        .collect();
+    let who = if named.is_empty() {
+        "the session that held it had already released it".to_owned()
+    } else {
+        format!(
+            "{} other session(s) hold locks on what the replay committed there: {}",
+            named.len(),
+            named.join(", ")
+        )
+    };
+    let mut d = Diagnostic::new(
+        "DB_SCRATCH_CLEANUP",
+        &format!(
+            "Replay could not clean up the scratch database: DROP OWNED BY CURRENT_USER waited 2 seconds for a lock, the limit for each of cleanup's locks, {attempts} time(s) (SQLSTATE 55P03), and {who}. Nothing was dropped; what the replay committed there and NTNT's marker schema _ntnt_replay remain."
+        ),
+    );
+    let own = if holders.iter().any(|(_, _, mine)| *mine == Some(true)) {
+        " A session of the scratch role must not stay connected to scratch: while one is, the next replay refuses with DB_SCRATCH_BUSY and changes nothing."
+    } else {
+        ""
+    };
+    d.next_action = format!("Let the sessions named in the message finish, or end them as the scratch database's administrator (pg_terminate_backend), then rerun plan, status or verify: the next one finds NTNT's marker and cleans up what this replay committed before it replays.{own} The target was not changed.");
+    d
+}
+
 /// `DB_SCRATCH_NOT_EMPTY` as `prepare_scratch` reports it.
 pub(super) fn not_empty() -> Diagnostic {
     Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions or default grants.")
@@ -1096,12 +1159,7 @@ impl Postgres {
         let public = &marker.public;
         // DROP OWNED BY CURRENT_USER must name the scratch role itself, never
         // a role a migration switched to.
-        self.batch(&format!(
-            "RESET ROLE; SET LOCAL statement_timeout='{}s'; SET LOCAL lock_timeout='{}s';",
-            limit().as_secs(),
-            limit().as_secs()
-        ))
-        .await?;
+        self.batch(&format!("RESET ROLE; {CLEANUP_LIMITS}")).await?;
         if !self.rows("SELECT current_user=session_user", &[]).await?[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_SCRATCH_CLEANUP",
@@ -1138,13 +1196,53 @@ impl Postgres {
                 "The scratch session no longer holds NTNT's replay lock, so another plan, status or verify may be replaying on scratch, and cleanup dropped nothing.",
             ));
         }
-        bounded_for(
-            limit() + SERVER_LIMIT_MARGIN,
-            self.client.batch_execute("DROP OWNED BY CURRENT_USER"),
-        )
-        .await?;
+        self.drop_owned().await?;
         self.restore_public(public).await?;
         self.restore_database(&marker.database).await
+    }
+
+    /// `DROP OWNED BY CURRENT_USER` in a savepoint, under `DROP_OWNED_LIMIT`
+    /// and the 2-second lock limit. A lock wait it gives up on fails with
+    /// `cleanup_blocked`, naming the sessions that hold locks on scratch's
+    /// objects; it is tried again, up to `DROP_OWNED_ATTEMPTS` times, only
+    /// when none does any more (autovacuum gave way).
+    async fn drop_owned(&self) -> Result<()> {
+        for attempt in 1..=DROP_OWNED_ATTEMPTS {
+            self.batch(&format!(
+                "SAVEPOINT ntnt_drop_owned; SET LOCAL statement_timeout='{}s';",
+                DROP_OWNED_LIMIT.as_secs()
+            ))
+            .await?;
+            let dropped = bounded_for(
+                DROP_OWNED_LIMIT + SERVER_LIMIT_MARGIN,
+                self.client.batch_execute("DROP OWNED BY CURRENT_USER"),
+            )
+            .await;
+            match dropped {
+                Ok(()) => {
+                    return self
+                        .batch(&format!(
+                            "RELEASE SAVEPOINT ntnt_drop_owned; {CLEANUP_LIMITS}"
+                        ))
+                        .await
+                }
+                Err(d) if d.code == "DB_LOCK_CONFLICT" => {
+                    self.batch("ROLLBACK TO SAVEPOINT ntnt_drop_owned; RELEASE SAVEPOINT ntnt_drop_owned; SELECT pg_catalog.pg_stat_clear_snapshot();")
+                        .await?;
+                    let holders: Vec<(i32, Option<String>, Option<bool>)> = self
+                        .rows(LOCK_HOLDERS, &[])
+                        .await?
+                        .iter()
+                        .map(|r| (r.get(0), r.get(1), r.get(2)))
+                        .collect();
+                    if attempt == DROP_OWNED_ATTEMPTS || holders.iter().any(|h| h.1.is_some()) {
+                        return Err(cleanup_blocked(&holders, attempt));
+                    }
+                }
+                Err(d) => return Err(d),
+            }
+        }
+        unreachable!("the last attempt returns")
     }
 
     /// Give `public` back the name, owner, privileges and comment it had
@@ -1354,9 +1452,10 @@ impl Postgres {
     /// replay's own marker and this session the replay lock, which it takes
     /// again if a migration released it. A failure is `DB_SCRATCH_CLEANUP`;
     /// the marker then stays, so the next replay cleans up. Ok(false) when
-    /// the replay committed nothing, so there was nothing to clean.
+    /// the replay committed nothing, so there was nothing to clean. The
+    /// transaction stops after `CLEANUP_WORK`, its statement cancelled.
     pub async fn cleanup_scratch(&self) -> Result<bool> {
-        let result = async {
+        let work = async {
             self.rollback().await?;
             let Some(id) = self.replay.id.get() else {
                 return Ok(false);
@@ -1399,8 +1498,17 @@ impl Postgres {
             )
                 .await?;
             self.batch("COMMIT").await.map(|()| true)
-        }
-        .await;
+        };
+        let result = match tokio::time::timeout(CLEANUP_WORK, work).await {
+            Ok(result) => result,
+            Err(_) => {
+                self.cancel_running().await;
+                Err(Diagnostic::new(
+                    "DB_SCRATCH_CLEANUP",
+                    &format!("Replay could not clean up the scratch database within {} seconds, so NTNT cancelled cleanup; what the replay committed there and NTNT's marker schema _ntnt_replay remain.", CLEANUP_WORK.as_secs()),
+                ))
+            }
+        };
         if result.is_err() {
             let _ = self.rollback().await;
         }
@@ -1408,5 +1516,45 @@ impl Postgres {
         result
             .map_err(cleanup_failed)
             .and_then(|cleaned| unlocked.map(|()| cleaned))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_blocked;
+
+    /// #430 round 2: a cleanup that gave up on a lock names each session
+    /// that holds one, and says how the next replay recovers.
+    #[test]
+    fn a_blocked_cleanup_names_the_sessions_that_hold_locks() {
+        let d = cleanup_blocked(
+            &[
+                (7, Some("app_replay".into()), Some(true)),
+                (8, Some("postgres".into()), Some(false)),
+                (9, None, None),
+            ],
+            1,
+        );
+        assert_eq!(d.code, "DB_SCRATCH_CLEANUP");
+        for part in [
+            "55P03",
+            "3 other session(s)",
+            "pid 7 (the scratch role app_replay)",
+            "pid 8 (role postgres)",
+            "pid 9 (a background process, such as autovacuum)",
+            "_ntnt_replay remain",
+        ] {
+            assert!(d.message.contains(part), "{part}: {}", d.message);
+        }
+        assert!(d.next_action.contains("rerun plan, status or verify"));
+        assert!(d.next_action.contains("DB_SCRATCH_BUSY"));
+        let gone = cleanup_blocked(&[], 3);
+        assert!(gone.message.contains("3 time(s)"), "{}", gone.message);
+        assert!(
+            gone.message.contains("already released it"),
+            "{}",
+            gone.message
+        );
+        assert!(!gone.next_action.contains("DB_SCRATCH_BUSY"));
     }
 }

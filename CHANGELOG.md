@@ -41,6 +41,12 @@
   statement it was running and still cleans scratch up within 30 more seconds;
   `scratch.cleanup` is `not_needed` when replay committed nothing, and cleanup
   drops nothing without the replay lock (#430).
+- `ntnt db` (PostgreSQL): scratch cleanup keeps to its documented limits. Each
+  of its locks waits at most 2 seconds, `DROP OWNED` runs at most 10 and the
+  whole cleanup fits its 30 seconds, so a session holding a lock on a replayed
+  table no longer holds a plan up to 90 seconds. Cleanup then fails with
+  `DB_SCRATCH_CLEANUP` naming the sessions that hold locks (PID and role),
+  the marker stays, and the next plan recovers once they are gone (#430).
 - `ntnt db` (PostgreSQL): plans, statuses and verifies on one scratch database
   are serialized by an advisory lock; a second one waits up to
   `migrator_wait_seconds`, then fails with `DB_SCRATCH_BUSY`. A migration that

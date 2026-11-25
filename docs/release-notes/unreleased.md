@@ -136,6 +136,13 @@
   is `not_needed` when nothing was committed. Cleanup drops nothing unless it
   holds the replay lock, and a committed marker that is gone is
   `DB_SCRATCH_CLEANUP` (#430).
+- **Cleanup keeps to its limits.** Each of its locks waits at most 2 seconds,
+  `DROP OWNED` runs at most 10, and cleanup as a whole fits its 30 seconds. A
+  session that holds a lock on a table the replay committed (an open
+  transaction that read it, say) makes cleanup fail fast with
+  `DB_SCRATCH_CLEANUP` naming that session's PID and role; the marker stays,
+  and the next plan, status or verify recovers once the session is gone. A
+  wait that autovacuum caused is tried again, up to three times (#430).
 - **Concurrent plans on one scratch database wait for each other** instead of
   interleaving: a session advisory lock covers each replay, a second plan,
   status or verify waits up to `migrator_wait_seconds` and then fails with
