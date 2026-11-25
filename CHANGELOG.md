@@ -2,7 +2,39 @@
 
 ## Unreleased
 
-No changes recorded since 0.6.4.
+### Security
+
+- Update `cookie` to 0.18.3 for RUSTSEC-2026-0594.
+
+### Fixed
+
+- `ntnt db` (SQLite): migrations can call SQLite's built-in functions, the JSON
+  functions, `hex` and `randomblob` included; `load_extension`, `sqlite_log`
+  and extension or application functions stay refused, and the refusal says
+  what a migration can use (#427).
+- `ntnt db` (SQLite): AUTOINCREMENT tables plan, migrate and verify; the
+  `sqlite_sequence` counters are outside coverage and drift (#427).
+- `ntnt db` (SQLite): the planner statistics that `ANALYZE` and `PRAGMA
+  optimize` write are outside coverage and drift, and a migration can run
+  `ANALYZE` (#427).
+- `ntnt db` (SQLite): `ALTER TABLE ... ADD COLUMN` on a STRICT table or with a
+  CHECK constraint plans, and reads that name no column (`count(*) FROM t`)
+  and `WITH RECURSIVE` are allowed (#427).
+- `ntnt db` (SQLite): a `sqlite_rebuild` must keep the rebuilt table's
+  AUTOINCREMENT counter in one `sqlite_sequence` row, so deleted ids are
+  never reused; the refusal names the table and both values (or the number of
+  rows), and gives the `UPDATE`, `DELETE` and `INSERT` lines that fix it
+  (#427).
+- `ntnt db` (SQLite): `DB_REBUILD_GUARD` names the rule and object a rebuild
+  broke (a row count with both values, a missing or changed index, trigger or
+  view, a changed table) and lists them in `objects` (#427).
+- `ntnt db` (SQLite): an application function in DML is `DB_SQL_UNSUPPORTED`
+  naming the function; `ADD COLUMN ... UNIQUE` reports `Cannot add a UNIQUE
+  column` and suggests a unique index; ADD COLUMN defaults that fail on rows,
+  and drops of referenced tables without the sidecar, get a `next_action`
+  that says what to write instead (#427).
+- `ntnt db`: `migrate --plan` with a saved plan that holds no plan (outcome
+  `fail`, no `plan_digest`) says the plan is blocked instead of edited (#427).
 
 ## 0.6.4
 

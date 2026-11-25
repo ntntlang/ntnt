@@ -182,6 +182,11 @@ fn error(message: &str) -> Option<String> {
         "Cannot add a NOT NULL column with default value NULL",
         "Cannot add a REFERENCES column with non-NULL default value",
         "cannot add a STORED column",
+        // ALTER TABLE ... ADD COLUMN re-checks the table's existing rows
+        // against a new CHECK, NOT NULL or STRICT column type (#427 sq-08).
+        "CHECK constraint failed",
+        "NOT NULL constraint failed",
+        "type mismatch on DEFAULT",
     ];
     const NAMED: &[&str] = &[
         "no such column: ",
@@ -239,6 +244,16 @@ fn error(message: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The function a `no such function: <name>` failure names, when the name
+/// is a plain identifier: one SQLite does not define, such as a function an
+/// application registers on its own connections (#427 F4).
+pub(super) fn missing_function(code: i32, message: &str) -> Option<&str> {
+    (code == rusqlite::ffi::SQLITE_ERROR)
+        .then(|| message.strip_prefix("no such function: "))
+        .flatten()
+        .filter(|function| identifier(function))
 }
 
 /// A plain SQL name: ASCII letters, digits, `_` and `$`, not starting with

@@ -65,6 +65,28 @@ fn simple(value: &Value) -> Option<&str> {
 /// one `execution::validate` requires, so this refuses no plan it accepts.
 pub(super) fn intact(saved: &Value) -> Result<(), Diagnostic> {
     let plan = &saved["plan"];
+    let blocked = |outcome: &str| {
+        stale(
+            format!("Saved plan is blocked: its outcome is {outcome}, so `ntnt db plan` found problems it could not resolve, and a blocked plan is never executed."),
+            "Fix what that plan's diagnostics reported, then plan, review and approve again.".to_owned(),
+        )
+    };
+    // `plan --out` saves a plan whose outcome is not pass too, and one that
+    // stopped before it made a plan has no plan and no plan_digest. Its
+    // outcome says why it cannot run, so it is checked before the digest.
+    if saved["format_version"] == 1 && saved["outcome"] != "pass" {
+        if let Some(outcome) = simple(&saved["outcome"]) {
+            if !plan.is_object() && saved["plan_digest"].is_null() {
+                return Err(stale(
+                    format!("Saved plan is blocked: its outcome is {outcome}, and it holds no plan because `ntnt db plan` stopped before it could make one. A blocked plan is never executed."),
+                    "Fix what that plan's diagnostics reported (they are in the saved file, and `ntnt db plan` reports them again), then plan, review and approve again. Approve a plan only when its outcome is pass and it has a plan_digest.".to_owned(),
+                ));
+            }
+            if saved["plan_digest"] == json_digest(plan) {
+                return Err(blocked(outcome));
+            }
+        }
+    }
     if saved["format_version"] != 1
         || !plan.is_object()
         || saved["plan_digest"] != json_digest(plan)
@@ -75,11 +97,7 @@ pub(super) fn intact(saved: &Value) -> Result<(), Diagnostic> {
         || plan["classification"] != "requires_review"
         || plan["candidate"]["outcome"] != "pass"
     {
-        let outcome = simple(&saved["outcome"]).unwrap_or("not pass");
-        return Err(stale(
-            format!("Saved plan is blocked: its outcome is {outcome}, so `ntnt db plan` found problems it could not resolve, and a blocked plan is never executed."),
-            "Fix what that plan's diagnostics reported, then plan, review and approve again.".to_owned(),
-        ));
+        return Err(blocked(simple(&saved["outcome"]).unwrap_or("not pass")));
     }
     let b = &plan["binding"];
     let fingerprints = plan["execution"]["prefix_fingerprints"].as_array();
