@@ -64,6 +64,26 @@
   releases that lock is refused, and a killed replay's leftovers are not cleaned
   up while another session of the scratch role is connected (`DB_SCRATCH_BUSY`)
   (#430).
+- `ntnt db` (PostgreSQL): replay and scratch cleanup, from the 0.6.5 review.
+  A migration that swaps the replay lock for a transaction-level lock on the
+  same key is refused before it commits, and the lock is checked again after
+  each commit. Recovering a killed replay's leftovers also proves who wrote
+  the rows of the scratch role's tables: replay records each migration's
+  transaction and those of its subtransactions that wrote rows, recovery locks
+  those tables before it reads them, and a row another session wrote there
+  refuses recovery (`DB_SCRATCH_NOT_EMPTY`, naming the table) and drops
+  nothing. A marker whose transaction list holds a NULL or whose settings are
+  not a snapshot is not NTNT's and is never cleaned. Refused before they
+  commit (`DB_REPLAY_UNSUPPORTED`): a schema another role owns when the
+  migration dropped `public` (cleanup could not drop it), a change of the
+  scratch database's or `public`'s privileges while they hold a grant another
+  role made with a grant option (cleanup grants as the owner, so it could not
+  restore it), and `local_preload_libraries` or `session_preload_libraries`
+  set for the scratch database or role (a library that does not load refuses
+  every connection, so a replay stopped before cleanup could not be
+  recovered). Cleanup restores setting values as escape string literals, and
+  after a failed cleanup the advice to drop or recreate scratch applies only to
+  a database nothing else uses.
 - `ntnt db` (PostgreSQL): cleanup restores the scratch database's privileges,
   connection limit, comment and settings, and the scratch role's settings, so
   histories that change them in a `DO` block still plan. Replay refuses, before
