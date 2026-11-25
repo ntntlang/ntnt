@@ -5,7 +5,9 @@
 //!
 //! - A session advisory lock serializes replays on one scratch database,
 //!   from the first look at its contents until cleanup ends. A migration
-//!   that releases it is refused before it commits.
+//!   that releases it, also for a transaction-level lock on the same key
+//!   that its commit would release, is refused before it commits, and the
+//!   lock is checked again after each commit.
 //! - Before the marker, the scratch role may own nothing in scratch but
 //!   `public`, since cleanup drops whatever it owns.
 //! - Before the first migration a committed marker, the schema
@@ -16,13 +18,14 @@
 //!   `public` and runs the emptiness check again, in one transaction.
 //! - The marker is bound to this database (its OID and the cluster's system
 //!   identifier) and records every transaction of the replay that wrote the
-//!   catalog, in the same transaction as the write.
+//!   catalog or a row of the scratch role's tables, in the same transaction
+//!   as the write.
 //! - A marker that a replay which never finished left behind is cleaned
 //!   the same way, but only when it was written in this database, scratch
 //!   holds no `_ntnt` ledger, no other role owns anything in scratch, every
 //!   catalog row there was last written by one of the marker's transactions,
-//!   and no other session of the scratch role, which may still be that
-//!   replay, is connected.
+//!   so was every row of the scratch role's tables, and no other session of
+//!   the scratch role, which may still be that replay, is connected.
 //! - The scratch database's privileges, connection limit and comment, and
 //!   the settings of the database and the scratch role, are recorded in the
 //!   marker and restored by cleanup, like `public`.
@@ -46,6 +49,14 @@ const UNLOCK: &str = "SELECT pg_catalog.pg_advisory_unlock(1853124212, 430)";
 /// Whether this session still holds the replay lock: a migration can
 /// release it (`pg_advisory_unlock_all()`).
 const HOLDS_LOCK: &str = "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l WHERE l.locktype='advisory' AND l.classid=1853124212 AND l.objid=430 AND l.objsubid=2 AND l.pid=pg_catalog.pg_backend_pid() AND l.granted)";
+/// `pg_locks` shows a transaction-level lock on the same key the same way,
+/// and a migration may take one in place of the replay lock; its commit then
+/// releases it. In the open transaction, once `HOLDS_LOCK` holds, this takes
+/// a transaction-level hold too, so that the key stays held throughout:
+/// releasing one session-level hold (`SESSION_UNLOCK`) then succeeds only if
+/// there is one, and `LOCK` takes it back at once.
+const XACT_LOCK: &str = "SELECT pg_catalog.pg_advisory_xact_lock(1853124212, 430)";
+const SESSION_UNLOCK: &str = "SELECT pg_catalog.pg_advisory_unlock(1853124212, 430)";
 /// Whether another session of the scratch role is connected to scratch. A
 /// replay whose migration released the replay lock may still be running.
 const OTHER_SESSIONS: &str = "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a WHERE a.datname=pg_catalog.current_database() AND a.usename=session_user AND a.backend_type='client backend' AND a.pid<>pg_catalog.pg_backend_pid())";
@@ -69,7 +80,8 @@ FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles me ON me.rolname=session
 LEFT JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname='replay_v1'
 WHERE n.nspname='_ntnt_replay'"#;
 const MARKER_ROW: &str = r#"SELECT id, pg_catalog.to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), public_oid, public_owner, public_acl, public_comment,
- system_identifier, database_oid, database_acl, database_connlimit, database_comment, settings
+ system_identifier, database_oid, database_acl, database_connlimit, database_comment, settings,
+ xids IS NOT NULL AND NOT EXISTS (SELECT FROM pg_catalog.unnest(xids) u(x) WHERE u.x IS NULL)
 FROM ONLY _ntnt_replay.replay_v1 LIMIT 2"#;
 /// The transactions the marker records, as text: those of prepare and of
 /// each committed replay step that wrote the catalog (`record_xids`).
@@ -140,23 +152,76 @@ const CATALOG_ROWS: &str = r#"cat(classid, objid, nsp, x) AS (
   UNION ALL SELECT 'pg_catalog.pg_default_acl'::pg_catalog.regclass::oid, a.oid, a.defaclnamespace, a.xmin FROM pg_catalog.pg_default_acl a
   UNION ALL SELECT d.classoid, d.objoid, 0::oid, d.xmin FROM pg_catalog.pg_description d WHERE d.objoid>=16384)"#;
 
-/// Add to the marker, in the transaction about to commit, every transaction
-/// of this one's tree (its own and its subtransactions', as PL/pgSQL
-/// exception blocks start) that last wrote a row of `CATALOG_ROWS`: rows
-/// that are visible and whose `xmin` is still in progress can only be this
-/// transaction's. A child's transaction ID is always above its parent's;
-/// $1 is one just assigned (`record_xids`), so no ID above it is looked up.
-/// Returns the marker's transactions.
-fn record_xids_sql() -> String {
+/// Add to the marker, in the transaction about to commit, this transaction
+/// and every transaction of its tree (its own and its subtransactions', as
+/// PL/pgSQL exception blocks start) that last wrote a row of `CATALOG_ROWS`
+/// or of `tables`, the scratch role's tables it wrote (`WRITTEN_TABLES`):
+/// rows that are visible and whose `xmin` is still in progress can only be
+/// this transaction's. A child's transaction ID is always above its
+/// parent's; $1 is one just assigned (`record_xids`), so no ID above it is
+/// looked up. Returns the marker's transactions.
+fn record_xids_sql(tables: &[String]) -> String {
+    let data: String = tables
+        .iter()
+        .map(|t| format!(" UNION ALL SELECT s.xmin FROM ONLY {t} s"))
+        .collect();
     format!(
         r#"WITH {CATALOG_ROWS},
+written(x) AS (SELECT c.x FROM cat c{data}),
 top AS (SELECT pg_catalog.pg_current_xact_id()::text::numeric AS x),
 bound AS (SELECT t.x, ($1::text::numeric - t.x % 4294967296 + 4294967296) % 4294967296 AS upto FROM top t),
-d AS (SELECT DISTINCT (c.x::text::numeric - t.x % 4294967296 + 4294967296) % 4294967296 AS d FROM cat c, top t),
+d AS (SELECT DISTINCT (w.x::text::numeric - t.x % 4294967296 + 4294967296) % 4294967296 AS d FROM written w, top t UNION SELECT 0),
 mine AS (SELECT (t.x + d.d)::text::pg_catalog.xid8 AS x FROM d, bound t
   WHERE CASE WHEN d.d <= t.upto THEN pg_catalog.pg_xact_status((t.x + d.d)::text::pg_catalog.xid8) = 'in progress' ELSE false END)
 UPDATE ONLY _ntnt_replay.replay_v1 r SET xids = r.xids || ARRAY(SELECT m.x FROM mine m WHERE m.x <> ALL (r.xids) ORDER BY m.x)
 RETURNING coalesce(r.xids::text, '')"#
+    )
+}
+
+/// The scratch role's tables this transaction wrote rows of, by
+/// qualified name, for `record_xids_sql`. Not those with row-level security
+/// forced on their owner: replay runs with `row_security` off, so reading
+/// them would fail. Their rows written in a subtransaction stay unrecorded,
+/// which can only make recovery refuse.
+const WRITTEN_TABLES: &str = r#"SELECT pg_catalog.format('%I.%I', n.nspname, c.relname) FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_roles me ON me.oid=c.relowner AND me.rolname=session_user
+WHERE c.relkind='r' AND NOT (c.relrowsecurity AND c.relforcerowsecurity) AND n.nspname<>'_ntnt_replay' AND n.nspname !~ '^pg_(toast_)?temp_[0-9]+$'
+ AND pg_catalog.pg_stat_get_xact_tuples_inserted(c.oid)+pg_catalog.pg_stat_get_xact_tuples_updated(c.oid)>0
+ AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') AND pg_catalog.has_table_privilege(c.oid, 'SELECT')
+ORDER BY c.oid"#;
+
+/// The scratch role's tables, but the marker's and temporary ones, when
+/// scratch holds a marker: what an unfinished replay may have left, by
+/// qualified name, as `pg_describe_object` names it, and whether this
+/// session holds a lock on it that keeps other sessions from writing it
+/// (`prepare_scratch` takes SHARE).
+pub(super) const LEFTOVER_TABLES: &str = r#"SELECT pg_catalog.format('%I.%I', n.nspname, c.relname), pg_catalog.pg_describe_object('pg_catalog.pg_class'::pg_catalog.regclass, c.oid, 0),
+ EXISTS (SELECT 1 FROM pg_catalog.pg_locks l WHERE l.locktype='relation' AND l.relation=c.oid AND l.pid=pg_catalog.pg_backend_pid() AND l.granted
+  AND l.mode IN ('ShareLock','ShareRowExclusiveLock','ExclusiveLock','AccessExclusiveLock')),
+ c.relrowsecurity AND c.relforcerowsecurity
+FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+JOIN pg_catalog.pg_roles me ON me.oid=c.relowner AND me.rolname=session_user
+WHERE c.relkind='r' AND n.nspname<>'_ntnt_replay' AND n.nspname !~ '^pg_(toast_)?temp_[0-9]+$'
+ AND pg_catalog.to_regnamespace('_ntnt_replay') IS NOT NULL
+ORDER BY c.oid"#;
+
+/// Which of `tables` (by position, from 1) hold a row whose `xmin` is none
+/// of the marker's transactions, compared as 32-bit IDs, as in
+/// `unproven_sql`.
+fn unproven_rows_sql(tables: &[String]) -> String {
+    let checks: Vec<String> = tables
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            format!(
+                "SELECT {} AS i WHERE EXISTS (SELECT 1 FROM ONLY {t} s WHERE NOT EXISTS (SELECT 1 FROM rec WHERE rec.x=s.xmin::text::bigint))",
+                i + 1
+            )
+        })
+        .collect();
+    format!(
+        "WITH rec(x) AS (SELECT (u.x::text::numeric % 4294967296)::bigint FROM ONLY _ntnt_replay.replay_v1 r CROSS JOIN LATERAL pg_catalog.unnest(r.xids) u(x))\n{} ORDER BY 1",
+        checks.join("\nUNION ALL ")
     )
 }
 
@@ -177,7 +242,7 @@ SELECT DISTINCT pg_catalog.pg_describe_object(c.classid, c.objid, 0) FROM cat c
 WHERE c.nsp NOT IN (SELECT oid FROM temp)
  AND NOT (c.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND c.objid=$1)
  AND NOT EXISTS (SELECT 1 FROM declared w WHERE w.classid=c.classid AND w.objid=c.objid)
- AND c.x::text::bigint NOT IN (SELECT x FROM rec)
+ AND NOT EXISTS (SELECT 1 FROM rec WHERE rec.x=c.x::text::bigint)
 ORDER BY 1 LIMIT 101"#,
         declared = declared_objects!()
     )
@@ -215,6 +280,17 @@ const RESTORE_DATABASE_GRANTS: &str = r#"SELECT s FROM (
 WHERE s IS NOT NULL AND (EXISTS (SELECT * FROM want EXCEPT SELECT * FROM have) OR EXISTS (SELECT * FROM have EXCEPT SELECT * FROM want))
 ORDER BY o, s"#;
 
+/// After `DATABASE_GRANTS`: the grants of the scratch database's privileges
+/// before the first migration ($1) that a role other than its owner made,
+/// with a grant option, when those privileges changed since. Cleanup gives
+/// them back as the owner, and a grant records who made it, so it could not
+/// restore these.
+const DELEGATED_DATABASE_GRANTS: &str = r#"SELECT pg_catalog.format('%s on database %I granted to %s by %s', w.privilege_type, pg_catalog.current_database(),
+  CASE WHEN w.grantee=0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(w.grantee)) END, pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(w.grantor)))
+FROM want w WHERE w.grantor<>(SELECT d.datdba FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database())
+ AND (EXISTS (SELECT * FROM want EXCEPT SELECT * FROM have) OR EXISTS (SELECT * FROM have EXCEPT SELECT * FROM want))
+ORDER BY 1"#;
+
 /// `public` as cleanup restores it: its owner, privileges and comment.
 const PUBLIC_STATE: &str = "SELECT n.oid, pg_catalog.pg_get_userbyid(n.nspowner)::text, n.nspacl::text, pg_catalog.obj_description(n.oid, 'pg_namespace')::text FROM pg_catalog.pg_namespace n WHERE n.nspname='public'";
 
@@ -238,6 +314,14 @@ const RESTORE_PUBLIC_GRANTS: &str = r#"SELECT s FROM (
 WHERE s IS NOT NULL AND (EXISTS (SELECT * FROM want EXCEPT SELECT * FROM have) OR EXISTS (SELECT * FROM have EXCEPT SELECT * FROM want))
 ORDER BY o, s"#;
 
+/// After `PUBLIC_GRANTS`, as `DELEGATED_DATABASE_GRANTS` for `public`
+/// (owner $2).
+const DELEGATED_PUBLIC_GRANTS: &str = r#"SELECT pg_catalog.format('%s on schema public granted to %s by %s', w.privilege_type,
+  CASE WHEN w.grantee=0 THEN 'PUBLIC' ELSE pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(w.grantee)) END, pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(w.grantor)))
+FROM want w WHERE w.grantor<>(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=$2)
+ AND (EXISTS (SELECT * FROM want EXCEPT SELECT * FROM have) OR EXISTS (SELECT * FROM have EXCEPT SELECT * FROM want))
+ORDER BY 1"#;
+
 /// Casts have no owner, and `DROP OWNED` refuses to drop a type one
 /// depends on: drop the casts of the scratch role's types first. An
 /// extension's casts go with the extension.
@@ -257,7 +341,8 @@ ORDER BY 1"#;
 /// so are a range type's constructor functions. A cast belongs to it when
 /// it casts one of its types. `public` ($1, by OID, or the schema now
 /// named `public`, which a migration may have dropped and created again for
-/// `pg_database_owner`) is restored instead. Objects `initdb` created have
+/// `pg_database_owner`; only $1 when none is) is restored instead. Objects
+/// `initdb` created have
 /// OIDs below 16384. What a superuser installed for the declared extensions
 /// (`declared_objects`, `$2`) is not listed: scratch holds it before the
 /// marker, as the target does, and cleanup keeps it (#430).
@@ -292,7 +377,7 @@ candidate(classid, objid) AS (
   SELECT o.classid, o.objid FROM objs o
   WHERE (o.objid>=16384 OR o.classid IN ('pg_catalog.pg_largeobject_metadata'::pg_catalog.regclass, 'pg_catalog.pg_default_acl'::pg_catalog.regclass))
    AND o.owner<>(SELECT oid FROM me) AND o.nsp NOT IN (SELECT oid FROM temp)
-   AND NOT (o.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND (o.objid=$1 OR o.objid=pg_catalog.to_regnamespace('public')::oid))
+   AND NOT (o.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND (o.objid=$1 OR o.objid IS NOT DISTINCT FROM pg_catalog.to_regnamespace('public')::oid))
   UNION ALL
   SELECT 'pg_catalog.pg_cast'::pg_catalog.regclass::oid, c.oid FROM pg_catalog.pg_cast c WHERE c.oid>=16384
    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type t WHERE t.oid IN (c.castsource, c.casttarget) AND t.typowner=(SELECT oid FROM me))
@@ -338,7 +423,7 @@ WHERE s.refclassid='pg_catalog.pg_authid'::pg_catalog.regclass AND s.refobjid=(S
  AND (s.dbid=0 OR s.dbid=(SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database()))
  AND (s.deptype='a' OR (s.deptype='r' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid=p.polrelid
    WHERE p.oid=s.objid AND c.relowner=(SELECT oid FROM me))))
- AND NOT (s.dbid<>0 AND s.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND (s.objid=$1 OR s.objid=pg_catalog.to_regnamespace('public')::oid))
+ AND NOT (s.dbid<>0 AND s.classid='pg_catalog.pg_namespace'::pg_catalog.regclass AND (s.objid=$1 OR s.objid IS NOT DISTINCT FROM pg_catalog.to_regnamespace('public')::oid))
  AND NOT (s.dbid<>0 AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
    WHERE d.classid=s.classid AND d.objid=s.objid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extowner=(SELECT oid FROM me)))
 ORDER BY 1 LIMIT 101"#
@@ -464,9 +549,11 @@ const LIST_QUOTE_SETTINGS: [&str; 6] = [
 ];
 
 /// A setting's stored value as the `SET ... TO` arguments that store it
-/// again unchanged, as `pg_dump` writes them.
+/// again unchanged, as `pg_dump` writes them. Each is an escape string
+/// literal, which keeps a backslash whatever `standard_conforming_strings`
+/// says (NTNT's sessions set it on).
 fn setting_value(name: &str, value: &str) -> String {
-    let literal = |v: &str| format!("'{}'", v.replace('\'', "''"));
+    let literal = |v: &str| format!("E'{}'", v.replace('\\', "\\\\").replace('\'', "''"));
     if !LIST_QUOTE_SETTINGS.contains(&name.to_ascii_lowercase().as_str()) {
         return literal(value);
     }
@@ -517,23 +604,48 @@ fn setting_value(name: &str, value: &str) -> String {
 /// with its settings by name.
 type Settings = std::collections::BTreeMap<(u32, u32), std::collections::BTreeMap<String, String>>;
 
-fn parse_settings(json: &str) -> Settings {
+/// None when `json` is not such a snapshot: the marker's is then not NTNT's,
+/// and cleanup restores nothing from it.
+fn parse_settings(json: &str) -> Option<Settings> {
     let mut settings = Settings::new();
-    let rows: Value = serde_json::from_str(json).unwrap_or_default();
-    for row in rows.as_array().into_iter().flatten() {
-        let key = (
-            row["database"].as_u64().unwrap_or_default() as u32,
-            row["role"].as_u64().unwrap_or_default() as u32,
-        );
-        let entries = settings.entry(key).or_default();
-        for item in row["config"].as_array().into_iter().flatten() {
-            if let Some((name, value)) = item.as_str().and_then(|i| i.split_once('=')) {
-                entries.insert(name.to_owned(), value.to_owned());
-            }
+    let rows: Value = serde_json::from_str(json).ok()?;
+    for row in rows.as_array()? {
+        let oid = |key: &str| u32::try_from(row.get(key)?.as_u64()?).ok();
+        let entries = settings
+            .entry((oid("database")?, oid("role")?))
+            .or_default();
+        for item in row.get("config")?.as_array()? {
+            let (name, value) = item.as_str()?.split_once('=')?;
+            entries.insert(name.to_owned(), value.to_owned());
         }
     }
     settings.retain(|_, entries| !entries.is_empty());
-    settings
+    Some(settings)
+}
+
+/// Settings a session loads code for as it starts: a library that does not
+/// load refuses the connection, an administrator's too.
+const PRELOAD_SETTINGS: [&str; 2] = ["local_preload_libraries", "session_preload_libraries"];
+
+/// `PRELOAD_SETTINGS` values by `pg_db_role_setting` row (database, role)
+/// and name.
+type Preload = Vec<((u32, u32), String, String)>;
+
+/// The `PRELOAD_SETTINGS` that apply to the scratch role's sessions in the
+/// scratch database (`database`, `role`), by row and name; None for a
+/// malformed snapshot.
+fn preload_settings(json: &str, database: u32, role: u32) -> Option<Preload> {
+    let settings = parse_settings(json)?;
+    let mut found = vec![];
+    for key in [(database, 0), (0, role), (database, role)] {
+        for (name, value) in settings.get(&key).into_iter().flatten() {
+            if PRELOAD_SETTINGS.contains(&name.to_ascii_lowercase().as_str()) {
+                found.push((key, name.to_ascii_lowercase(), value.clone()));
+            }
+        }
+    }
+    found.sort();
+    Some(found)
 }
 
 /// Replay steps and cleanup run their statements under replay's fixed
@@ -667,6 +779,21 @@ impl Postgres {
         Ok(self.rows(HOLDS_LOCK, &[]).await?[0].get(0))
     }
 
+    /// Whether this session holds the replay lock at session level, in the
+    /// open transaction (`XACT_LOCK`): a transaction-level lock on the same
+    /// key would end with the commit.
+    async fn holds_session_lock(&self) -> Result<bool> {
+        if !self.holds_lock().await? {
+            return Ok(false);
+        }
+        self.batch(XACT_LOCK).await?;
+        let session: bool = self.rows(SESSION_UNLOCK, &[]).await?[0].get(0);
+        if session {
+            self.batch(LOCK).await?;
+        }
+        Ok(session)
+    }
+
     /// Cancel the statement this session is running, if any: replay's
     /// deadline dropped it before cleanup.
     pub async fn cancel_running(&self) {
@@ -715,6 +842,12 @@ impl Postgres {
         else {
             return Ok(None);
         };
+        // Recovery proves provenance with the transactions the marker
+        // records and restores the settings it records: a list with a NULL
+        // in it, or settings that are not a snapshot, make it not NTNT's.
+        if row.get::<_, Option<bool>>(12) != Some(true) || parse_settings(&settings).is_none() {
+            return Ok(None);
+        }
         Ok(Some(Marker {
             schema_oid: shape.get(0),
             table_oid: shape.get(1),
@@ -756,7 +889,13 @@ impl Postgres {
             .map(|r| r.get(0));
         self.batch("RELEASE SAVEPOINT ntnt_replay_xids").await?;
         let bound = bound.ok_or_else(not_empty)?;
-        let xids: String = self.rows(&record_xids_sql(), &[&bound]).await?[0].get(0);
+        let tables: Vec<String> = self
+            .rows(WRITTEN_TABLES, &[])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        let xids: String = self.rows(&record_xids_sql(&tables), &[&bound]).await?[0].get(0);
         *self.replay.xids.lock().unwrap_or_else(|e| e.into_inner()) = xids;
         Ok(())
     }
@@ -894,7 +1033,17 @@ impl Postgres {
                 .batch_execute("SET LOCAL synchronous_commit=off; COMMIT"),
         )
         .await
-        .map_err(attributed)
+        .map_err(attributed)?;
+        // `refuse_lasting_effects` refused a migration that released the
+        // replay lock; check again now that the commit released every
+        // transaction-level lock, before replay goes on.
+        if self.scratch.get().is_some() && !self.holds_lock().await? {
+            return Err(attributed(Diagnostic::new(
+                "DB_REPLAY_UNSUPPORTED",
+                "Replaying this migration released NTNT's replay lock on scratch as it committed, so another plan, status or verify could replay there at the same time. On the target it would release NTNT's migrator lock the same way. Release only the advisory locks the migration takes itself. Cleanup takes the replay lock again before it drops what the replay committed.",
+            )));
+        }
+        Ok(())
     }
 
     /// Right after `migration` ran on scratch, before it is inspected and
@@ -912,10 +1061,10 @@ impl Postgres {
             d.source = Some(migration.name.clone());
             d
         };
-        if !self.holds_lock().await? {
+        if !self.holds_session_lock().await? {
             return Err(attributed(
                 "DB_REPLAY_UNSUPPORTED",
-                "Replaying this migration released NTNT's replay lock on scratch (pg_advisory_unlock_all() or pg_advisory_unlock(1853124212, 430)), so another plan, status or verify could replay there at the same time. On the target it would release NTNT's migrator lock the same way. Release only the advisory locks the migration takes itself.",
+                "Replaying this migration released NTNT's replay lock on scratch (pg_advisory_unlock_all() or pg_advisory_unlock(1853124212, 430)), also when it then took a transaction-level lock on the same key (pg_advisory_xact_lock(1853124212, 430)), which its commit would release, so another plan, status or verify could replay there at the same time. On the target it would release NTNT's migrator lock the same way. Release only the advisory locks the migration takes itself.",
                 vec![],
             ));
         }
@@ -1023,6 +1172,52 @@ impl Postgres {
                 &format!("Replaying this migration left the scratch role without the CONNECT privilege on the scratch database{from}: REVOKE CONNECT ON DATABASE in a DO block or function, from the role itself or from PUBLIC when the role connects through PUBLIC's grant. Cleanup would restore the privilege, but a replay stopped before cleanup would leave the scratch role unable to connect to scratch, so no later plan, status or verify could clean it up; on the target it would lock the deployment role out of its database. Make such changes outside the migration history."),
                 vec![],
             ));
+        }
+        // Settings that load libraries as a session starts: one that does not
+        // load refuses every connection to scratch, the same way.
+        let rows = self.rows(DATABASE_STATE, &[]).await?;
+        let row = rows.first().ok_or_else(not_empty)?;
+        let (database, role): (u32, u32) = (row.get(4), row.get(5));
+        let preload = preload_settings(&row.get::<_, String>(3), database, role);
+        if preload.is_none()
+            || preload != preload_settings(&scope.marker.database.settings, database, role)
+        {
+            return Err(attributed(
+                "DB_REPLAY_UNSUPPORTED",
+                "Replaying this migration changed local_preload_libraries or session_preload_libraries for the scratch database or the scratch role (ALTER DATABASE or ALTER ROLE ... SET, in a DO block or function). Every new session there loads those libraries as it starts, and a library that does not load refuses the connection, also an administrator's. Cleanup would restore the setting, but a replay stopped before cleanup would leave scratch refusing every connection of the scratch role, so no later plan, status or verify could clean it up; on the target it would refuse the application's connections. Make such changes outside the migration history.",
+                vec![],
+            ));
+        }
+        // Cleanup gives the scratch database and `public` their privileges
+        // back as their owner. A grant another role made with a grant option
+        // cannot be made again that way, so cleanup could never restore a
+        // change of privileges that held one: refuse it before it commits.
+        let mut delegated: Vec<String> = self
+            .rows(
+                &format!("{DATABASE_GRANTS} {DELEGATED_DATABASE_GRANTS}"),
+                &[&scope.marker.database.acl],
+            )
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        delegated.extend(
+            self.rows(
+                &format!("{PUBLIC_GRANTS} {DELEGATED_PUBLIC_GRANTS}"),
+                &[&scope.marker.public.acl, &scope.marker.public.owner],
+            )
+            .await?
+            .iter()
+            .map(|r| r.get::<_, String>(0)),
+        );
+        if !delegated.is_empty() {
+            let mut d = attributed(
+                "DB_REPLAY_UNSUPPORTED",
+                &format!("Replaying this migration changed the privileges of the scratch database or of the schema public, and before replay they held {} grant(s) that a role other than the owner made with a grant option (its objects field names them). Cleanup restores those privileges as the owner, so each grant it makes records the owner as its grantor: it could not restore these, and scratch would stay changed.", delegated.len()),
+                delegated,
+            );
+            d.next_action = "As the scratch database's administrator, grant those privileges again as the owner of the scratch database or of public (revoke them from the grantees named, then grant them as the owner), so that cleanup can restore them, then rerun. Scratch is a database only replay uses; the target is not affected.".into();
+            return Err(d);
         }
         let foreign: Vec<String> = self
             .foreign_objects(scope.marker.public.oid)
@@ -1174,10 +1369,70 @@ impl Postgres {
                 &unproven_rows,
             ));
         }
+        self.check_leftover_rows(&marker).await?;
         self.clean(&marker).await?;
         Ok(Some(
             json!({"replay_id":marker.id,"started_at":marker.started_at}),
         ))
+    }
+
+    /// Catalog rows do not show who wrote a table's rows: another session may
+    /// have written into a table the unfinished replay committed. Every row
+    /// of the scratch role's tables must have been written by one of the
+    /// marker's transactions, which replay records (`record_xids`).
+    /// `prepare_scratch` locked them before this transaction's snapshot, so
+    /// every row committed before is seen here and no session can write them
+    /// until it ends. Row-level security forced on their owner is lifted for
+    /// the read, inside this transaction, which drops them.
+    async fn check_leftover_rows(&self, marker: &Marker) -> Result<()> {
+        let rows = self.rows(LEFTOVER_TABLES, &[]).await?;
+        let tables: Vec<(String, String, bool, bool)> = rows
+            .iter()
+            .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3)))
+            .collect();
+        if tables.is_empty() {
+            return Ok(());
+        }
+        let unlocked: Vec<String> = tables
+            .iter()
+            .filter(|t| !t.2)
+            .map(|t| t.1.clone())
+            .collect();
+        if !unlocked.is_empty() {
+            return Err(unproven(
+                marker,
+                &format!("{} table(s) there (its objects field names them) appeared while recovery started, so it could not keep other sessions from writing them.", unlocked.len()),
+                &unlocked,
+            ));
+        }
+        for (name, _, _, forced) in &tables {
+            if *forced {
+                self.batch(&format!(
+                    "ALTER TABLE ONLY {name} NO FORCE ROW LEVEL SECURITY"
+                ))
+                .await?;
+            }
+        }
+        let names: Vec<String> = tables.iter().map(|t| t.0.clone()).collect();
+        let written: Vec<String> = self
+            .rows(&unproven_rows_sql(&names), &[])
+            .await?
+            .iter()
+            .filter_map(|r| {
+                let i: i32 = r.get(0);
+                tables
+                    .get(usize::try_from(i).ok()?.checked_sub(1)?)
+                    .map(|t| t.1.clone())
+            })
+            .collect();
+        if !written.is_empty() {
+            return Err(unproven(
+                marker,
+                &format!("{} table(s) there (its objects field names them) hold rows that a transaction the marker does not record wrote, outside that replay: another session wrote into what that replay committed.", written.len()),
+                &written,
+            ));
+        }
+        Ok(())
     }
 
     /// Drop what the scratch role owns and restore `public` and the scratch
@@ -1391,10 +1646,15 @@ impl Postgres {
                 .get(0);
             self.batch(&comment).await?;
         }
-        let (want, have) = (
+        let (Some(want), Some(have)) = (
             parse_settings(&before.settings),
             parse_settings(&now.settings),
-        );
+        ) else {
+            return Err(Diagnostic::new(
+                "DB_SCRATCH_CLEANUP",
+                "The settings NTNT's marker recorded for the scratch database and role, or those scratch holds now, are not a settings snapshot, so cleanup restored none of them.",
+            ));
+        };
         let empty = std::collections::BTreeMap::new();
         for key in want
             .keys()
@@ -1463,7 +1723,7 @@ impl Postgres {
         if !same_grants
             || after.connlimit != before.connlimit
             || after.comment != before.comment
-            || parse_settings(&after.settings) != want
+            || parse_settings(&after.settings).as_ref() != Some(&want)
         {
             return Err(Diagnostic::new(
                 "DB_SCRATCH_CLEANUP",
@@ -1546,7 +1806,83 @@ impl Postgres {
 
 #[cfg(test)]
 mod tests {
-    use super::cleanup_blocked;
+    use super::{cleanup_blocked, parse_settings, preload_settings, setting_value};
+    use crate::migrations::Diagnostic;
+
+    /// #457 review: a restored setting keeps its backslashes and
+    /// apostrophes whatever standard_conforming_strings says.
+    #[test]
+    fn restored_setting_values_are_escape_literals() {
+        assert_eq!(setting_value("application_name", r"a\b'c"), r"E'a\\b''c'");
+        assert_eq!(
+            setting_value("search_path", r#""x\y", public"#),
+            r"E'x\\y', E'public'"
+        );
+        assert_eq!(setting_value("search_path", ""), "''");
+    }
+
+    /// #457 review: a settings snapshot that is not one is refused, not
+    /// taken for no settings; an empty one is valid.
+    #[test]
+    fn a_malformed_settings_snapshot_is_none() {
+        assert_eq!(parse_settings("[]"), Some(Default::default()));
+        let valid =
+            parse_settings(r#"[{"database": 5, "role": 0, "config": ["work_mem=5MB"]}]"#).unwrap();
+        assert_eq!(valid[&(5, 0)]["work_mem"], "5MB");
+        for bad in [
+            "",
+            "not json",
+            "{}",
+            "[1]",
+            r#"[{"role": 0, "config": []}]"#,
+            r#"[{"database": 5, "role": -1, "config": []}]"#,
+            r#"[{"database": 5, "role": 4294967296, "config": []}]"#,
+            r#"[{"database": 5, "role": 0}]"#,
+            r#"[{"database": 5, "role": 0, "config": ["work_mem"]}]"#,
+            r#"[{"database": 5, "role": 0, "config": [7]}]"#,
+        ] {
+            assert_eq!(parse_settings(bad), None, "{bad}");
+        }
+    }
+
+    /// #458 review: the settings that load libraries as a session starts,
+    /// for the scratch role's sessions in scratch only.
+    #[test]
+    fn preload_settings_are_those_of_scratch_sessions() {
+        let json = r#"[{"database": 5, "role": 0, "config": ["Local_Preload_Libraries=a", "work_mem=1MB"]},
+            {"database": 0, "role": 9, "config": ["session_preload_libraries=b"]},
+            {"database": 6, "role": 9, "config": ["local_preload_libraries=c"]}]"#;
+        assert_eq!(
+            preload_settings(json, 5, 9).unwrap(),
+            vec![
+                (
+                    (0, 9),
+                    "session_preload_libraries".to_owned(),
+                    "b".to_owned()
+                ),
+                ((5, 0), "local_preload_libraries".to_owned(), "a".to_owned()),
+            ]
+        );
+        assert_eq!(preload_settings("x", 5, 9), None);
+    }
+
+    /// #458 review: after a cleanup that failed, the advice to drop or
+    /// recreate scratch applies only to a database nothing else uses.
+    #[test]
+    fn cleanup_advice_keeps_a_shared_scratch_database() {
+        let d = Diagnostic::new("DB_SCRATCH_CLEANUP", "x");
+        assert!(
+            d.next_action
+                .contains("only this configuration's scratch database"),
+            "{}",
+            d.next_action
+        );
+        assert!(
+            d.next_action.contains("leave this one as it is"),
+            "{}",
+            d.next_action
+        );
+    }
 
     /// #430 round 2: a cleanup that gave up on a lock names each session
     /// that holds one, and says how the next replay recovers.
