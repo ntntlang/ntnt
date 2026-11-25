@@ -53,6 +53,9 @@ pub(crate) struct CatalogDigests {
     /// Whether a restore-stable value replaced a stored one in any catalog
     /// digested (#460): a plan of these catalogs has canonicalization_version 2.
     pub stabilized: bool,
+    /// Last complete dictionary-encoded live observation. Compared in full
+    /// before reusing a digest, never used to decide what to inspect.
+    pub(super) live: Option<Box<(GroupedSnapshot, Fingerprint)>>,
 }
 impl CatalogDigests {
     /// `catalog`'s `Fingerprint`, its restore-stable digest from `digest`.
@@ -88,6 +91,42 @@ impl CatalogDigests {
                 .map(|key| self.objects[key].1.as_slice()),
             &catalog.uncovered,
         )
+    }
+}
+
+/// All keys, canonical stable/stored definitions and uncovered keys that
+/// feed a grouped catalog fingerprint. Equality compares bytes, not OIDs,
+/// xmin, counts, SQL text or a probabilistic shortcut.
+#[derive(PartialEq)]
+pub(super) struct GroupedSnapshot {
+    pub objects: std::collections::BTreeMap<String, (Vec<u8>, usize)>,
+    pub values: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    pub uncovered: Vec<String>,
+}
+impl GroupedSnapshot {
+    pub fn fingerprint(&self) -> Fingerprint {
+        let digest = |stored| {
+            catalog_digest_parts(
+                self.objects.values().map(|(key, group)| {
+                    let (stable, original) = &self.values[*group];
+                    let value = if stored {
+                        original.as_ref().unwrap_or(stable)
+                    } else {
+                        stable
+                    };
+                    [key.as_slice(), value.as_slice()]
+                }),
+                &self.uncovered,
+            )
+        };
+        Fingerprint {
+            stable: digest(false),
+            stored: self
+                .values
+                .iter()
+                .any(|(_, v)| v.is_some())
+                .then(|| digest(true)),
+        }
     }
 }
 
@@ -127,6 +166,15 @@ pub(crate) fn catalog_digest<'a>(
     objects: impl Iterator<Item = &'a [u8]> + Clone,
     uncovered: &[String],
 ) -> String {
+    catalog_digest_parts(objects.map(|object| [object]), uncovered)
+}
+
+/// Same framing when a key and its dictionary-encoded definition live in
+/// separate buffers; never expand repeated definitions merely to hash them.
+pub(crate) fn catalog_digest_parts<'a, const N: usize>(
+    objects: impl Iterator<Item = [&'a [u8]; N]> + Clone,
+    uncovered: &[String],
+) -> String {
     const OBJECTS: &[u8] = b"{\"objects\":{";
     const UNCOVERED: &[u8] = b"},\"uncovered\":[";
     const END: &[u8] = b"]}";
@@ -139,7 +187,11 @@ pub(crate) fn catalog_digest<'a>(
             (total + length, n + 1)
         })
     };
-    let (objects_length, objects_count) = separated(&mut objects.clone().map(<[u8]>::len));
+    let (objects_length, objects_count) = separated(
+        &mut objects
+            .clone()
+            .map(|parts| parts.iter().map(|b| b.len()).sum()),
+    );
     let (uncovered_length, uncovered_count) = separated(&mut uncovered.iter().map(Vec::len));
     let length = OBJECTS.len()
         + objects_length
@@ -155,7 +207,9 @@ pub(crate) fn catalog_digest<'a>(
         if i > 0 {
             hash.update(b",");
         }
-        hash.update(object);
+        for part in object {
+            hash.update(part);
+        }
     }
     hash.update(UNCOVERED);
     for (i, key) in uncovered.iter().enumerate() {

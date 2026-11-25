@@ -753,7 +753,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             return Err(bad());
         }
         let ledger_scope = self
-            .catalog("_ntnt", &[], &[], "")
+            .read_catalog("_ntnt", &[], &[], "", true)
             .await
             .map_err(|_| bad())?;
         if ledger_scope.uncovered.iter().any(|key| {
@@ -1936,7 +1936,10 @@ fn canonical_roles(value: &mut Value, role: &str) {
     }
 }
 #[cfg(test)]
-thread_local! { static CATALOG_VALUES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+thread_local! {
+    static CATALOG_VALUES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LIVE_SHAPE_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 fn check_catalog_limit(count: usize) -> Result<()> {
     if count > 10_000 {
@@ -1984,13 +1987,51 @@ impl RelationalAdapter for Postgres {
         outside: &[String],
         role: &str,
     ) -> Result<Catalog> {
+        self.read_catalog(schema, extra, outside, role, false).await
+    }
+}
+
+impl Postgres {
+    async fn read_catalog(
+        &self,
+        schema: &str,
+        extra: &[String],
+        outside: &[String],
+        role: &str,
+        ledger: bool,
+    ) -> Result<Catalog> {
         self.batch("SET LOCAL search_path=pg_catalog").await?;
         let scope = scope(schema, extra);
         let declared: &[String] = &self.extensions;
+        let presence = if ledger && declared.is_empty() {
+            Some(self.class_presence(schema).await?)
+        } else {
+            None
+        };
         let mut catalog = Catalog::default();
         for (kind, sql) in super::catalog_sql::QUERIES {
+            if replay_catalog::absent(&presence, kind) {
+                continue;
+            }
             // $1, $2, $3 and $4 as `catalog_sql` describes them.
-            let rows = if super::catalog_sql::WITH_DECLARED_EXTENSIONS.contains(kind) {
+            let rows = if presence.is_some() {
+                // `history` consumes only the keys, coverage and external
+                // flags. Keep the original projection for potentially
+                // external objects. The schema, relations, columns, indexes
+                // and constraints are always local in this single scope.
+                let projection = if matches!(
+                    *kind,
+                    "schema" | "relation" | "column" | "index" | "constraint"
+                ) {
+                    "'{}'::jsonb"
+                } else {
+                    "jsonb_build_object('external',v->'external')"
+                };
+                let query =
+                    format!("SELECT n,{projection},covered,qual FROM ({sql}) q(n,v,covered,qual)");
+                self.catalog_rows(kind, &query, schema, &scope, outside)
+                    .await?
+            } else if super::catalog_sql::WITH_DECLARED_EXTENSIONS.contains(kind) {
                 self.rows(sql, &[&schema, &scope, &outside, &declared])
                     .await?
             } else {
@@ -2220,6 +2261,92 @@ mod tests {
             capabilities["operations"]["concurrent_indexes"],
             "lone_named_create_index_concurrently"
         );
+    }
+
+    /// Live apply checks the managed catalog on both sides of every script.
+    /// Count decoded definitions on that path, not elapsed time or replay work.
+    #[test]
+    #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+    fn live_apply_groups_repeated_definitions_and_observes_changes() {
+        use super::super::{
+            adapter::Adapter,
+            inventory::{CatalogDigests, Fingerprint},
+        };
+        let url =
+            std::env::var("NTNT_DB_TEST_ADMIN").expect("explicit disposable fixture URL required");
+        let config: Config = url.parse().unwrap();
+        let endpoint = Endpoint {
+            connection_secret: "FIXTURE".into(),
+            database: config.get_dbname().unwrap().into(),
+            role: config.get_user().unwrap().into(),
+        };
+        let secret = crate::interpreter::SecretValue::new("FIXTURE", url).unwrap();
+        let schema = format!("live_{}", uuid::Uuid::new_v4().simple());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let db = Adapter::Postgres(Postgres::connect(&secret, &endpoint).await.unwrap());
+                let Adapter::Postgres(pg) = &db else {
+                    unreachable!()
+                };
+                db.begin_migration(&schema).await.unwrap();
+                pg.batch(&format!("CREATE SCHEMA {schema}")).await.unwrap();
+                let mut digests = CatalogDigests::default();
+                let mut values = 0;
+                LIVE_SHAPE_ROWS.with(|n| n.set(0));
+                for i in 1..=16 {
+                    pg.batch(&format!("CREATE TABLE {schema}.t{i}(id integer)"))
+                        .await
+                        .unwrap();
+                    let full = db.catalog(&schema, &[], &[], &endpoint.role).await.unwrap();
+                    let expected = Fingerprint::of(&full);
+                    CATALOG_VALUES.with(|n| n.set(0));
+                    let (uncovered, fp) = db
+                        .fingerprint(&schema, &[], &[], &endpoint.role, &mut digests)
+                        .await
+                        .unwrap();
+                    values += CATALOG_VALUES.with(|n| n.get());
+                    assert_eq!(
+                        (fp.stable, fp.stored, uncovered),
+                        (expected.stable, expected.stored, full.uncovered)
+                    );
+                    if i == 8 || i == 16 {
+                        assert_eq!(LIVE_SHAPE_ROWS.with(|n| n.get()), 2 * i, "native representatives");
+                        assert_eq!(
+                            values,
+                            3 * i,
+                            "schema, heap and column definitions for {i} prefixes"
+                        );
+                    }
+                }
+                // Between the post-script read and the next transaction, another
+                // session changes existing objects. Keep the same digest cache.
+                pg.batch("COMMIT").await.unwrap();
+                let other = Postgres::connect(&secret, &endpoint).await.unwrap();
+                other.begin_migration(&schema).await.unwrap();
+                other.batch(&format!(
+                    "COMMENT ON COLUMN {schema}.t2.id IS 'different'; COMMENT ON TABLE {schema}.t3 IS 'different'; ALTER TABLE {schema}.t1 ADD CHECK (id BETWEEN 1 AND 4 AND id <> 2)"
+                ))
+                .await
+                .unwrap();
+                other.batch("COMMIT").await.unwrap();
+                db.begin_migration(&schema).await.unwrap();
+                let full = db.catalog(&schema, &[], &[], &endpoint.role).await.unwrap();
+                let expected = Fingerprint::of(&full);
+                // This expression has distinct stored and restore-stable forms (#460).
+                assert!(expected.stored.is_some());
+                let (uncovered, fp) = db
+                    .fingerprint(&schema, &[], &[], &endpoint.role, &mut digests)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    (fp.stable, fp.stored, uncovered),
+                    (expected.stable, expected.stored, full.uncovered)
+                );
+                pg.batch(&format!("DROP SCHEMA {schema} CASCADE; COMMIT")).await.unwrap();
+            });
     }
 
     /// Scratch must fingerprint all keys, but not decode and canonicalize an
