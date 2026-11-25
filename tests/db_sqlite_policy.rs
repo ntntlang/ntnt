@@ -485,6 +485,67 @@ const COUNTER_REPAIR: &str = "UPDATE sqlite_sequence SET seq = (SELECT max(seq) 
 /// refuses that, naming the table and both values, and its next_action is
 /// the line that copies the counter, which then migrates.
 #[test]
+fn sqlite_rebuild_keeps_the_autoincrement_counter_of_other_tables_too() {
+    // #457 review: the migration may write sqlite_sequence, so a counter of
+    // a table it does not rebuild that goes back, or away, is refused.
+    let f = Fixture::new();
+    f.sql(
+        "0001_orders.sql",
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL); \
+         CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
+    );
+    cycle(&f, "0001.json");
+    f.target()
+        .execute_batch(
+            "INSERT INTO orders (ref) VALUES ('a'); \
+             INSERT INTO jobs (name) VALUES ('a'), ('b'), ('c'); DELETE FROM jobs WHERE id = 3;",
+        )
+        .unwrap();
+    f.sql("0002_rebuild.toml", "sqlite_rebuild = \"orders\"");
+    for (n, (change, broke)) in [
+        (
+            "UPDATE sqlite_sequence SET seq = 2 WHERE name = 'jobs';",
+            "the AUTOINCREMENT counter of table `jobs` went back from 3 to 2 (sqlite_sequence)",
+        ),
+        (
+            "DELETE FROM sqlite_sequence WHERE name = 'jobs';",
+            "table `jobs` lost its AUTOINCREMENT counter (sqlite_sequence held 3 for it and now holds none)",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        f.sql(
+            "0002_rebuild.sql",
+            &format!(
+                "CREATE TABLE orders_new (id INTEGER PRIMARY KEY AUTOINCREMENT, ref TEXT NOT NULL CHECK (length(ref) > 0)); \
+                 INSERT INTO orders_new (id, ref) SELECT id, ref FROM orders; {COUNTER_REPAIR} {change} \
+                 DROP TABLE orders; ALTER TABLE orders_new RENAME TO orders;"
+            ),
+        );
+        let plan = format!("0002-{n}.json");
+        let p = f.plan(&plan);
+        let r = f.apply(&plan, p["plan_digest"].as_str());
+        assert_eq!(r["outcome"], "fail", "{r}");
+        let d = diagnostic(&r, "DB_REBUILD_GUARD");
+        assert_eq!(
+            d["message"],
+            format!("The rebuild of table `orders` did not keep what a rebuild must: {broke}, so SQLite would give new rows the ids of deleted ones. Row values suppressed."),
+            "{r}"
+        );
+        assert_eq!(d["objects"], serde_json::json!(["table:\"jobs\""]), "{r}");
+        assert!(
+            d["next_action"]
+                .as_str()
+                .unwrap()
+                .contains("Leave the sqlite_sequence rows of the other tables as they were"),
+            "{r}"
+        );
+    }
+    assert!(counters(&f).contains(&("jobs".to_owned(), 3)));
+}
+
+#[test]
 fn sqlite_rebuild_keeps_the_autoincrement_counter() {
     let f = Fixture::new();
     f.sql(
@@ -974,6 +1035,51 @@ fn sqlite_target_only_failures_say_what_to_do() {
         })
         .unwrap();
     assert_eq!(columns, 2);
+}
+
+/// #458 review: replay never commits, so the deferred foreign keys a
+/// migration leaves broken fail where the target's COMMIT would: when the
+/// history seeded the rows, `plan` refuses the drop of a parent that a
+/// deferred key references, though `foreign_key_check` finds no orphan.
+#[test]
+fn sqlite_replay_checks_deferred_foreign_keys_at_each_migration() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_tables.sql",
+        "CREATE TABLE q (id INTEGER PRIMARY KEY, name TEXT NOT NULL); \
+         CREATE TABLE d (id INTEGER PRIMARY KEY, q_id INTEGER NOT NULL REFERENCES q (id) DEFERRABLE INITIALLY DEFERRED); \
+         INSERT INTO q VALUES (1, 'q'); INSERT INTO d VALUES (1, 1);",
+    );
+    f.sql(
+        "0002_change.sql",
+        "CREATE TABLE q_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL, note TEXT); \
+         INSERT INTO q_new (id, name) SELECT id, name FROM q; DROP TABLE q; \
+         ALTER TABLE q_new RENAME TO q;",
+    );
+    let r = f.command("plan", &[]);
+    assert_ne!(r["outcome"], "pass", "{r}");
+    let d = diagnostic(&r, "DB_SQLITE");
+    assert_eq!(
+        d["message"],
+        "SQLite would not commit the migration: FOREIGN KEY constraint failed (SQLITE_CONSTRAINT_FOREIGNKEY).",
+        "{r}"
+    );
+    let next_action = d["next_action"].as_str().unwrap();
+    assert!(
+        next_action.starts_with(
+            "The migration dropped table `q`, which `d` references with a deferred foreign key."
+        ),
+        "{r}"
+    );
+    assert!(next_action.contains("sqlite_rebuild"), "{r}");
+    assert_eq!(d["source"], "0002_change.sql", "{r}");
+    // Without the rows the drop breaks nothing, and the plan passes.
+    f.sql(
+        "0001_tables.sql",
+        "CREATE TABLE q (id INTEGER PRIMARY KEY, name TEXT NOT NULL); \
+         CREATE TABLE d (id INTEGER PRIMARY KEY, q_id INTEGER NOT NULL REFERENCES q (id) DEFERRABLE INITIALLY DEFERRED);",
+    );
+    f.plan("empty.json");
 }
 
 /// F8: a saved plan that `ntnt db plan` could not make (outcome fail, no
