@@ -1263,6 +1263,9 @@ fn single_schema_catalog_fingerprints_are_unchanged() {
         serde_json::json!(expected),
         "PostgreSQL {major}"
     );
+    // Its values are restore-stable as stored (#460): the plan records the
+    // canonicalization earlier releases did.
+    assert_eq!(r["plan"]["binding"]["canonicalization_version"], 1, "{r}");
     // Nor did the plan or its binding gain a field.
     let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
     assert_eq!(
@@ -3927,4 +3930,227 @@ fn a_setting_an_unfinished_replay_left_is_restored_before_the_mismatch() {
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(database_state(&f), state);
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// The #460 history: expressions and partitions' constraints that a dump and
+/// restore stores differently, with controls it leaves as they are.
+const RESTORE_HISTORY: [(&str, &str); 2] = [
+    (
+        "0001_checks.sql",
+        include_str!("fixtures/db_restore/0001_checks.sql"),
+    ),
+    (
+        "0002_partitions.sql",
+        include_str!("fixtures/db_restore/0002_partitions.sql"),
+    ),
+];
+
+/// `program` (`pg_dump`, `pg_restore`) of PostgreSQL `major`, the fixture
+/// server's (client tools older than the server refuse it), from the image
+/// `NTNT_DB_TEST_PG_IMAGE` (`{major}` replaced; CI's service image by
+/// default), run with docker on the host network as the fixture's
+/// administrator.
+fn pg_tool(major: i32, program: &str, args: &[&str]) -> Command {
+    let image = std::env::var("NTNT_DB_TEST_PG_IMAGE")
+        .unwrap_or_else(|_| "mirror.gcr.io/library/postgres:{major}".to_owned())
+        .replace("{major}", &major.to_string());
+    let config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .expect("explicit disposable PostgreSQL fixture URL required")
+        .parse()
+        .unwrap();
+    let host = match config.get_hosts().first() {
+        Some(postgres::config::Host::Tcp(host)) => host.clone(),
+        other => panic!("the fixture server must be reached over TCP, not {other:?}"),
+    };
+    let mut c = Command::new("docker");
+    c.args(["run", "--rm", "-i", "--network", "host"])
+        .args([
+            "-e",
+            "PGHOST",
+            "-e",
+            "PGPORT",
+            "-e",
+            "PGUSER",
+            "-e",
+            "PGPASSWORD",
+            "-e",
+            "PGSSLMODE",
+        ])
+        .arg(image)
+        .arg(program)
+        .args(args)
+        .env("PGHOST", host)
+        .env(
+            "PGPORT",
+            config
+                .get_ports()
+                .first()
+                .copied()
+                .unwrap_or(5432)
+                .to_string(),
+        )
+        .env("PGUSER", config.get_user().unwrap_or("postgres"))
+        .env(
+            "PGPASSWORD",
+            String::from_utf8_lossy(config.get_password().unwrap_or_default()).into_owned(),
+        )
+        .env("PGSSLMODE", "disable");
+    c
+}
+
+/// A database restored with `pg_restore` from a `pg_dump -Fc` of `f`'s
+/// target, owned by its role and declared as target `restored`; dropped
+/// with the test.
+struct Restored<'a> {
+    f: &'a Fixture,
+    name: String,
+    url: String,
+}
+impl<'a> Restored<'a> {
+    fn new(f: &'a Fixture) -> Self {
+        let url = std::env::var("NTNT_DB_TEST_ADMIN").unwrap();
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        let major: i32 = admin
+            .query_one(
+                "SELECT current_setting('server_version_num')::int / 10000",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        let dump = pg_tool(major, "pg_dump", &["-Fc", "-d", &f.target])
+            .output()
+            .unwrap();
+        assert!(
+            dump.status.success() && !dump.stdout.is_empty(),
+            "pg_dump: {}",
+            String::from_utf8_lossy(&dump.stderr)
+        );
+        let name = format!("{}_restored", f.target);
+        admin
+            .batch_execute(&format!(
+                "CREATE DATABASE {name} OWNER {} TEMPLATE template0",
+                f.target
+            ))
+            .unwrap();
+        let restored = Self {
+            f,
+            url: f
+                .target_url
+                .replace(&format!("dbname={}", f.target), &format!("dbname={name}")),
+            name,
+        };
+        let mut restore = pg_tool(
+            major,
+            "pg_restore",
+            &["--exit-on-error", "-d", &restored.name],
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+        std::io::Write::write_all(&mut restore.stdin.take().unwrap(), &dump.stdout).unwrap();
+        let output = restore.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "pg_restore: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let manifest = f.root.path().join("ntnt.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(
+            &manifest,
+            format!(
+                "{text}\n[databases.app.targets.restored]\nconnection_secret = \"DB_RESTORED\"\ndatabase = \"{}\"\nrole = \"{}\"\n[secrets.DB_RESTORED]\n",
+                restored.name, f.target
+            ),
+        )
+        .unwrap();
+        restored
+    }
+    fn command(&self, command: &str) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_ntnt"))
+            .args(["db", command, "--target", "restored", "--json"])
+            .env("DB_TARGET", &self.f.target_url)
+            .env("DB_SCRATCH", &self.f.scratch_url)
+            .env("DB_RESTORED", &self.url)
+            .env_remove("DB_APPROVAL")
+            .env("NTNT_SECRETS_PROVIDER", "env")
+            .env("NTNT_ENV", "development")
+            .current_dir(self.f.root.path())
+            .output()
+            .unwrap();
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
+    }
+    fn client(&self) -> Client {
+        Client::connect(&self.url, NoTls).unwrap()
+    }
+}
+impl Drop for Restored<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut admin) = Client::connect(&std::env::var("NTNT_DB_TEST_ADMIN").unwrap(), NoTls)
+        {
+            let _ = admin.batch_execute(&format!("DROP DATABASE {} WITH (FORCE)", self.name));
+        }
+    }
+}
+
+/// #460: a database restored with pg_dump and pg_restore verifies. The
+/// restore stores AND and OR expressions re-associated, and partitions'
+/// PRIMARY KEY and UNIQUE constraints with connoinherit set, which behave as
+/// before; inspection compares them as a restore leaves them. A real change
+/// to one of those expressions is still drift.
+#[test]
+#[ignore = "requires disposable PostgreSQL and docker; mandatory CI db catalog lane"]
+fn a_database_restored_with_pg_dump_and_pg_restore_verifies() {
+    let f = Fixture::new();
+    for (name, sql) in RESTORE_HISTORY {
+        f.sql(name, sql);
+    }
+    migrate_and_verify(&f);
+    let saved: Value =
+        serde_json::from_slice(&std::fs::read(f.root.path().join("plan.json")).unwrap()).unwrap();
+    // Stored as they are, those values are not restore-stable.
+    assert_eq!(
+        saved["plan"]["binding"]["canonicalization_version"], 2,
+        "{saved}"
+    );
+    let restored = Restored::new(&f);
+    // The restore did store them differently, as #460 found.
+    const STORED: &str = "SELECT conname, pg_get_constraintdef(oid)||' '||connoinherit FROM pg_constraint \
+        WHERE conname IN ('checks_executable_timeout','checks_not_between_or','observations_default_pkey','observations_2026_tenant_id_probe_run_id_observed_on_key') ORDER BY conname";
+    let rows = |mut client: Client| -> Vec<(String, String)> {
+        client
+            .query(STORED, &[])
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect()
+    };
+    let (before, after) = (rows(f.target()), rows(restored.client()));
+    assert_eq!(before.len(), 4, "{before:?}");
+    for (before, after) in before.iter().zip(&after) {
+        assert_ne!(before, after);
+    }
+    for command in ["status", "verify", "plan"] {
+        let r = restored.command(command);
+        assert_eq!(r["outcome"], "pass", "{command}: {r}");
+    }
+    // A real out-of-band change to one of them is drift, on that object only.
+    restored
+        .client()
+        .batch_execute("ALTER TABLE app.checks DROP CONSTRAINT checks_executable_timeout, ADD CONSTRAINT checks_executable_timeout CHECK (timeout_ms BETWEEN 1000 AND 16000 AND timeout_ms % 1000 = 0)")
+        .unwrap();
+    let r = restored.command("verify");
+    assert!(has_code(&r, "DB_DRIFT"), "{r}");
+    assert!(
+        drifted(&r, "constraint:checks.checks_executable_timeout", "changed"),
+        "{r}"
+    );
+    assert_eq!(
+        r["drift"]["differences"].as_array().unwrap().len(),
+        1,
+        "{r}"
+    );
 }

@@ -119,13 +119,22 @@ pub(super) fn intact(saved: &Value) -> Result<(), Diagnostic> {
         && at(reference)
             .is_some_and(|f| *f == b["expected_base_digest"] && *f == b["base_catalog_digest"])
         && b["format_version"] == 1
-        && b["canonicalization_version"] == 1
+        && canonicalization_known(b)
         && hex64(&b["base_history_digest"]);
     if consistent {
         Ok(())
     } else {
         Err(invalid())
     }
+}
+
+/// Whether a plan's binding `b` records a canonicalization this version
+/// compares: 1, the values as stored, and on PostgreSQL 2, restore-stable
+/// values (#460).
+pub(super) fn canonicalization_known(b: &Value) -> bool {
+    b["canonicalization_version"] == 1
+        || (b["canonicalization_version"] == 2
+            && b["adapter"] == super::adapter::catalog_format("postgresql"))
 }
 
 /// Refuse a plan made for another logical database or target. This needs
@@ -676,6 +685,17 @@ pub(super) fn against(saved: &Value, report: &Value) -> Option<Diagnostic> {
         ));
     }
     let planned = &p["binding"];
+    // A plan's catalog digests match in either form (`Fingerprint::matches`,
+    // #460), whatever canonicalization_version it records.
+    let mut observed = observed.clone();
+    for key in ["base_catalog_digest", "expected_base_digest"] {
+        let stored = &report[super::report::STORED_BINDING][key];
+        if !stored.is_null() && planned[key] == *stored {
+            observed[key] = stored.clone();
+        }
+    }
+    observed["canonicalization_version"] = planned["canonicalization_version"].clone();
+    let observed = &observed;
     let (database, target) = (
         report["database"].as_str().unwrap_or_default(),
         report["target"]["name"].as_str().unwrap_or_default(),

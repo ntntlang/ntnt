@@ -186,9 +186,12 @@ FROM pg_catalog.pg_sequence s JOIN pg_catalog.pg_class c ON c.oid=s.seqrelid JOI
         r#"
 SELECT p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',
  jsonb_build_object('kind',p.prokind,'owner',CASE WHEN ext.oid IS NULL THEN pg_get_userbyid(p.proowner) END,'language',l.lanname,'volatility',p.provolatile,'security_definer',p.prosecdef,
- 'extension',ext.extname,'definition_digest',encode(sha256(convert_to(CASE WHEN p.prokind IN ('f','p') THEN pg_get_functiondef(p.oid) ELSE p.prosrc END||coalesce(p.probin,''),'UTF8')),'hex'),
+ 'extension',ext.extname,'definition_digest',CASE WHEN p.prosqlbody IS NULL THEN encode(sha256(convert_to(CASE WHEN p.prokind IN ('f','p') THEN pg_get_functiondef(p.oid) ELSE p.prosrc END||coalesce(p.probin,''),'UTF8')),'hex') END,
  'grants',CASE WHEN ext.oid IS NULL THEN (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
- FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a) END),
+ FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a) END)
+ -- An SQL-standard body is parsed again on restore: its text, which
+ -- inspection digests restore-stable (#460), as it does a domain constraint's.
+ ||CASE WHEN p.prosqlbody IS NOT NULL THEN jsonb_build_object('definition',CASE WHEN p.prokind IN ('f','p') THEN pg_get_functiondef(p.oid) ELSE p.prosrc END||coalesce(p.probin,'')) ELSE '{}'::jsonb END,
  (p.prokind IN ('f','p') AND l.lanname IN ('sql','plpgsql')) OR (ext.extname IS NOT NULL AND en.nspname=ANY($2)),
  CASE WHEN n.nspname<>$1 THEN quote_ident(n.nspname) END
 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace JOIN pg_catalog.pg_language l ON l.oid=p.prolang
@@ -234,7 +237,7 @@ SELECT t.typname::text,jsonb_build_object('kind',t.typtype,'owner',CASE WHEN ext
  'base_type',CASE WHEN t.typtype='d' THEN format_type(t.typbasetype,t.typtypmod) END,'not_null',t.typnotnull,'default',pg_get_expr(t.typdefaultbin,0),
  'collation',(SELECT quote_ident(cn.nspname)||'.'||quote_ident(co.collname) FROM pg_catalog.pg_collation co JOIN pg_catalog.pg_namespace cn ON cn.oid=co.collnamespace WHERE co.oid=t.typcollation),
  'constraints',(SELECT jsonb_agg(jsonb_build_object('name',k.conname,'kind',k.contype,'validated',k.convalidated,
-   'definition_digest',encode(sha256(convert_to(pg_get_constraintdef(k.oid,false),'UTF8')),'hex')) ORDER BY k.conname) FROM pg_catalog.pg_constraint k WHERE k.contypid=t.oid)),
+   'definition',pg_get_constraintdef(k.oid,false)) ORDER BY k.conname) FROM pg_catalog.pg_constraint k WHERE k.contypid=t.oid)),
  CASE WHEN ext.oid IS NOT NULL THEN en.nspname=ANY($2) WHEN t.typtype='e' THEN true
  WHEN t.typtype='d' THEN (btn.nspname='pg_catalog' OR btn.nspname=ANY($2) OR (cardinality($3::text[])>0 AND (SELECT quote_ident(rn.nspname)||CASE WHEN rt.typrelid<>0 THEN '.relation:'||rc.relname ELSE '.type:'||rt.typname END
    FROM pg_catalog.pg_type rt JOIN pg_catalog.pg_namespace rn ON rn.oid=rt.typnamespace LEFT JOIN pg_catalog.pg_class rc ON rc.oid=rt.typrelid

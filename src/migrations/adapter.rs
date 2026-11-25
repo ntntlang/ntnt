@@ -1,6 +1,6 @@
 //! Two concrete native adapters, one plan/history/authorization/execution core.
 //! This is intentionally not a plugin or portable-SQL framework.
-use super::inventory::{CatalogDigests, Endpoint, Migration};
+use super::inventory::{CatalogDigests, Endpoint, Fingerprint, Migration};
 use super::model::{Catalog, History};
 use super::postgres::{self, Postgres, RelationalAdapter};
 use super::sqlite::{self, Sqlite};
@@ -99,9 +99,10 @@ impl Adapter {
             Self::Sqlite(db) => db.catalog().await,
         }
     }
-    /// `catalog().uncovered` and `json_digest(&catalog())`, without keeping
-    /// the catalog. SQLite fingerprints the catalog it maintains itself and
-    /// leaves `digests` unused.
+    /// `catalog().uncovered` and `Fingerprint::of(&catalog())`, without
+    /// keeping the catalog. SQLite fingerprints the catalog it maintains
+    /// itself, whose values are all stored restore-stable, and leaves
+    /// `digests` unused.
     pub async fn fingerprint(
         &self,
         schema: &str,
@@ -109,14 +110,22 @@ impl Adapter {
         outside: &[String],
         role: &str,
         digests: &mut CatalogDigests,
-    ) -> Result<(Vec<String>, String)> {
+    ) -> Result<(Vec<String>, Fingerprint)> {
         match self {
             Self::Postgres(pg) => {
                 let catalog = pg.catalog(schema, extra, outside, role).await?;
-                let fingerprint = digests.digest(&catalog);
+                let fingerprint = digests.fingerprint(&catalog);
                 Ok((catalog.uncovered, fingerprint))
             }
-            Self::Sqlite(db) => db.fingerprint().await,
+            Self::Sqlite(db) => db.fingerprint().await.map(|(uncovered, stable)| {
+                (
+                    uncovered,
+                    Fingerprint {
+                        stable,
+                        stored: None,
+                    },
+                )
+            }),
         }
     }
     /// `catalog().uncovered`, without keeping the catalog.

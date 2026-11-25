@@ -609,6 +609,9 @@ struct Replayed {
     /// For plans: what will stop a pending check, found at the state it
     /// runs in (`CheckProbe`), in probe order.
     check_warnings: Vec<Value>,
+    /// For plans: whether a restore-stable value replaced a stored one in
+    /// a fingerprinted state (#460).
+    stabilized: bool,
 }
 
 /// A check this plan's migrate will run, examined in replay at the state it
@@ -743,7 +746,7 @@ async fn replay_prefix(
                 .fingerprint(schema, extra, &outside, role, &mut digests)
                 .await
                 .map_err(attribute)?;
-            (uncovered, None, Some(fingerprint))
+            (uncovered, None, Some(fingerprint.stable))
         } else {
             (
                 scratch
@@ -800,8 +803,13 @@ async fn replay_prefix(
             replayed.candidate = catalog;
         }
     }
+    replayed.stabilized = digests.stabilized;
     Ok(())
 }
+
+/// The report field holding a binding's catalog digests of stored values
+/// (#460), which `ntnt db` removes before it outputs a report.
+pub(super) const STORED_BINDING: &str = "stored_binding";
 
 /// Capture target facts in a read-only snapshot and release that session before replay.
 /// Scratch work uses separate identity/credentials; the result is schema evidence, not
@@ -1104,6 +1112,7 @@ async fn inspect_observed(
         candidate,
         outside: _,
         check_warnings,
+        stabilized,
     } = replayed;
     if let Some(expected) = &expected {
         report["drift"] = compare(&catalog, expected);
@@ -1132,11 +1141,31 @@ async fn inspect_observed(
     }
     // Binding excludes observation time, display filters and scratch physical IDs.
     // It includes every authority-relevant source, policy, target and base fact.
-    let binding = json!({"format_version":1,"adapter":adapter::catalog_format(&inputs.config.engine),"canonicalization_version":1,
+    // Its catalog digests and fingerprints are of restore-stable values
+    // (#460): canonicalization_version 2 when one replaced a stored value,
+    // else 1, whose digests are the ones NTNT computed before.
+    let stored_expected = expected.as_ref().map(Catalog::stored_digest);
+    let canonicalization = if stabilized
+        || !catalog.stored.is_empty()
+        || stored_expected.as_ref().is_some_and(Option::is_some)
+    {
+        2
+    } else {
+        1
+    };
+    let binding = json!({"format_version":1,"adapter":adapter::catalog_format(&inputs.config.engine),"canonicalization_version":canonicalization,
         "input_digest":inputs.input_digest,"policy_digest":inputs.policy_digest,"database":inputs.database_name,"target_name":inputs.target_name,"target":identity,
         "managed_schema":inputs.config.schema,"base_history_digest":json_digest(&history),
         "base_catalog_digest":json_digest(&catalog),"applied_count":applied,
         "expected_base_digest":expected.as_ref().map(json_digest)});
+    // The same digests of the stored values, for `--against` a plan with
+    // canonicalization_version 1 (`plan_state::against`); never output.
+    if canonicalization == 2 {
+        report[STORED_BINDING] = json!({
+            "base_catalog_digest": catalog.stored_digest().unwrap_or_else(|| json_digest(&catalog)),
+            "expected_base_digest": expected.as_ref().zip(stored_expected).map(|(e, stored)| stored.unwrap_or_else(|| json_digest(e))),
+        });
+    }
     let pending: Vec<_> = inputs
         .migrations
         .iter()
@@ -1646,7 +1675,7 @@ mod tests {
                             .await
                             .map(|(uncovered, fingerprint)| {
                                 let catalog = fresh.as_ref().map_or(Value::Null, |c| json!(c));
-                                (catalog, uncovered, fingerprint)
+                                (catalog, uncovered, fingerprint.stable)
                             }),
                         _ => scratch
                             .coverage("main", &[], &[], "")

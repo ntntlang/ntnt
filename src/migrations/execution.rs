@@ -2,7 +2,7 @@
 //! The caller retains progress across cancellation; sessions are never pooled.
 use super::adapter::{self, Access, Adapter, Identity};
 use super::adoption::{self, Adoption};
-use super::inventory::{json_digest, CapturedInputs, CatalogDigests};
+use super::inventory::{json_digest, CapturedInputs, CatalogDigests, Fingerprint};
 use super::model::History;
 use super::plan_state;
 use super::{Diagnostic, Result};
@@ -121,7 +121,7 @@ pub(super) fn validate_named(
                     .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         })
         || b["adapter"] != adapter::catalog_format(&inputs.config.engine)
-        || b["canonicalization_version"] != 1
+        || !plan_state::canonicalization_known(b)
         || b["input_digest"] != inputs.input_digest
         || b["policy_digest"] != inputs.policy_digest
         || b["database"] != inputs.database_name
@@ -306,7 +306,7 @@ async fn locked_prefix(
     let fingerprints = &saved["plan"]["execution"]["prefix_fingerprints"];
     let base_history = &saved["plan"]["binding"]["base_history_digest"];
     let adopted = if let Some(action) = &action {
-        if !uncovered.is_empty() || fingerprint != fingerprints[action.count] {
+        if !uncovered.is_empty() || !fingerprint.matches(&fingerprints[action.count]) {
             return Err(plan_state::catalog(inputs, action.count, &uncovered));
         }
         if history == action.after(inputs)? {
@@ -324,7 +324,7 @@ async fn locked_prefix(
         if applied < base || (applied == base && json_digest(&history) != *base_history) {
             return Err(plan_state::history(inputs, base, applied));
         }
-        if !uncovered.is_empty() || fingerprint != fingerprints[applied] {
+        if !uncovered.is_empty() || !fingerprint.matches(&fingerprints[applied]) {
             return Err(plan_state::catalog(inputs, applied, &uncovered));
         }
         false
@@ -701,7 +701,8 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 )
                 .await?;
             if !uncovered.is_empty()
-                || fingerprint != saved["plan"]["execution"]["prefix_fingerprints"][reference]
+                || !fingerprint
+                    .matches(&saved["plan"]["execution"]["prefix_fingerprints"][reference])
             {
                 return Err(plan_state::catalog(inputs, reference, &uncovered));
             }
@@ -872,7 +873,8 @@ async fn build_concurrent(
         ));
     }
     if !catalog.uncovered.is_empty()
-        || json_digest(&catalog) != saved["plan"]["execution"]["prefix_fingerprints"][applied + 1]
+        || !Fingerprint::of(&catalog)
+            .matches(&saved["plan"]["execution"]["prefix_fingerprints"][applied + 1])
     {
         return Err(plan_state::catalog(inputs, applied + 1, &catalog.uncovered));
     }
@@ -1020,7 +1022,7 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
     });
     let resolution = match validity {
         Some(true) => {
-            if json_digest(&catalog) != fingerprints[applied + 1] {
+            if !Fingerprint::of(&catalog).matches(&fingerprints[applied + 1]) {
                 return Err(mismatch(&index.name));
             }
             db.resolve_attempt(applied + 1, true).await?;
@@ -1030,13 +1032,20 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
         }
         Some(false) => {
             // Treated as finished, the invalid index must make the catalog
-            // exactly the planned one; only then is it ours to drop.
-            if let Some(object) = catalog.objects.get_mut(&format!("index:{}", index.name)) {
+            // exactly the planned one; only then is it ours to drop. Its
+            // stored value too, when that differs (#460).
+            let key = format!("index:{}", index.name);
+            for object in catalog
+                .objects
+                .get_mut(&key)
+                .into_iter()
+                .chain(catalog.stored.get_mut(&key))
+            {
                 for flag in ["valid", "ready", "live"] {
                     object[flag] = json!(true);
                 }
             }
-            if json_digest(&catalog) != fingerprints[applied + 1] {
+            if !Fingerprint::of(&catalog).matches(&fingerprints[applied + 1]) {
                 return Err(mismatch(&index.name));
             }
             db.rollback().await?;
@@ -1046,7 +1055,7 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
             report["reconciliation"]["dropped_invalid_index"] = json!(true);
             report["reconciliation"]["outcome"] = json!("fail");
             let (position, after) = locked_attempt(&db, inputs, saved).await?;
-            if position != applied + 1 || json_digest(&after) != fingerprints[applied] {
+            if position != applied + 1 || !Fingerprint::of(&after).matches(&fingerprints[applied]) {
                 let mut d = Diagnostic::new(
                     "DB_RECONCILE_INCOMPLETE",
                     "The invalid index was dropped, but the database then differed from the plan's state before this migration; the attempt was kept.",
@@ -1060,7 +1069,7 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
             "rolled_back"
         }
         None => {
-            if json_digest(&catalog) != fingerprints[applied] {
+            if !Fingerprint::of(&catalog).matches(&fingerprints[applied]) {
                 return Err(mismatch(&index.name));
             }
             db.resolve_attempt(applied + 1, false).await?;
