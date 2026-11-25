@@ -3036,7 +3036,9 @@ fn an_undeclared_extension_in_scratch_is_named() {
 
 /// #430 round 2: a declared extension a superuser moves to another schema on
 /// the target, out of the managed schema `public`, is one drift entry, with
-/// its members (which moved with it) listed under it.
+/// its members (which moved with it) listed under it: postgres_fdw's
+/// routines, and pg_stat_statements' views and their columns, which carry no
+/// extension name of their own (Greptile on #458).
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn relocating_a_declared_extension_is_one_drift_entry() {
@@ -3065,6 +3067,20 @@ fn relocating_a_declared_extension_is_one_drift_entry() {
         members
             .iter()
             .any(|m| m.starts_with("routine:postgres_fdw_handler")),
+        "{v}"
+    );
+    target_admin(&f)
+        .batch_execute("ALTER EXTENSION postgres_fdw SET SCHEMA public; ALTER EXTENSION pg_stat_statements SET SCHEMA ext")
+        .unwrap();
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "fail", "{v}");
+    assert_eq!(drift_objects(&v), ["extension:pg_stat_statements"], "{v}");
+    let members = names(&v["drift"]["differences"][0]["members"]);
+    assert!(members.contains(&"relation:pg_stat_statements"), "{v}");
+    assert!(
+        members
+            .iter()
+            .any(|m| m.starts_with("column:pg_stat_statements.")),
         "{v}"
     );
 }
