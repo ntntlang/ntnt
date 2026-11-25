@@ -69,7 +69,12 @@
   histories that change them in a `DO` block still plan. Replay refuses, before
   they commit, changes cleanup cannot undo: passwords (also one an exception
   block rolled back), memberships, other databases, objects given to another
-  role and a session left as another role (`DB_REPLAY_UNSUPPORTED`). Scratch now also requires
+  role and a session left as another role (`DB_REPLAY_UNSUPPORTED`). So are a
+  connection limit of 0 on scratch and a `REVOKE CONNECT` (from the scratch
+  role, or from `PUBLIC` when the role connects through it) that leaves the
+  scratch role unable to connect: cleanup would restore them, but a replay
+  stopped before cleanup would leave scratch unrecoverable. `_ntnt_replay`, like
+  `_ntnt`, cannot be the managed schema (`DB_CONFIG` names it as reserved). Scratch now also requires
   that its role hold no privileges on objects it does not own, other than on
   `public`, and `track_counts` on (`DB_SCRATCH_UNSAFE`), and that it own nothing
   in scratch but `public` before replay, such as a large object or a

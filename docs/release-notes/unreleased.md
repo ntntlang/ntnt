@@ -172,7 +172,16 @@
   `DB_REPLAY_UNSUPPORTED` naming the migration: passwords (PostgreSQL's write
   counters also count one an exception block rolled back), memberships, role
   attributes and comments, other databases, objects given to another role, and
-  a session left acting as another role (#430).
+  a session left acting as another role (#430). So are a connection limit of 0
+  on scratch and a `REVOKE CONNECT`, from the scratch role or from `PUBLIC`
+  when the role connects through it, that leaves the scratch role unable to
+  connect; the message names whose grant was revoked. Cleanup would restore
+  both, but a replay stopped before cleanup would leave no way to connect and
+  clean scratch up. A `GRANT` or `REVOKE CONNECT` that keeps the role
+  connectable plans as before, with the same digests.
+- **`_ntnt_replay` cannot be the managed schema**, like `_ntnt`: `DB_CONFIG`
+  says both are NTNT's own (the ledger and replay's marker in scratch), where a
+  plan used to fail on a duplicate schema (#430).
 - **Three new scratch requirements:** the scratch role may hold no privileges
   on objects it does not own other than on `public` (`DROP OWNED` would revoke
   them), and `track_counts` must be on, as it is by default. Otherwise plans

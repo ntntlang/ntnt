@@ -2700,6 +2700,86 @@ fn a_migration_that_closes_scratch_to_connections_is_refused_before_it_commits()
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
 }
 
+/// #430: a migration that leaves the scratch role without CONNECT on scratch
+/// is refused before it commits: one that revokes the role's own grant, and
+/// one that revokes PUBLIC's when the role connects through it. Cleanup would
+/// restore the privileges, but a replay stopped before cleanup would leave
+/// the scratch role unable to connect, so no later plan could recover
+/// scratch. A change that keeps the role connectable commits and cleanup
+/// restores the privileges the DBA set, in one transaction that starts by
+/// revoking them all.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_migration_that_revokes_the_scratch_roles_connect_is_refused_before_it_commits() {
+    let revoke_own = "DO $$ BEGIN EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), current_user); END $$;";
+    let revoke_public = "DO $$ BEGIN EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', current_database()); END $$;";
+    let grant_public = "DO $$ BEGIN EXECUTE format('GRANT CONNECT ON DATABASE %I TO PUBLIC', current_database()); END $$;";
+    let grant_own = "DO $$ BEGIN EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), current_user); END $$;";
+    // (what the DBA set, the refused migration, what it names, a migration
+    // that keeps the role connectable)
+    let cases = [
+        (
+            "REVOKE CONNECT ON DATABASE {db} FROM PUBLIC",
+            revoke_own,
+            "the scratch role ",
+            format!("{grant_public}\n{revoke_own}"),
+        ),
+        (
+            "REVOKE CONNECT ON DATABASE {db} FROM {db}",
+            revoke_public,
+            "PUBLIC",
+            format!("{grant_own}\n{revoke_public}"),
+        ),
+    ];
+    for (baseline, refused, named, kept) in cases {
+        let f = Fixture::new();
+        let public = public_state(&f);
+        scratch_admin(&f)
+            .batch_execute(&baseline.replace("{db}", &f.scratch))
+            .unwrap();
+        // Cleanup restores privileges as a set, so compare them as one; the
+        // rest of what scratch holds must be as it was.
+        let acl = |f: &Fixture| -> Option<String> {
+            scratch_admin(f)
+                .query_one(
+                    "SELECT (SELECT string_agg(a::text, ',' ORDER BY a::text) FROM unnest(datacl) a) FROM pg_database WHERE datname=current_database()",
+                    &[],
+                )
+                .unwrap()
+                .get(0)
+        };
+        let state = |f: &Fixture| {
+            let others: Vec<String> = scratch_leftovers(f, &public)
+                .into_iter()
+                .filter(|x| !x.starts_with("database "))
+                .collect();
+            (acl(f), others)
+        };
+        let before = state(&f);
+        assert!(before.0.is_some(), "{baseline}: {before:?}");
+        f.sql("0001_connect.sql", refused);
+        let r = f.command("plan");
+        let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+        assert_eq!(d["source"], "0001_connect.sql", "{d}");
+        let message = d["message"].as_str().unwrap();
+        assert!(
+            message.contains("left the scratch role without the CONNECT privilege")
+                && message.contains(&format!("it revoked CONNECT from {named}")),
+            "{d}"
+        );
+        assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+        assert_eq!(state(&f), before);
+        f.sql("0001_connect.sql", &kept);
+        let r = f.command("plan");
+        assert_eq!(r["outcome"], "pass", "{baseline}: {r}");
+        assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+        assert_eq!(state(&f), before);
+        // The scratch role can still connect, and the next plan passes.
+        Client::connect(&f.scratch_url, NoTls).unwrap();
+        assert_eq!(f.command("plan")["outcome"], "pass");
+    }
+}
+
 /// #430: a replay that never cleaned up (its process died between
 /// migrations) leaves committed migrations and NTNT's marker in scratch.
 /// The next plan cleans them up, passes and says so. A scratch with the
