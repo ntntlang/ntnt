@@ -739,6 +739,16 @@ fn unproven(marker: &Marker, why: &str, objects: &[String]) -> Diagnostic {
     d
 }
 
+/// Releasing the replay lock failed after cleanup finished (#464 review):
+/// cleanup's outcome stands, and closing the session released the lock.
+fn unlock_failed(mut cause: Diagnostic) -> Diagnostic {
+    cause.message = format!(
+        "Scratch cleanup finished (scratch.cleanup says how), but releasing NTNT's replay lock afterwards failed ({}: {}), so NTNT closed the scratch session, which releases the lock.",
+        cause.code, cause.message
+    );
+    cause
+}
+
 fn cleanup_failed(cause: Diagnostic) -> Diagnostic {
     if cause.code == "DB_SCRATCH_CLEANUP" {
         return cause;
@@ -1631,6 +1641,16 @@ impl Postgres {
         let row = rows.first().ok_or_else(not_empty)?;
         let (database, role, name): (u32, u32, String) = (row.get(4), row.get(5), row.get(6));
         let now = self.database_state().await?;
+        // Both settings snapshots are read before anything is changed.
+        let (Some(want), Some(have)) = (
+            parse_settings(&before.settings),
+            parse_settings(&now.settings),
+        ) else {
+            return Err(Diagnostic::new(
+                "DB_SCRATCH_CLEANUP",
+                "The settings NTNT's marker recorded for the scratch database and role, or those scratch holds now, are not a settings snapshot, so cleanup restored none of the scratch database's privileges, connection limit, comment or settings.",
+            ));
+        };
         let grants: Vec<String> = self
             .rows(
                 &format!("{DATABASE_GRANTS} {RESTORE_DATABASE_GRANTS}"),
@@ -1661,15 +1681,6 @@ impl Postgres {
                 .get(0);
             self.batch(&comment).await?;
         }
-        let (Some(want), Some(have)) = (
-            parse_settings(&before.settings),
-            parse_settings(&now.settings),
-        ) else {
-            return Err(Diagnostic::new(
-                "DB_SCRATCH_CLEANUP",
-                "The settings NTNT's marker recorded for the scratch database and role, or those scratch holds now, are not a settings snapshot, so cleanup restored none of them.",
-            ));
-        };
         let empty = std::collections::BTreeMap::new();
         for key in want
             .keys()
@@ -1757,7 +1768,10 @@ impl Postgres {
     /// the marker then stays, so the next replay cleans up. Ok(false) when
     /// the replay committed nothing, so there was nothing to clean. The
     /// transaction stops after `CLEANUP_WORK`, its statement cancelled.
-    pub async fn cleanup_scratch(&self) -> Result<bool> {
+    /// Releasing the lock comes after cleanup's outcome, and its failure
+    /// comes back beside it, never instead of it: the session is then
+    /// closed, which releases the lock, and what cleanup committed stays.
+    pub async fn cleanup_scratch(&self) -> (Result<bool>, Option<Diagnostic>) {
         let work = async {
             self.rollback().await?;
             let Some(id) = self.replay.id.get() else {
@@ -1813,9 +1827,14 @@ impl Postgres {
             let _ = self.rollback().await;
         }
         let unlocked = self.batch(UNLOCK).await;
-        result
-            .map_err(cleanup_failed)
-            .and_then(|cleaned| unlocked.map(|()| cleaned))
+        if unlocked.is_err() {
+            // Whether this session still holds the lock is unknown.
+            self.task.abort();
+        }
+        match result {
+            Ok(cleaned) => (Ok(cleaned), unlocked.err().map(unlock_failed)),
+            Err(cause) => (Err(cleanup_failed(cause)), None),
+        }
     }
 }
 

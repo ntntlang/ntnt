@@ -13,7 +13,8 @@
   `BETWEEN`, `NOT BETWEEN`, `IN` lists and row comparisons nest (in CHECK
   constraints, `EXCLUDE` and index predicates, index expressions, policies,
   defaults, generated columns, views, triggers' `WHEN`, domains, partition keys
-  and SQL-standard routine bodies), and sets `connoinherit` on partitions'
+  and SQL-standard routine bodies, also those naming an argument by position,
+  `$1`), and sets `connoinherit` on partitions'
   PRIMARY KEY and UNIQUE constraints; inspection compares both as a restore
   leaves them, so neither is `DB_DRIFT`. Plans for histories with such values
   record `canonicalization_version` 2 and new fingerprints, so a new plan
@@ -83,7 +84,10 @@
   every connection, so a replay stopped before cleanup could not be
   recovered). Cleanup restores setting values as escape string literals, and
   after a failed cleanup the advice to drop or recreate scratch applies only to
-  a database nothing else uses.
+  a database nothing else uses. A failure to release the replay lock after
+  cleanup finished is reported beside it, and no longer turns a finished
+  cleanup into `unknown` or drops the replay's results; NTNT closes the scratch
+  session, which releases the lock.
 - `ntnt db` (PostgreSQL): cleanup restores the scratch database's privileges,
   connection limit, comment and settings, and the scratch role's settings, so
   histories that change them in a `DO` block still plan. Replay refuses, before

@@ -749,9 +749,12 @@ CREATE EXTENSION pg_stat_statements SCHEMA public;
   replay. `CREATE`, `ALTER` and `DROP USER MAPPING` are refused in migrations with
   `DB_REPLAY_UNSUPPORTED` (`USER_MAPPING` in `analysis.unknowns`): a user mapping
   holds the credentials a role uses on the server and belongs to that role. Create
-  it outside the history, as a DBA step on the target (and in the scratch database
-  if replay needs it), with the credentials kept in the secrets provider. NTNT does
-  not inspect user mappings, so one created that way is neither drift nor uncovered.
+  it outside the history, as a DBA step on the target, with the credentials kept in
+  the secrets provider. Scratch holds no server before replay, so it cannot hold a
+  mapping either: the history must replay without one, and no migration may need a
+  mapping to run (`IMPORT FOREIGN SCHEMA` and queries on foreign tables do). NTNT
+  does not inspect user mappings, so one created that way is neither drift nor
+  uncovered.
 - A declared extension's casts do not block DDL, as an in-scope extension's do
   not.
 - The key is part of the plan's policy, so adding or changing it needs a new plan.

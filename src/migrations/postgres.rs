@@ -1790,7 +1790,7 @@ fn user_mapping_refused() -> Diagnostic {
         "DB_REPLAY_UNSUPPORTED",
         "Migration creates, alters or drops a user mapping (USER_MAPPING in analysis.unknowns). A user mapping holds the credentials a role uses on a foreign server and belongs to that role, so NTNT keeps user mappings out of migration histories, which are reviewed, recorded and replayed as plain text.",
     );
-    d.next_action = "Remove the statement from the migration. Create the user mapping outside the history, as a DBA step on the target, and in the scratch database too if replay needs it, with the credentials kept in the secrets provider rather than written into SQL. NTNT does not inspect user mappings, so one created that way is neither drift nor uncovered.".into();
+    d.next_action = "Remove the statement from the migration. Create the user mapping outside the history, as a DBA step on the target, with the credentials kept in the secrets provider rather than written into SQL. Not in scratch: it must hold no foreign server before replay, so it cannot hold a mapping either, and the history must replay without one (no migration may need a mapping to run, as IMPORT FOREIGN SCHEMA or a query on a foreign table does). NTNT does not inspect user mappings, so one created that way is neither drift nor uncovered.".into();
     d
 }
 fn protect_definitions(value: &mut Value) {

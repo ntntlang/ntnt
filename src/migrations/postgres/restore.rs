@@ -161,9 +161,11 @@ struct Group {
 /// drops parentheses, and AND and OR are associative, so the expression
 /// means what it meant. `None` when nothing changes, and when the text is
 /// not certainly in that form: an unbalanced parenthesis or bracket, an
-/// unterminated literal or quoted name, a `$` or a comment outside quotes,
-/// `and`, `or`, `case`, `end` or `between` not in capitals, or groups nested
-/// deeper than `MAX_DEPTH`. Then it is compared as stored, as before #460.
+/// unterminated literal or quoted name, a comment or a `$` outside quotes
+/// other than a positional parameter (`$1`, as an SQL-standard body names an
+/// unnamed argument), `and`, `or`, `case`, `end` or `between` not in
+/// capitals, or groups nested deeper than `MAX_DEPTH`. Then it is compared
+/// as stored, as before #460.
 pub(super) fn reassociate(text: &str) -> Option<String> {
     let mut items = parse(text)?;
     let mut removed = vec![];
@@ -246,8 +248,24 @@ fn parse(text: &str) -> Option<Vec<Item>> {
                 at = quoted(bytes, at, b'"', false)?;
                 Item::Atom
             }
-            // Dollar quoting or a parameter.
-            b'$' => return None,
+            // A positional parameter, `$` and digits, is an operand. Any
+            // other `$` leaves the text as stored: dollar quoting (`$$`,
+            // `$tag$`), a name holding one (`a$b`), or digits run into a name.
+            b'$' => {
+                let digits = bytes[at + 1..]
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_digit())
+                    .count();
+                let joined = |byte: &u8| word_byte(*byte) || *byte == b'$';
+                if digits == 0
+                    || (at > 0 && joined(&bytes[at - 1]))
+                    || bytes.get(at + 1 + digits).is_some_and(joined)
+                {
+                    return None;
+                }
+                at += 1 + digits;
+                Item::Atom
+            }
             b'-' if bytes.get(at + 1) == Some(&b'-') => return None,
             b'/' if bytes.get(at + 1) == Some(&b'*') => return None,
             b'(' | b'[' => {
@@ -455,6 +473,20 @@ mod tests {
             "LIST (((((k >= 1) AND (k <= 5)) AND (id > 0))))",
             "LIST ((((k >= 1) AND (k <= 5) AND (id > 0))))",
         ),
+        // #464 review: an SQL-standard body names an unnamed argument by
+        // its position.
+        (
+            "CREATE OR REPLACE FUNCTION app.f(integer)\n RETURNS boolean\n LANGUAGE sql\n IMMUTABLE\nRETURN ((($1 >= 1) AND ($1 <= 5)) AND ($1 > 0))\n",
+            "CREATE OR REPLACE FUNCTION app.f(integer)\n RETURNS boolean\n LANGUAGE sql\n IMMUTABLE\nRETURN (($1 >= 1) AND ($1 <= 5) AND ($1 > 0))\n",
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION app.g(integer, text)\n RETURNS boolean\n LANGUAGE sql\nBEGIN ATOMIC\n SELECT (((($1 >= 1) AND ($1 <= 5)) AND ($2 <> 'a$1$$'::text)) AND ($12 IS NULL));\nEND\n",
+            "CREATE OR REPLACE FUNCTION app.g(integer, text)\n RETURNS boolean\n LANGUAGE sql\nBEGIN ATOMIC\n SELECT (($1 >= 1) AND ($1 <= 5) AND ($2 <> 'a$1$$'::text) AND ($12 IS NULL));\nEND\n",
+        ),
+        (
+            "(((a) AND (b)) AND ($1 > 0))",
+            "((a) AND (b) AND ($1 > 0))",
+        ),
     ];
 
     /// Texts a restore leaves as they are, which stay as they are.
@@ -501,9 +533,16 @@ mod tests {
             "(((a) AND (b]) AND (c))",
             "(((a) AND (b)) AND (c = 'x))",
             "(((a) AND (b)) AND (\"c))",
-            // Dollar quoting, parameters and comments.
-            "(((a) AND (b)) AND ($1 > 0))",
+            // Dollar quoting, `$` in or beside a name, and comments.
             "(((a) AND (b)) AND (c = $$x$$))",
+            "(((a) AND (b)) AND (c = $q$x$q$))",
+            "(((a) AND (b)) AND (c = $1$x$1$))",
+            "(((a) AND (b)) AND (c$1 > 0))",
+            "(((a) AND (b)) AND (c$ > 0))",
+            "(((a) AND (b)) AND ($1c > 0))",
+            "(((a) AND (b)) AND ($1_0 > 0))",
+            "(((a) AND (b)) AND ($ > 0))",
+            "(((a) AND (b)) AND (c > $))",
             "(((a) AND (b)) AND (c > 0)) -- x",
             "(((a) AND (b)) AND (c > 0)) /* x */",
             // Keywords PostgreSQL deparses in capitals.
