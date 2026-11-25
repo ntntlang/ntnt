@@ -12,6 +12,103 @@ use db_fixture::Fixture;
 /// test-held lock.
 const LOCK_WAIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// `config` bounded at the transport, as every admin session of this file
+/// is: connecting, data the server does not acknowledge (tcp_user_timeout)
+/// and a peer that stops answering keepalives each give up within about 10
+/// seconds, so a probe of a server that stopped answering fails instead of
+/// blocking the test.
+fn bounded(mut config: postgres::Config) -> postgres::Config {
+    let limit = std::time::Duration::from_secs(10);
+    config
+        .connect_timeout(limit)
+        .tcp_user_timeout(limit)
+        .keepalives(true)
+        .keepalives_idle(std::time::Duration::from_secs(5))
+        .keepalives_interval(std::time::Duration::from_secs(1))
+        .keepalives_retries(5);
+    config
+}
+
+/// The fixture's admin connection (`NTNT_DB_TEST_ADMIN`), `bounded`.
+fn admin_config() -> postgres::Config {
+    bounded(
+        std::env::var("NTNT_DB_TEST_ADMIN")
+            .expect("explicit disposable PostgreSQL fixture URL required")
+            .parse()
+            .unwrap(),
+    )
+}
+
+/// A superuser session on `f`'s scratch database on a thread of its own,
+/// for the probes of a hang guard (#458 review): each probe is waited for
+/// only until the guard's deadline, so a server that stops answering fails
+/// the test with the probe's context instead of blocking it.
+struct Probe {
+    ask: std::sync::mpsc::Sender<String>,
+    answer: std::sync::mpsc::Receiver<Result<bool, String>>,
+}
+
+impl Probe {
+    fn new(f: &Fixture) -> Self {
+        let mut config = admin_config();
+        config.dbname(&f.scratch);
+        let (ask, questions) = std::sync::mpsc::channel::<String>();
+        let (tell, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut c = match config.connect(NoTls) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tell.send(Err(format!("could not connect: {e}")));
+                    return;
+                }
+            };
+            for query in questions {
+                let _ = tell.send(
+                    c.query_one(query.as_str(), &[])
+                        .map(|r| r.get::<_, bool>(0))
+                        .map_err(|e| e.to_string()),
+                );
+            }
+        });
+        Self { ask, answer }
+    }
+
+    /// Whether `query` (one boolean) holds, as answered by `deadline`.
+    fn holds(&self, query: &str, deadline: std::time::Instant) -> Result<bool, String> {
+        if self.ask.send(query.to_owned()).is_err() {
+            return Err(match self.answer.try_recv() {
+                Ok(Err(e)) => e,
+                _ => "the probe's session ended".to_owned(),
+            });
+        }
+        match self
+            .answer
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
+            Ok(answer) => answer.map_err(|e| format!("probe `{query}` failed: {e}")),
+            Err(_) => Err(format!(
+                "probe `{query}` got no answer within {LOCK_WAIT_DEADLINE:?}"
+            )),
+        }
+    }
+
+    /// Wait until `query` holds; `what` names the wait in a failure.
+    fn wait(&self, query: &str, what: &str) {
+        let deadline = std::time::Instant::now() + LOCK_WAIT_DEADLINE;
+        loop {
+            match self.holds(query, deadline) {
+                Ok(true) => return,
+                Ok(false) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "{what}: not within {LOCK_WAIT_DEADLINE:?}"
+                ),
+                Err(e) => panic!("{what}: {e}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn logical_database_and_target_selection_are_bound_into_plans() {
@@ -390,10 +487,7 @@ fn catalog_detects_disabled_foreign_key_enforcement() {
     let f = Fixture::new();
     f.seed_first("CREATE TABLE app.parents (id INTEGER PRIMARY KEY); CREATE TABLE app.children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES app.parents(id));");
     assert_eq!(f.command("verify")["outcome"], "pass");
-    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let mut config = admin_config();
     config.dbname(&f.target);
     let mut admin = config.connect(NoTls).unwrap();
     admin
@@ -692,10 +786,7 @@ fn replay_consumes_captured_files_even_if_paths_are_replaced_during_inspection()
 fn review_target_snapshot_is_released_before_scratch_replay() {
     let mut f = Fixture::new();
     f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
-    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let mut config = admin_config();
     config.dbname(&f.scratch);
     let mut locker = config.connect(NoTls).unwrap();
     locker
@@ -2248,10 +2339,7 @@ CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DE
 
 /// A superuser session on `f`'s scratch database.
 fn scratch_admin(f: &Fixture) -> Client {
-    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let mut config = admin_config();
     config.dbname(&f.scratch);
     config.connect(NoTls).unwrap()
 }
@@ -2353,18 +2441,25 @@ fn report(child: std::process::Child) -> Value {
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
 }
 
-/// Poll `query` (one boolean) on `c` until it holds. Fail with the child's
-/// output if the child exits first; the deadline only bounds a hang.
-fn wait_for(c: &mut Client, query: &str, child: &mut std::process::Child, what: &str) {
-    let start = std::time::Instant::now();
+/// Poll `query` (one boolean) on `f`'s scratch database until it holds.
+/// Fail with the child's output if the child exits first; the deadline only
+/// bounds a hang, the server's too (`Probe`).
+fn wait_for(f: &Fixture, query: &str, child: &mut std::process::Child, what: &str) {
+    let probe = Probe::new(f);
+    let deadline = std::time::Instant::now() + LOCK_WAIT_DEADLINE;
     loop {
-        if c.query_one(query, &[]).unwrap().get::<_, bool>(0) {
-            return;
+        match probe.holds(query, deadline) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                let _ = child.kill();
+                panic!("{what}: {e}");
+            }
         }
         if child.try_wait().unwrap().is_some() {
             panic!("{what}: the plan exited first: {}", report_of(child));
         }
-        if start.elapsed() > LOCK_WAIT_DEADLINE {
+        if std::time::Instant::now() > deadline {
             let _ = child.kill();
             panic!("{what}: not reached within {LOCK_WAIT_DEADLINE:?}");
         }
@@ -2623,7 +2718,7 @@ fn crash_during_replay(f: &Fixture) {
         .unwrap();
     let mut child = spawn_plan(f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    wait_for(f, waiting, &mut child, "replay waiting in 0002");
     let pid: i32 = holder
         .query_one("SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted", &[])
         .unwrap()
@@ -2633,21 +2728,10 @@ fn crash_during_replay(f: &Fixture) {
     holder
         .execute("SELECT pg_terminate_backend($1)", &[&pid])
         .unwrap();
-    let start = std::time::Instant::now();
-    while holder
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1)",
-            &[&pid],
-        )
-        .unwrap()
-        .get::<_, bool>(0)
-    {
-        assert!(
-            start.elapsed() < LOCK_WAIT_DEADLINE,
-            "backend {pid} did not end"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    Probe::new(f).wait(
+        &format!("SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid={pid})"),
+        &format!("backend {pid} ending"),
+    );
     holder
         .batch_execute("SELECT pg_advisory_unlock(4242)")
         .unwrap();
@@ -2672,6 +2756,19 @@ fn a_migration_that_closes_scratch_to_connections_is_refused_before_it_commits()
             .unwrap()
             .get(0)
     };
+    // Each committed change of the scratch database's row writes a new
+    // version of it: a refusal that came only after the commit, with cleanup
+    // restoring the limit, would leave another one (#457 review).
+    let version = |f: &Fixture| -> String {
+        scratch_admin(f)
+            .query_one(
+                "SELECT xmin::text FROM pg_database WHERE datname=current_database()",
+                &[],
+            )
+            .unwrap()
+            .get(0)
+    };
+    let before = version(&f);
     f.sql(
         "0001_limit.sql",
         "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT 0', current_database()); END $$;",
@@ -2688,6 +2785,7 @@ fn a_migration_that_closes_scratch_to_connections_is_refused_before_it_commits()
     );
     assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
     assert_eq!(limit(&f), -1);
+    assert_eq!(version(&f), before, "the refused limit was committed");
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
     f.sql(
         "0001_limit.sql",
@@ -2697,6 +2795,7 @@ fn a_migration_that_closes_scratch_to_connections_is_refused_before_it_commits()
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
     assert_eq!(limit(&f), -1);
+    assert_ne!(version(&f), before, "the control's limit did not commit");
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
 }
 
@@ -2860,10 +2959,7 @@ fn leftovers_of_an_unfinished_replay_are_cleaned_only_with_the_marker() {
 
 /// A superuser session in `f`'s target database.
 fn target_admin(f: &Fixture) -> Client {
-    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let mut config = admin_config();
     config.dbname(&f.target);
     config.connect(NoTls).unwrap()
 }
@@ -3282,7 +3378,7 @@ fn a_plan_waits_for_another_replay_of_its_scratch() {
         .unwrap();
     let mut child = spawn_plan(&f);
     wait_for(
-        &mut holder,
+        &f,
         REPLAY_LOCK_WAITER,
         &mut child,
         "plan waiting for the replay lock",
@@ -3433,7 +3529,7 @@ fn a_migration_that_releases_the_replay_lock_is_refused() {
         .unwrap();
     let mut first = spawn_plan(&f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut first, "replay waiting in 0002");
+    wait_for(&f, waiting, &mut first, "replay waiting in 0002");
     let second = f.command("plan");
     let d = diagnostic(&second, "DB_SCRATCH_BUSY").unwrap_or_else(|| panic!("{second}"));
     assert!(
@@ -3534,19 +3630,13 @@ fn as_scratch_role(f: &Fixture, sql: &str) {
     let mut owner = Client::connect(&f.scratch_url, NoTls).unwrap();
     owner.batch_execute(sql).unwrap();
     drop(owner);
-    let mut admin = scratch_admin(f);
-    let start = std::time::Instant::now();
-    while admin
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND usename=$1::text)",
-            &[&f.scratch],
-        )
-        .unwrap()
-        .get::<_, bool>(0)
-    {
-        assert!(start.elapsed() < LOCK_WAIT_DEADLINE, "the session did not end");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    Probe::new(f).wait(
+        &format!(
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND usename='{}')",
+            f.scratch
+        ),
+        "the scratch role's session ending",
+    );
 }
 
 /// Run `command` on a manifest whose target is `f`'s scratch database (as
@@ -3717,7 +3807,7 @@ fn cleanup_without_the_replay_lock_drops_nothing_and_the_next_plan_recovers() {
         .unwrap();
     let mut child = spawn_plan(&f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    wait_for(&f, waiting, &mut child, "replay waiting in 0002");
     holder
         .batch_execute("SELECT pg_advisory_lock(1853124212, 430); SELECT pg_advisory_unlock(4242)")
         .unwrap();
@@ -3765,7 +3855,7 @@ fn a_committed_marker_that_disappears_fails_cleanup() {
         .unwrap();
     let mut child = spawn_plan(&f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    wait_for(&f, waiting, &mut child, "replay waiting in 0002");
     holder
         .batch_execute("DROP SCHEMA _ntnt_replay CASCADE; SELECT pg_advisory_unlock(4242)")
         .unwrap();
@@ -3826,7 +3916,7 @@ fn a_lock_on_a_replayed_table_fails_cleanup_fast_and_the_next_plan_recovers() {
         .unwrap();
     let mut child = spawn_plan(&f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    wait_for(&f, waiting, &mut child, "replay waiting in 0002");
     let mut blocker = scratch_admin(&f);
     blocker
         .batch_execute("BEGIN; LOCK TABLE app.t IN ACCESS SHARE MODE")
@@ -4008,8 +4098,7 @@ struct Restored<'a> {
 }
 impl<'a> Restored<'a> {
     fn new(f: &'a Fixture) -> Self {
-        let url = std::env::var("NTNT_DB_TEST_ADMIN").unwrap();
-        let mut admin = Client::connect(&url, NoTls).unwrap();
+        let mut admin = admin_config().connect(NoTls).unwrap();
         let major: i32 = admin
             .query_one(
                 "SELECT current_setting('server_version_num')::int / 10000",
@@ -4084,13 +4173,12 @@ impl<'a> Restored<'a> {
             .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
     }
     fn client(&self) -> Client {
-        Client::connect(&self.url, NoTls).unwrap()
+        bounded(self.url.parse().unwrap()).connect(NoTls).unwrap()
     }
 }
 impl Drop for Restored<'_> {
     fn drop(&mut self) {
-        if let Ok(mut admin) = Client::connect(&std::env::var("NTNT_DB_TEST_ADMIN").unwrap(), NoTls)
-        {
+        if let Ok(mut admin) = admin_config().connect(NoTls) {
             let _ = admin.batch_execute(&format!("DROP DATABASE {} WITH (FORCE)", self.name));
         }
     }
