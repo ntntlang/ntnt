@@ -139,6 +139,12 @@ enum Item {
     Atom,
 }
 
+/// The deepest nesting of groups `reassociate` reads; a deeper text is
+/// compared as stored. `merge` recurses once per level, on the caller's
+/// stack (1 MB on Windows' main thread), and a left-deep chain such as an
+/// `IN` list of thousands of columns nests one level per element.
+const MAX_DEPTH: usize = 1000;
+
 /// A parenthesized (`paren`) or bracketed group, with the byte offsets of
 /// its opening and closing characters.
 struct Group {
@@ -156,8 +162,8 @@ struct Group {
 /// means what it meant. `None` when nothing changes, and when the text is
 /// not certainly in that form: an unbalanced parenthesis or bracket, an
 /// unterminated literal or quoted name, a `$` or a comment outside quotes,
-/// or `and`, `or`, `case`, `end` or `between` not in capitals. Then it is
-/// compared as stored, as before #460.
+/// `and`, `or`, `case`, `end` or `between` not in capitals, or groups nested
+/// deeper than `MAX_DEPTH`. Then it is compared as stored, as before #460.
 pub(super) fn reassociate(text: &str) -> Option<String> {
     let mut items = parse(text)?;
     let mut removed = vec![];
@@ -245,6 +251,9 @@ fn parse(text: &str) -> Option<Vec<Item>> {
             b'-' if bytes.get(at + 1) == Some(&b'-') => return None,
             b'/' if bytes.get(at + 1) == Some(&b'*') => return None,
             b'(' | b'[' => {
+                if open.len() > MAX_DEPTH {
+                    return None;
+                }
                 open.push(Group {
                     paren: byte == b'(',
                     open: at,
@@ -504,6 +513,24 @@ mod tests {
         ] {
             assert_eq!(reassociate(text), None, "{text}");
         }
+        // A chain nested deeper than MAX_DEPTH, as an IN list of that many
+        // columns deparses, stays as stored; one within it is merged.
+        let chain = |depth: usize| {
+            let mut text = "(c0 = 0)".to_owned();
+            for n in 1..depth {
+                text = format!("({text} OR (c{n} = {n}))");
+            }
+            text
+        };
+        assert_eq!(reassociate(&chain(MAX_DEPTH + 2)), None);
+        let flat = (0..MAX_DEPTH - 1)
+            .map(|n| format!("(c{n} = {n})"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        assert_eq!(
+            reassociate(&chain(MAX_DEPTH - 1)),
+            Some(format!("({flat})"))
+        );
         // Inside literals none of those matter.
         assert_eq!(
             reassociate("(((a = '$1 -- /*') AND (b = 'and')) AND (c = E'\\' AND ('))").as_deref(),
