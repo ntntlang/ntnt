@@ -1163,7 +1163,34 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         // Two replays of one scratch database never interleave: the second
         // waits here, before it reads what scratch holds.
         self.lock_scratch(wait).await?;
+        // Recovery must see every row another session wrote into what an
+        // unfinished replay left (`check_leftover_rows`): lock those tables
+        // against writes before this transaction's snapshot, which its first
+        // query takes, so that what committed before is visible and nothing
+        // commits there until it ends.
+        let leftovers: Vec<String> = self
+            .rows(scratch::LEFTOVER_TABLES, &[])
+            .await?
+            .iter()
+            .filter(|r| r.get::<_, bool>(4))
+            .map(|r| r.get(0))
+            .collect();
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
+        if !leftovers.is_empty() {
+            let only: Vec<String> = leftovers.iter().map(|t| format!("ONLY {t}")).collect();
+            self.batch(&format!("LOCK TABLE {} IN SHARE MODE", only.join(", ")))
+                .await
+                .map_err(|d| {
+                    if d.code == "DB_LOCK_CONFLICT" {
+                        Diagnostic::new(
+                            "DB_SCRATCH_BUSY",
+                            "Scratch holds tables that a replay which never finished left there, and another session held a lock on one of them for 2 seconds, so it may be writing there. Nothing in scratch was changed.",
+                        )
+                    } else {
+                        d
+                    }
+                })?;
+        }
         if let Some(mut mismatch) = deferred {
             if self
                 .recover_leftovers(&identity.cluster, identity.database_oid)
@@ -1844,7 +1871,7 @@ fn user_mapping_refused() -> Diagnostic {
         "DB_REPLAY_UNSUPPORTED",
         "Migration creates, alters or drops a user mapping (USER_MAPPING in analysis.unknowns). A user mapping holds the credentials a role uses on a foreign server and belongs to that role, so NTNT keeps user mappings out of migration histories, which are reviewed, recorded and replayed as plain text.",
     );
-    d.next_action = "Remove the statement from the migration. Create the user mapping outside the history, as a DBA step on the target, and in the scratch database too if replay needs it, with the credentials kept in the secrets provider rather than written into SQL. NTNT does not inspect user mappings, so one created that way is neither drift nor uncovered.".into();
+    d.next_action = "Remove the statement from the migration. Create the user mapping outside the history, as a DBA step on the target, with the credentials kept in the secrets provider rather than written into SQL. Not in scratch: it must hold no foreign server before replay, so it cannot hold a mapping either, and the history must replay without one (no migration may need a mapping to run, as IMPORT FOREIGN SCHEMA or a query on a foreign table does). NTNT does not inspect user mappings, so one created that way is neither drift nor uncovered.".into();
     d
 }
 fn protect_definitions(value: &mut Value) {

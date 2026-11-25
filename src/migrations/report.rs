@@ -1005,6 +1005,7 @@ async fn inspect_observed(
     };
     if let Some(scratch_config) = &inputs.config.scratch {
         let mut cleanup_failure = None;
+        let mut unlock_failure = None;
         let replay = async {
             let name = &scratch_config.endpoint.connection_secret;
             let secret = crate::stdlib::secrets::require_from_manifest(name, &inputs.document)
@@ -1064,7 +1065,8 @@ async fn inspect_observed(
             if work.as_ref().is_err_and(|d| d.code == "DB_TIMEOUT") {
                 scratch.cancel_running().await;
             }
-            let cleanup = scratch.cleanup_scratch().await;
+            let (cleanup, unlocked) = scratch.cleanup_scratch().await;
+            unlock_failure = unlocked;
             report["scratch"]["cleanup"] = json!(match cleanup {
                 Ok(true) => "pass",
                 Ok(false) => "not_needed",
@@ -1081,6 +1083,10 @@ async fn inspect_observed(
         }
         .await;
         record_replay(&mut report, replay, cleanup_failure);
+        // After cleanup finished, which it does not change.
+        if let Some(d) = unlock_failure {
+            diagnostic(&mut report, d);
+        }
     } else {
         diagnostic(&mut report,Diagnostic::new("DB_REFERENCE_UNAVAILABLE","No explicitly disposable matching scratch database/file is configured; expected state is unverified."));
     }

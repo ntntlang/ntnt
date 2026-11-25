@@ -179,6 +179,17 @@
   both, but a replay stopped before cleanup would leave no way to connect and
   clean scratch up. A `GRANT` or `REVOKE CONNECT` that keeps the role
   connectable plans as before, with the same digests.
+- **Replay and cleanup hold to their guarantees in more cases** (0.6.5
+  review). Recovery of a killed replay's leftovers proves who wrote the rows
+  of the scratch role's tables, not only their catalog rows, so rows another
+  session wrote into them refuse recovery (`DB_SCRATCH_NOT_EMPTY`) and are
+  kept. A migration that swaps the replay lock for a transaction-level lock
+  on the same key, drops `public` and leaves a schema another role owns,
+  changes privileges that hold another role's delegated grant, or sets
+  `local_preload_libraries` for scratch sessions is refused before it commits
+  (`DB_REPLAY_UNSUPPORTED`), since cleanup could not undo it or no later plan
+  could connect. A malformed marker is never cleaned. Histories that do none
+  of this plan with the same digests.
 - **`_ntnt_replay` cannot be the managed schema**, like `_ntnt`: `DB_CONFIG`
   says both are NTNT's own (the ledger and replay's marker in scratch), where a
   plan used to fail on a duplicate schema (#430).

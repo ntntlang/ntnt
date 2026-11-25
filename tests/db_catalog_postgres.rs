@@ -12,6 +12,103 @@ use db_fixture::Fixture;
 /// test-held lock.
 const LOCK_WAIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// `config` bounded at the transport, as every admin session of this file
+/// is: connecting, data the server does not acknowledge (tcp_user_timeout)
+/// and a peer that stops answering keepalives each give up within about 10
+/// seconds, so a probe of a server that stopped answering fails instead of
+/// blocking the test.
+fn bounded(mut config: postgres::Config) -> postgres::Config {
+    let limit = std::time::Duration::from_secs(10);
+    config
+        .connect_timeout(limit)
+        .tcp_user_timeout(limit)
+        .keepalives(true)
+        .keepalives_idle(std::time::Duration::from_secs(5))
+        .keepalives_interval(std::time::Duration::from_secs(1))
+        .keepalives_retries(5);
+    config
+}
+
+/// The fixture's admin connection (`NTNT_DB_TEST_ADMIN`), `bounded`.
+fn admin_config() -> postgres::Config {
+    bounded(
+        std::env::var("NTNT_DB_TEST_ADMIN")
+            .expect("explicit disposable PostgreSQL fixture URL required")
+            .parse()
+            .unwrap(),
+    )
+}
+
+/// A superuser session on `f`'s scratch database on a thread of its own,
+/// for the probes of a hang guard (#458 review): each probe is waited for
+/// only until the guard's deadline, so a server that stops answering fails
+/// the test with the probe's context instead of blocking it.
+struct Probe {
+    ask: std::sync::mpsc::Sender<String>,
+    answer: std::sync::mpsc::Receiver<Result<bool, String>>,
+}
+
+impl Probe {
+    fn new(f: &Fixture) -> Self {
+        let mut config = admin_config();
+        config.dbname(&f.scratch);
+        let (ask, questions) = std::sync::mpsc::channel::<String>();
+        let (tell, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut c = match config.connect(NoTls) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tell.send(Err(format!("could not connect: {e}")));
+                    return;
+                }
+            };
+            for query in questions {
+                let _ = tell.send(
+                    c.query_one(query.as_str(), &[])
+                        .map(|r| r.get::<_, bool>(0))
+                        .map_err(|e| e.to_string()),
+                );
+            }
+        });
+        Self { ask, answer }
+    }
+
+    /// Whether `query` (one boolean) holds, as answered by `deadline`.
+    fn holds(&self, query: &str, deadline: std::time::Instant) -> Result<bool, String> {
+        if self.ask.send(query.to_owned()).is_err() {
+            return Err(match self.answer.try_recv() {
+                Ok(Err(e)) => e,
+                _ => "the probe's session ended".to_owned(),
+            });
+        }
+        match self
+            .answer
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
+            Ok(answer) => answer.map_err(|e| format!("probe `{query}` failed: {e}")),
+            Err(_) => Err(format!(
+                "probe `{query}` got no answer within {LOCK_WAIT_DEADLINE:?}"
+            )),
+        }
+    }
+
+    /// Wait until `query` holds; `what` names the wait in a failure.
+    fn wait(&self, query: &str, what: &str) {
+        let deadline = std::time::Instant::now() + LOCK_WAIT_DEADLINE;
+        loop {
+            match self.holds(query, deadline) {
+                Ok(true) => return,
+                Ok(false) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "{what}: not within {LOCK_WAIT_DEADLINE:?}"
+                ),
+                Err(e) => panic!("{what}: {e}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn logical_database_and_target_selection_are_bound_into_plans() {
@@ -390,10 +487,7 @@ fn catalog_detects_disabled_foreign_key_enforcement() {
     let f = Fixture::new();
     f.seed_first("CREATE TABLE app.parents (id INTEGER PRIMARY KEY); CREATE TABLE app.children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES app.parents(id));");
     assert_eq!(f.command("verify")["outcome"], "pass");
-    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let mut config = admin_config();
     config.dbname(&f.target);
     let mut admin = config.connect(NoTls).unwrap();
     admin
@@ -692,10 +786,7 @@ fn replay_consumes_captured_files_even_if_paths_are_replaced_during_inspection()
 fn review_target_snapshot_is_released_before_scratch_replay() {
     let mut f = Fixture::new();
     f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER);");
-    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let mut config = admin_config();
     config.dbname(&f.scratch);
     let mut locker = config.connect(NoTls).unwrap();
     locker
@@ -2289,10 +2380,7 @@ CREATE TABLE app.orders (id int PRIMARY KEY, status app.order_status NOT NULL DE
 
 /// A superuser session on `f`'s scratch database.
 fn scratch_admin(f: &Fixture) -> Client {
-    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let mut config = admin_config();
     config.dbname(&f.scratch);
     config.connect(NoTls).unwrap()
 }
@@ -2394,18 +2482,25 @@ fn report(child: std::process::Child) -> Value {
         .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
 }
 
-/// Poll `query` (one boolean) on `c` until it holds. Fail with the child's
-/// output if the child exits first; the deadline only bounds a hang.
-fn wait_for(c: &mut Client, query: &str, child: &mut std::process::Child, what: &str) {
-    let start = std::time::Instant::now();
+/// Poll `query` (one boolean) on `f`'s scratch database until it holds.
+/// Fail with the child's output if the child exits first; the deadline only
+/// bounds a hang, the server's too (`Probe`).
+fn wait_for(f: &Fixture, query: &str, child: &mut std::process::Child, what: &str) {
+    let probe = Probe::new(f);
+    let deadline = std::time::Instant::now() + LOCK_WAIT_DEADLINE;
     loop {
-        if c.query_one(query, &[]).unwrap().get::<_, bool>(0) {
-            return;
+        match probe.holds(query, deadline) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                let _ = child.kill();
+                panic!("{what}: {e}");
+            }
         }
         if child.try_wait().unwrap().is_some() {
             panic!("{what}: the plan exited first: {}", report_of(child));
         }
-        if start.elapsed() > LOCK_WAIT_DEADLINE {
+        if std::time::Instant::now() > deadline {
             let _ = child.kill();
             panic!("{what}: not reached within {LOCK_WAIT_DEADLINE:?}");
         }
@@ -2664,7 +2759,7 @@ fn crash_during_replay(f: &Fixture) {
         .unwrap();
     let mut child = spawn_plan(f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    wait_for(f, waiting, &mut child, "replay waiting in 0002");
     let pid: i32 = holder
         .query_one("SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted", &[])
         .unwrap()
@@ -2674,21 +2769,10 @@ fn crash_during_replay(f: &Fixture) {
     holder
         .execute("SELECT pg_terminate_backend($1)", &[&pid])
         .unwrap();
-    let start = std::time::Instant::now();
-    while holder
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1)",
-            &[&pid],
-        )
-        .unwrap()
-        .get::<_, bool>(0)
-    {
-        assert!(
-            start.elapsed() < LOCK_WAIT_DEADLINE,
-            "backend {pid} did not end"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    Probe::new(f).wait(
+        &format!("SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid={pid})"),
+        &format!("backend {pid} ending"),
+    );
     holder
         .batch_execute("SELECT pg_advisory_unlock(4242)")
         .unwrap();
@@ -2713,6 +2797,19 @@ fn a_migration_that_closes_scratch_to_connections_is_refused_before_it_commits()
             .unwrap()
             .get(0)
     };
+    // Each committed change of the scratch database's row writes a new
+    // version of it: a refusal that came only after the commit, with cleanup
+    // restoring the limit, would leave another one (#457 review).
+    let version = |f: &Fixture| -> String {
+        scratch_admin(f)
+            .query_one(
+                "SELECT xmin::text FROM pg_database WHERE datname=current_database()",
+                &[],
+            )
+            .unwrap()
+            .get(0)
+    };
+    let before = version(&f);
     f.sql(
         "0001_limit.sql",
         "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I CONNECTION LIMIT 0', current_database()); END $$;",
@@ -2729,6 +2826,7 @@ fn a_migration_that_closes_scratch_to_connections_is_refused_before_it_commits()
     );
     assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
     assert_eq!(limit(&f), -1);
+    assert_eq!(version(&f), before, "the refused limit was committed");
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
     f.sql(
         "0001_limit.sql",
@@ -2738,7 +2836,284 @@ fn a_migration_that_closes_scratch_to_connections_is_refused_before_it_commits()
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
     assert_eq!(limit(&f), -1);
+    assert_ne!(version(&f), before, "the control's limit did not commit");
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// #458 review: a migration that sets local_preload_libraries for the
+/// scratch role or the scratch database is refused before it commits. A
+/// library that does not load refuses every new connection there, an
+/// administrator's too, so a replay stopped before cleanup would leave
+/// scratch unrecoverable.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_migration_that_preloads_a_library_for_scratch_sessions_is_refused_before_it_commits() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    for sql in [
+        "DO $$ BEGIN EXECUTE format('ALTER ROLE %I SET local_preload_libraries = %L', current_user, 'ntnt_missing'); END $$;",
+        "DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET local_preload_libraries = %L', current_database(), 'ntnt_missing'); END $$;",
+    ] {
+        f.sql("0001_preload.sql", sql);
+        let r = f.command("plan");
+        let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+        assert_eq!(d["source"], "0001_preload.sql", "{d}");
+        assert!(
+            d["message"]
+                .as_str()
+                .unwrap()
+                .contains("local_preload_libraries"),
+            "{d}"
+        );
+        assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+        assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+    }
+}
+
+/// #457 review: a migration that swaps the replay lock for a
+/// transaction-level lock on the same key, which its commit would release,
+/// is refused before it commits, as one that only releases it.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_migration_that_swaps_the_replay_lock_for_a_transaction_lock_is_refused() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql(
+        "0001_swap.sql",
+        "CREATE TABLE app.t (id int); SELECT pg_catalog.pg_advisory_unlock_all(); SELECT pg_catalog.pg_advisory_xact_lock(1853124212, 430);",
+    );
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["source"], "0001_swap.sql", "{d}");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("transaction-level lock on the same key"),
+        "{d}"
+    );
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// #457 review: with `public` dropped, a schema another role owns is still
+/// another role's object, refused before it commits; cleanup could not drop
+/// it.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_schema_of_another_role_is_refused_when_public_is_gone() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql(
+        "0001_swap.sql",
+        "DROP SCHEMA public; CREATE SCHEMA other AUTHORIZATION pg_database_owner;",
+    );
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["source"], "0001_swap.sql", "{d}");
+    assert!(
+        names(&d["objects"])
+            .iter()
+            .any(|o| o.contains("schema other")),
+        "{d}"
+    );
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// #457 review: cleanup restores the scratch database's and `public`'s
+/// privileges as their owner, so a grant another role made with a grant
+/// option cannot come back. A migration that changes such privileges is
+/// refused before it commits and they stay as they were; one that leaves
+/// them alone runs.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_change_of_privileges_holding_a_delegated_grant_is_refused_before_it_commits() {
+    let f = Fixture::new();
+    let (a, b) = (format!("{}_ga", f.scratch), format!("{}_gb", f.scratch));
+    let mut admin = scratch_admin(&f);
+    admin
+        .batch_execute(&format!(
+            "CREATE ROLE {a}; CREATE ROLE {b};
+             GRANT CONNECT ON DATABASE {s} TO {a} WITH GRANT OPTION; GRANT USAGE ON SCHEMA public TO {a} WITH GRANT OPTION;
+             SET ROLE {a}; GRANT CONNECT ON DATABASE {s} TO {b}; GRANT USAGE ON SCHEMA public TO {b}; RESET ROLE;",
+            s = f.scratch
+        ))
+        .unwrap();
+    let acls = |c: &mut Client| -> String {
+        c.query_one(
+            "SELECT (SELECT datacl::text FROM pg_database WHERE datname=current_database())||' '||(SELECT nspacl::text FROM pg_namespace WHERE nspname='public')",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+    };
+    let before = acls(&mut admin);
+    for (sql, on) in [
+        (
+            "DO $$ BEGIN EXECUTE format('GRANT CREATE ON DATABASE %I TO PUBLIC', current_database()); END $$;",
+            "CONNECT on database",
+        ),
+        ("GRANT CREATE ON SCHEMA public TO PUBLIC;", "USAGE on schema public"),
+    ] {
+        f.sql("0001_grant.sql", sql);
+        let r = f.command("plan");
+        let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+        assert_eq!(d["source"], "0001_grant.sql", "{d}");
+        let by = format!("granted to {b} by {a}");
+        assert_eq!(
+            names(&d["objects"])
+                .iter()
+                .filter(|o| o.contains(on) && o.contains(&by))
+                .count(),
+            1,
+            "{d}"
+        );
+        assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+        assert_eq!(acls(&mut admin), before);
+    }
+    f.sql("0001_grant.sql", "CREATE TABLE app.t (id int);");
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(acls(&mut admin), before);
+    admin
+        .batch_execute(&format!(
+            "REVOKE ALL ON DATABASE {s} FROM {a} CASCADE; REVOKE ALL ON SCHEMA public FROM {a} CASCADE; DROP ROLE {b}; DROP ROLE {a};",
+            s = f.scratch
+        ))
+        .unwrap();
+}
+
+/// #457 review: recovery proves who wrote the rows of what an unfinished
+/// replay committed, not only its catalog rows. A row another session wrote
+/// there after the crash keeps everything; the replay's own rows, also those
+/// a subtransaction or a migration without DDL wrote, are recovered.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn recovery_keeps_rows_written_outside_the_replay() {
+    let f = Fixture::new();
+    let public = public_state(&f);
+    f.sql(
+        "0001_t.sql",
+        "CREATE TABLE app.t (id int); INSERT INTO app.t VALUES (1);
+         DO $$ BEGIN INSERT INTO app.t VALUES (2); EXCEPTION WHEN OTHERS THEN NULL; END $$;",
+    );
+    f.sql(
+        "0002_rows.sql",
+        "INSERT INTO app.t VALUES (3); DO $$ BEGIN INSERT INTO app.t VALUES (4); EXCEPTION WHEN OTHERS THEN NULL; END $$;",
+    );
+    f.sql(
+        "0003_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    let mut scratch = scratch_admin(&f);
+    scratch
+        .batch_execute("INSERT INTO app.t VALUES (99)")
+        .unwrap();
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_NOT_EMPTY").unwrap_or_else(|| panic!("{r}"));
+    assert!(d["message"].as_str().unwrap().contains("hold rows"), "{d}");
+    assert_eq!(names(&d["objects"]), ["table app.t"], "{d}");
+    assert!(r["scratch"]["recovered"].is_null(), "{r}");
+    let ids = |c: &mut Client| -> Vec<i32> {
+        c.query("SELECT id FROM app.t ORDER BY id", &[])
+            .unwrap()
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
+    };
+    assert_eq!(ids(&mut scratch), [1, 2, 3, 4, 99]);
+    scratch
+        .batch_execute("DELETE FROM app.t WHERE id = 99")
+        .unwrap();
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+
+    // A migration may revoke the owner's own SELECT (#465 review): recovery
+    // grants it back to read the rows, in the transaction that drops them.
+    f.sql(
+        "0002_rows.sql",
+        "INSERT INTO app.t VALUES (3); REVOKE SELECT ON app.t FROM CURRENT_USER;",
+    );
+    crash_during_replay(&f);
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
+}
+
+/// #457 review: a marker whose transaction list holds a NULL is not NTNT's.
+/// Recovery drops nothing, also not an object the scratch role created
+/// outside the replay, which a NULL would hide from `NOT IN`.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_marker_with_a_null_transaction_is_never_recovered() {
+    let f = Fixture::new();
+    f.sql("0001_t.sql", "CREATE TABLE app.t (id int);");
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    as_scratch_role(&f, "CREATE TABLE public.outside (id int)");
+    let mut scratch = scratch_admin(&f);
+    scratch
+        .batch_execute("UPDATE _ntnt_replay.replay_v1 SET xids = xids || NULL::xid8")
+        .unwrap();
+    let r = f.command("plan");
+    assert!(diagnostic(&r, "DB_SCRATCH_NOT_EMPTY").is_some(), "{r}");
+    assert!(r["scratch"]["recovered"].is_null(), "{r}");
+    let kept: bool = scratch
+        .query_one(
+            "SELECT to_regclass('public.outside') IS NOT NULL AND to_regclass('app.t') IS NOT NULL AND to_regnamespace('_ntnt_replay') IS NOT NULL",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(kept, "recovery dropped what a malformed marker named");
+}
+
+/// #457 review: a marker whose settings are not a snapshot is not NTNT's.
+/// Recovery takes it for no settings no more: it drops nothing and resets no
+/// setting the DBA gave the scratch database.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_marker_with_malformed_settings_is_never_recovered() {
+    let f = Fixture::new();
+    let mut scratch = scratch_admin(&f);
+    scratch
+        .batch_execute(&format!(
+            "ALTER DATABASE {} SET work_mem = '5MB'",
+            f.scratch
+        ))
+        .unwrap();
+    f.sql("0001_t.sql", "CREATE TABLE app.t (id int);");
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    scratch
+        .batch_execute("UPDATE _ntnt_replay.replay_v1 SET settings = 'not json'")
+        .unwrap();
+    let r = f.command("plan");
+    assert!(diagnostic(&r, "DB_SCRATCH_NOT_EMPTY").is_some(), "{r}");
+    assert!(r["scratch"]["recovered"].is_null(), "{r}");
+    let kept: bool = scratch
+        .query_one(
+            "SELECT to_regclass('app.t') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_db_role_setting WHERE setdatabase=(SELECT oid FROM pg_database WHERE datname=current_database()) AND setrole=0 AND 'work_mem=5MB'=ANY(setconfig))",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        kept,
+        "recovery dropped or reset what a malformed marker named"
+    );
 }
 
 /// #430: a migration that leaves the scratch role without CONNECT on scratch
@@ -2901,10 +3276,7 @@ fn leftovers_of_an_unfinished_replay_are_cleaned_only_with_the_marker() {
 
 /// A superuser session in `f`'s target database.
 fn target_admin(f: &Fixture) -> Client {
-    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
-        .unwrap()
-        .parse()
-        .unwrap();
+    let mut config = admin_config();
     config.dbname(&f.target);
     config.connect(NoTls).unwrap()
 }
@@ -3303,7 +3675,7 @@ fn a_dba_grant_on_a_declared_extension_to_the_scratch_role_is_refused_by_name() 
 }
 
 /// A plan waiting for the replay lock, `pg_advisory_lock(1853124212, 430)`.
-const REPLAY_LOCK_WAITER: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1853124212 AND objid=430 AND objsubid=2 AND NOT granted)";
+const REPLAY_LOCK_WAITER: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1853124212 AND objid=430 AND objsubid=2 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
 
 /// #430: a plan waits for the replay lock before it reads scratch, so two
 /// replays of one scratch never interleave; past `migrator_wait_seconds`
@@ -3323,7 +3695,7 @@ fn a_plan_waits_for_another_replay_of_its_scratch() {
         .unwrap();
     let mut child = spawn_plan(&f);
     wait_for(
-        &mut holder,
+        &f,
         REPLAY_LOCK_WAITER,
         &mut child,
         "plan waiting for the replay lock",
@@ -3474,7 +3846,7 @@ fn a_migration_that_releases_the_replay_lock_is_refused() {
         .unwrap();
     let mut first = spawn_plan(&f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut first, "replay waiting in 0002");
+    wait_for(&f, waiting, &mut first, "replay waiting in 0002");
     let second = f.command("plan");
     let d = diagnostic(&second, "DB_SCRATCH_BUSY").unwrap_or_else(|| panic!("{second}"));
     assert!(
@@ -3575,19 +3947,13 @@ fn as_scratch_role(f: &Fixture, sql: &str) {
     let mut owner = Client::connect(&f.scratch_url, NoTls).unwrap();
     owner.batch_execute(sql).unwrap();
     drop(owner);
-    let mut admin = scratch_admin(f);
-    let start = std::time::Instant::now();
-    while admin
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND usename=$1::text)",
-            &[&f.scratch],
-        )
-        .unwrap()
-        .get::<_, bool>(0)
-    {
-        assert!(start.elapsed() < LOCK_WAIT_DEADLINE, "the session did not end");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    Probe::new(f).wait(
+        &format!(
+            "SELECT NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND usename='{}')",
+            f.scratch
+        ),
+        "the scratch role's session ending",
+    );
 }
 
 /// Run `command` on a manifest whose target is `f`'s scratch database (as
@@ -3758,7 +4124,7 @@ fn cleanup_without_the_replay_lock_drops_nothing_and_the_next_plan_recovers() {
         .unwrap();
     let mut child = spawn_plan(&f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    wait_for(&f, waiting, &mut child, "replay waiting in 0002");
     holder
         .batch_execute("SELECT pg_advisory_lock(1853124212, 430); SELECT pg_advisory_unlock(4242)")
         .unwrap();
@@ -3806,7 +4172,7 @@ fn a_committed_marker_that_disappears_fails_cleanup() {
         .unwrap();
     let mut child = spawn_plan(&f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    wait_for(&f, waiting, &mut child, "replay waiting in 0002");
     holder
         .batch_execute("DROP SCHEMA _ntnt_replay CASCADE; SELECT pg_advisory_unlock(4242)")
         .unwrap();
@@ -3867,7 +4233,7 @@ fn a_lock_on_a_replayed_table_fails_cleanup_fast_and_the_next_plan_recovers() {
         .unwrap();
     let mut child = spawn_plan(&f);
     let waiting = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=4242 AND objsubid=1 AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND NOT granted)";
-    wait_for(&mut holder, waiting, &mut child, "replay waiting in 0002");
+    wait_for(&f, waiting, &mut child, "replay waiting in 0002");
     let mut blocker = scratch_admin(&f);
     blocker
         .batch_execute("BEGIN; LOCK TABLE app.t IN ACCESS SHARE MODE")
@@ -3975,7 +4341,7 @@ fn a_setting_an_unfinished_replay_left_is_restored_before_the_mismatch() {
 
 /// The #460 history: expressions and partitions' constraints that a dump and
 /// restore stores differently, with controls it leaves as they are.
-const RESTORE_HISTORY: [(&str, &str); 2] = [
+const RESTORE_HISTORY: [(&str, &str); 3] = [
     (
         "0001_checks.sql",
         include_str!("fixtures/db_restore/0001_checks.sql"),
@@ -3984,14 +4350,18 @@ const RESTORE_HISTORY: [(&str, &str); 2] = [
         "0002_partitions.sql",
         include_str!("fixtures/db_restore/0002_partitions.sql"),
     ),
+    (
+        "0003_positional.sql",
+        include_str!("fixtures/db_restore/0003_positional.sql"),
+    ),
 ];
 
 /// `program` (`pg_dump`, `pg_restore`) of PostgreSQL `major`, the fixture
 /// server's (client tools older than the server refuse it), from the image
 /// `NTNT_DB_TEST_PG_IMAGE` (`{major}` replaced; CI's service image by
 /// default), run with docker on the host network as the fixture's
-/// administrator.
-fn pg_tool(major: i32, program: &str, args: &[&str]) -> Command {
+/// administrator, in container `name`.
+fn pg_tool(major: i32, program: &str, name: &str, args: &[&str]) -> Command {
     let image = std::env::var("NTNT_DB_TEST_PG_IMAGE")
         .unwrap_or_else(|_| "mirror.gcr.io/library/postgres:{major}".to_owned())
         .replace("{major}", &major.to_string());
@@ -4004,7 +4374,7 @@ fn pg_tool(major: i32, program: &str, args: &[&str]) -> Command {
         other => panic!("the fixture server must be reached over TCP, not {other:?}"),
     };
     let mut c = Command::new("docker");
-    c.args(["run", "--rm", "-i", "--network", "host"])
+    c.args(["run", "--rm", "-i", "--name", name, "--network", "host"])
         .args([
             "-e",
             "PGHOST",
@@ -4039,6 +4409,91 @@ fn pg_tool(major: i32, program: &str, args: &[&str]) -> Command {
     c
 }
 
+/// The longest one `pg_tool` run may take, pulling its image included.
+const PG_TOOL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// `child`'s exit status, or None once `deadline` passes, when it is killed
+/// and reaped.
+fn reap(
+    child: &mut std::process::Child,
+    deadline: std::time::Instant,
+) -> Option<std::process::ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The standard output of `program` (`pg_tool`) given `input`: standard
+/// input is written, and standard output and error are read, on their own
+/// threads, so a full pipe never blocks another. A run not done within
+/// `PG_TOOL_DEADLINE` is killed with its container, and the test fails with
+/// the program's name and standard error, as when it fails (#464 review).
+fn run_pg_tool(major: i32, program: &str, args: &[&str], input: Vec<u8>) -> Vec<u8> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let name = format!(
+        "ntnt-test-{program}-{}-{}",
+        std::process::id(),
+        RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let deadline = std::time::Instant::now() + PG_TOOL_DEADLINE;
+    let mut child = pg_tool(major, program, &name, args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("{program}: docker did not start: {e}"));
+    let mut stdin = child.stdin.take().unwrap();
+    // Dropped once written, which closes it.
+    std::thread::spawn(move || drop(stdin.write_all(&input)));
+    let read = |mut pipe: Box<dyn Read + Send>| {
+        let (tell, told) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = vec![];
+            let _ = pipe.read_to_end(&mut bytes);
+            let _ = tell.send(bytes);
+        });
+        told
+    };
+    let stdout = read(Box::new(child.stdout.take().unwrap()));
+    let stderr = read(Box::new(child.stderr.take().unwrap()));
+    let status = reap(&mut child, deadline);
+    if status.is_none() {
+        // Killing docker's client leaves its container running.
+        if let Ok(mut rm) = Command::new("docker")
+            .args(["rm", "-f", &name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            reap(
+                &mut rm,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            );
+        }
+    }
+    let rest = |told: std::sync::mpsc::Receiver<Vec<u8>>| {
+        told.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_default()
+    };
+    let (stdout, stderr) = (rest(stdout), rest(stderr));
+    let stderr = String::from_utf8_lossy(&stderr);
+    match status {
+        None => panic!("{program} did not finish within {PG_TOOL_DEADLINE:?}: {stderr}"),
+        Some(status) => assert!(status.success(), "{program} ({status}): {stderr}"),
+    }
+    stdout
+}
+
 /// A database restored with `pg_restore` from a `pg_dump -Fc` of `f`'s
 /// target, owned by its role and declared as target `restored`; dropped
 /// with the test.
@@ -4049,8 +4504,7 @@ struct Restored<'a> {
 }
 impl<'a> Restored<'a> {
     fn new(f: &'a Fixture) -> Self {
-        let url = std::env::var("NTNT_DB_TEST_ADMIN").unwrap();
-        let mut admin = Client::connect(&url, NoTls).unwrap();
+        let mut admin = admin_config().connect(NoTls).unwrap();
         let major: i32 = admin
             .query_one(
                 "SELECT current_setting('server_version_num')::int / 10000",
@@ -4058,14 +4512,8 @@ impl<'a> Restored<'a> {
             )
             .unwrap()
             .get(0);
-        let dump = pg_tool(major, "pg_dump", &["-Fc", "-d", &f.target])
-            .output()
-            .unwrap();
-        assert!(
-            dump.status.success() && !dump.stdout.is_empty(),
-            "pg_dump: {}",
-            String::from_utf8_lossy(&dump.stderr)
-        );
+        let dump = run_pg_tool(major, "pg_dump", &["-Fc", "-d", &f.target], vec![]);
+        assert!(!dump.is_empty(), "pg_dump wrote no archive");
         let name = format!("{}_restored", f.target);
         admin
             .batch_execute(&format!(
@@ -4080,22 +4528,11 @@ impl<'a> Restored<'a> {
                 .replace(&format!("dbname={}", f.target), &format!("dbname={name}")),
             name,
         };
-        let mut restore = pg_tool(
+        run_pg_tool(
             major,
             "pg_restore",
             &["--exit-on-error", "-d", &restored.name],
-        )
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-        std::io::Write::write_all(&mut restore.stdin.take().unwrap(), &dump.stdout).unwrap();
-        let output = restore.wait_with_output().unwrap();
-        assert!(
-            output.status.success(),
-            "pg_restore: {}",
-            String::from_utf8_lossy(&output.stderr)
+            dump,
         );
         let manifest = f.root.path().join("ntnt.toml");
         let text = std::fs::read_to_string(&manifest).unwrap();
@@ -4125,13 +4562,12 @@ impl<'a> Restored<'a> {
             .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)))
     }
     fn client(&self) -> Client {
-        Client::connect(&self.url, NoTls).unwrap()
+        bounded(self.url.parse().unwrap()).connect(NoTls).unwrap()
     }
 }
 impl Drop for Restored<'_> {
     fn drop(&mut self) {
-        if let Ok(mut admin) = Client::connect(&std::env::var("NTNT_DB_TEST_ADMIN").unwrap(), NoTls)
-        {
+        if let Ok(mut admin) = admin_config().connect(NoTls) {
             let _ = admin.batch_execute(&format!("DROP DATABASE {} WITH (FORCE)", self.name));
         }
     }
@@ -4161,18 +4597,30 @@ fn a_database_restored_with_pg_dump_and_pg_restore_verifies() {
     // The restore did store them differently, as #460 found.
     const STORED: &str = "SELECT conname, pg_get_constraintdef(oid)||' '||connoinherit FROM pg_constraint \
         WHERE conname IN ('checks_executable_timeout','checks_not_between_or','observations_default_pkey','observations_2026_tenant_id_probe_run_id_observed_on_key') ORDER BY conname";
-    let rows = |mut client: Client| -> Vec<(String, String)> {
+    let rows = |mut client: Client, query: &str| -> Vec<(String, String)> {
         client
-            .query(STORED, &[])
+            .query(query, &[])
             .unwrap()
             .iter()
             .map(|r| (r.get(0), r.get(1)))
             .collect()
     };
-    let (before, after) = (rows(f.target()), rows(restored.client()));
+    let (before, after) = (rows(f.target(), STORED), rows(restored.client(), STORED));
     assert_eq!(before.len(), 4, "{before:?}");
     for (before, after) in before.iter().zip(&after) {
         assert_ne!(before, after);
+    }
+    // #464 review: so does it SQL-standard bodies that name an argument by
+    // its position.
+    const BODIES: &str = "SELECT proname::text, pg_get_functiondef(oid) FROM pg_proc \
+        WHERE proname IN ('in_range_positional','in_range_atomic') ORDER BY proname";
+    let (before, after) = (rows(f.target(), BODIES), rows(restored.client(), BODIES));
+    assert_eq!(before.len(), 2, "{before:?}");
+    for (before, after) in before.iter().zip(&after) {
+        assert!(
+            before.1.contains("$1") && before.1 != after.1,
+            "{before:?} {after:?}"
+        );
     }
     for command in ["status", "verify", "plan"] {
         let r = restored.command(command);

@@ -339,11 +339,12 @@ impl Adapter {
     }
     /// After replay, on every exit: PostgreSQL drops what the replay
     /// committed in scratch and checks it is empty again, false when it had
-    /// committed nothing; SQLite rolls back.
-    pub async fn cleanup_scratch(&self) -> Result<bool> {
+    /// committed nothing, then releases its replay lock, whose failure comes
+    /// back beside cleanup's outcome; SQLite rolls back.
+    pub async fn cleanup_scratch(&self) -> (Result<bool>, Option<Diagnostic>) {
         match self {
             Self::Postgres(pg) => pg.cleanup_scratch().await,
-            Self::Sqlite(db) => db.rollback().await.map(|()| true),
+            Self::Sqlite(db) => (db.rollback().await.map(|()| true), None),
         }
     }
     /// PostgreSQL cancels the statement the scratch session is running,
