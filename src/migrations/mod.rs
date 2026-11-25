@@ -105,6 +105,20 @@ impl CheckHazard {
     }
 }
 
+/// A relation a check would read where row-level security applies to the
+/// migration role, so the check cannot read it (#430).
+pub(super) struct RowSecurity {
+    /// Qualified, quoted where needed: `app.tenants`.
+    pub relation: String,
+    /// Its catalog key: `relation:tenants`.
+    pub key: String,
+    /// Whether it has FORCE ROW LEVEL SECURITY, which applies its policies
+    /// to its owner too.
+    pub forced: bool,
+    /// Whether the check names it, rather than reaching it through a view.
+    pub direct: bool,
+}
+
 /// `name ([ensures])`, `name ([requires])` or `name (adoption_checks)`: a
 /// check as its sidecar or the manifest declares it.
 fn check_label(name: &str, phase: &str) -> String {
@@ -139,30 +153,118 @@ pub(super) fn check_hazard_refusal(name: &str, phase: &str, hazards: &[CheckHaza
     d
 }
 
-/// A plan's warning that check `name` of `phase` in `source` has `hazard`,
-/// so migrate will refuse it with `DB_CHECK_UNSUPPORTED` (#456).
-pub(super) fn check_hazard_warning(
+/// `blocked` in words, each with why row-level security applies to the role.
+fn row_security_relations(blocked: &[RowSecurity]) -> String {
+    blocked
+        .iter()
+        .map(|r| {
+            let how = if r.forced {
+                "FORCE ROW LEVEL SECURITY"
+            } else {
+                "row-level security, owned by another role"
+            };
+            if r.direct {
+                format!("{} ({how})", r.relation)
+            } else {
+                format!("{} (through a view; {how})", r.relation)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `DB_CHECK_ROW_SECURITY`: check `name` of `phase` reads `blocked`, where
+/// row-level security applies to the migration `role` (#430). Checks read
+/// with row_security=off, so PostgreSQL refuses the read with a bare
+/// SQLSTATE 42501. A check that names such a table is refused before it
+/// runs; one that `ran` reached it through a view and was refused.
+pub(super) fn row_security_refusal(
+    name: &str,
+    phase: &str,
+    role: &str,
+    blocked: &[RowSecurity],
+    ran: bool,
+) -> Diagnostic {
+    let objects: Vec<String> = blocked.iter().map(|r| r.key.clone()).collect();
+    let mut d = Diagnostic::new(
+        "DB_CHECK_ROW_SECURITY",
+        &format!(
+            "Check {} reads {}, where row-level security applies to the migration role {role}. Checks read with row_security=off so that no policy can silently filter what they see, and PostgreSQL refuses such a read (SQLSTATE 42501) unless the role bypasses row-level security. {}",
+            check_label(name, phase),
+            row_security_relations(blocked),
+            if ran {
+                "PostgreSQL refused this check's read."
+            } else {
+                "The check did not run."
+            }
+        ),
+    )
+    .with_objects(&objects);
+    d.next_action = format!(
+        "As a superuser, give the migration role BYPASSRLS (ALTER ROLE {role} BYPASSRLS), then plan, review and approve again: the role's attributes are part of the plan. Or change the check so that it does not read that table. A failed check rolls back its transaction, so nothing from it was committed; progress shows each migration's state. See docs/DATABASE_MIGRATIONS.md, Checks and row-level security."
+    );
+    d
+}
+
+/// What a plan warns of in a pending check that migrate will refuse: a
+/// hazard (#456), refused before any check of its phase runs, or a table
+/// where row-level security applies to the migration role (#430), refused
+/// right before the check runs.
+pub(super) enum CheckFinding {
+    Hazard(CheckHazard),
+    RowSecurity(RowSecurity),
+}
+
+/// A `plan.check_warnings` entry: check `name` of `phase` in `source` (a
+/// migration file, or `manifest` for adoption checks) has `finding`, so
+/// migrate will refuse it. Every entry has `code`, `source`, `phase`,
+/// `check`, `relation` and `message`; `CHECK_ROW_SECURITY` adds `forced`.
+pub(super) fn check_warning(
     source: &str,
     name: &str,
     phase: &str,
-    hazard: &CheckHazard,
+    finding: &CheckFinding,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "code": match hazard {
-            CheckHazard::Operator { .. } => "CHECK_OPERATOR_MISMATCH",
-            CheckHazard::ViewWrites { .. } => "CHECK_VIEW_WRITES",
-        },
+    let label = check_label(name, phase);
+    let (code, relation, message) = match finding {
+        CheckFinding::Hazard(hazard) => (
+            match hazard {
+                CheckHazard::Operator { .. } => "CHECK_OPERATOR_MISMATCH",
+                CheckHazard::ViewWrites { .. } => "CHECK_VIEW_WRITES",
+            },
+            hazard.relation(),
+            format!(
+                "Check {label} {}. migrate will refuse this check (DB_CHECK_UNSUPPORTED) before any check of its phase runs and roll its migration back. {}",
+                hazard.describe(),
+                hazard.remedy()
+            ),
+        ),
+        CheckFinding::RowSecurity(blocked) => (
+            "CHECK_ROW_SECURITY",
+            blocked.relation.as_str(),
+            format!(
+                "Check {label} reads {}, where row-level security applies to the migration role, which does not bypass it. Checks read with row_security=off, so {} (DB_CHECK_ROW_SECURITY) and roll its migration back. Give the migration role BYPASSRLS, or change the check, then plan again.",
+                row_security_relations(std::slice::from_ref(blocked)),
+                if blocked.direct {
+                    "migrate will refuse this check"
+                } else {
+                    "PostgreSQL will refuse the check's read of that table, if the view reads it, and migrate will fail the check"
+                }
+            ),
+        ),
+    };
+    let mut warning = serde_json::json!({
+        "code": code,
         "source": source,
         "phase": phase,
         "check": name,
-        "relation": hazard.relation(),
-        "message": format!(
-            "Check {} {}. migrate will refuse this check (DB_CHECK_UNSUPPORTED) before any check of its phase runs and roll its migration back. {}",
-            check_label(name, phase),
-            hazard.describe(),
-            hazard.remedy()
-        ),
-    })
+        "relation": relation,
+        "message": message,
+    });
+    if let CheckFinding::RowSecurity(blocked) = finding {
+        warning["forced"] = serde_json::json!(blocked.forced);
+    }
+    warning
 }
 
 /// A plan's `check_warnings` for the checks of `source` (a migration file,

@@ -554,13 +554,15 @@ struct Replayed {
     /// managed scope, at any step, by catalog key. The target is inspected
     /// for these (`outside` in `catalog`), and a plan records them.
     outside: std::collections::BTreeSet<String>,
-    /// For plans: what stops a pending check from running as written,
-    /// found at the state it runs in (`CheckProbe`).
+    /// For plans: what will stop a pending check, found at the state it
+    /// runs in (`CheckProbe`), in probe order.
     check_warnings: Vec<Value>,
 }
 
 /// A check this plan's migrate will run, examined in replay at the state it
-/// runs in for what would stop it (`Postgres::check_hazards`, #456).
+/// runs in for what would stop it: hazards (`Postgres::check_hazards`,
+/// #456) and tables where row-level security applies to the migration role,
+/// which a check cannot read (`Postgres::row_security_blocked`, #430).
 struct CheckProbe<'a> {
     /// Migrations applied when the check runs: those before its migration
     /// for `requires`, through it for `ensures`, the adopted prefix for
@@ -570,45 +572,52 @@ struct CheckProbe<'a> {
     phase: &'static str,
     name: &'a str,
     sql: &'a str,
+    /// The managed-schema tables the check names, when row-level security
+    /// can apply to the target role; otherwise none.
+    tables: Vec<String>,
 }
 
 /// The checks this plan's migrate will run, as `CheckProbe`s. `applied`
-/// migrations already ran on the target.
+/// migrations already ran on the target. Tables are named only when
+/// `row_security` can apply to the target role: scratch may then not
+/// bypass it either, and its role owns what replay creates as the target
+/// role owns what migrate creates, so PostgreSQL answers in scratch as it
+/// will on the target.
 fn check_probes<'a>(
     inputs: &'a CapturedInputs,
     applied: usize,
     adoption: Option<&super::adoption::Adoption>,
+    row_security: bool,
 ) -> Vec<CheckProbe<'a>> {
+    let schema = &inputs.config.schema;
+    let probe = |state, source, phase, name, sql: &'a str| CheckProbe {
+        state,
+        source,
+        phase,
+        name,
+        sql,
+        tables: if row_security {
+            super::analysis::check_tables(sql, schema)
+                .into_iter()
+                .filter(|(s, _)| s == schema)
+                .map(|(_, table)| table)
+                .collect()
+        } else {
+            vec![]
+        },
+    };
     let mut probes = vec![];
     if let Some(action) = adoption {
         for (name, sql) in &inputs.config.adoption_checks {
-            probes.push(CheckProbe {
-                state: action.count,
-                source: "manifest",
-                phase: "adoption",
-                name,
-                sql,
-            });
+            probes.push(probe(action.count, "manifest", "adoption", name, sql));
         }
     } else {
         for (index, migration) in inputs.migrations.iter().enumerate().skip(applied) {
             for (name, sql) in &migration.requires {
-                probes.push(CheckProbe {
-                    state: index,
-                    source: &migration.name,
-                    phase: "requires",
-                    name,
-                    sql,
-                });
+                probes.push(probe(index, &migration.name, "requires", name, sql));
             }
             for (name, sql) in &migration.ensures {
-                probes.push(CheckProbe {
-                    state: index + 1,
-                    source: &migration.name,
-                    phase: "ensures",
-                    name,
-                    sql,
-                });
+                probes.push(probe(index + 1, &migration.name, "ensures", name, sql));
             }
         }
     }
@@ -702,14 +711,27 @@ async fn replay_prefix(
             return Err(d);
         }
         for probe in probes.iter().filter(|p| p.state == index) {
-            for hazard in scratch.check_hazards(schema, probe.sql).await? {
-                replayed.check_warnings.push(super::check_hazard_warning(
-                    probe.source,
-                    probe.name,
-                    probe.phase,
-                    &hazard,
-                ));
-            }
+            // In the order migrate meets them: a hazard refuses the check
+            // before any check of its phase runs, row-level security right
+            // before the check itself.
+            let mut findings: Vec<super::CheckFinding> = scratch
+                .check_hazards(schema, probe.sql)
+                .await?
+                .into_iter()
+                .map(super::CheckFinding::Hazard)
+                .collect();
+            findings.extend(
+                scratch
+                    .row_security_blocked(schema, &probe.tables)
+                    .await?
+                    .into_iter()
+                    .map(super::CheckFinding::RowSecurity),
+            );
+            replayed
+                .check_warnings
+                .extend(findings.iter().map(|finding| {
+                    super::check_warning(probe.source, probe.name, probe.phase, finding)
+                }));
         }
         replayed.fingerprints.extend(fingerprint);
         if index == reference {
@@ -889,7 +911,12 @@ async fn inspect_observed(
     let coverage_at = report["diagnostics"].as_array().map_or(0, Vec::len);
     let mut replayed = Replayed::default();
     let probes = if command == "plan" {
-        check_probes(inputs, applied, adoption.as_ref())
+        check_probes(
+            inputs,
+            applied,
+            adoption.as_ref(),
+            identity.row_security_applies(),
+        )
     } else {
         vec![]
     };
@@ -1054,8 +1081,8 @@ async fn inspect_observed(
         if let Some(action) = adoption {
             plan["action"] = json!(action);
         }
-        // For the reviewer: checks migrate will refuse (#456). Absent when
-        // there are none, so other plans keep their digests.
+        // For the reviewer: checks migrate will refuse (#456, #430). Absent
+        // when there are none, so other plans keep their digests.
         if !check_warnings.is_empty() {
             plan["check_warnings"] = json!(check_warnings);
         }

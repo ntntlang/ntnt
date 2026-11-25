@@ -28,11 +28,85 @@ async fn bounded_for<T>(
     limit: Duration,
     future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
 ) -> Result<T> {
+    bounded_classified(limit, future, |_| None).await
+}
+/// `bounded_for`, letting `classify` explain a server error it recognizes
+/// from fields that hold no server payload; any other is `driver_error`.
+async fn bounded_classified<T>(
+    limit: Duration,
+    future: impl Future<Output = std::result::Result<T, tokio_postgres::Error>>,
+    classify: impl FnOnce(&tokio_postgres::Error) -> Option<Diagnostic>,
+) -> Result<T> {
     match tokio::time::timeout(limit, future).await {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(driver_error(&e)),
+        Ok(Err(e)) => Err(classify(&e).unwrap_or_else(|| driver_error(&e))),
         Err(_) => Err(deadline_error()),
     }
+}
+/// What the server says of an extension a migration creates by name
+/// (`analysis::created_extensions`), read before the migration runs.
+struct ExtensionFacts {
+    name: String,
+    /// Only a superuser can create it: it is not trusted.
+    untrusted: bool,
+    installed: bool,
+}
+/// `DB_EXTENSION_PRIVILEGE` when `e` is PostgreSQL refusing to create (or
+/// update) an extension for lack of privilege (#430). The routine that
+/// raised it, unlike the message, is not translated. The server does not
+/// say which statement failed, so this names one only when it can tell:
+/// the error came from a top-level statement (no routine or `DO` context),
+/// and replaying `created` in order with `facts` and `can_create` (whether
+/// the role has CREATE on the database) predicts which one failed, with no
+/// statement before it that could have failed otherwise (`CASCADE`,
+/// `ALTER EXTENSION`). Never the server's message.
+fn extension_privilege(
+    e: &tokio_postgres::Error,
+    created: &[(usize, String, bool)],
+    facts: &[ExtensionFacts],
+    can_create: bool,
+) -> Option<Diagnostic> {
+    let db = e.as_db_error()?;
+    if db.code().code() != "42501" || db.routine() != Some("execute_extension_script") {
+        return None;
+    }
+    let mut culprit = None;
+    if db.where_().is_none() {
+        let mut installed: Vec<&str> = facts
+            .iter()
+            .filter(|f| f.installed)
+            .map(|f| f.name.as_str())
+            .collect();
+        for (number, name, exact) in created {
+            if !exact {
+                break;
+            }
+            let Some(f) = facts.iter().find(|f| f.name == *name) else {
+                continue;
+            };
+            if installed.contains(&name.as_str()) {
+                continue;
+            }
+            if f.untrusted || !can_create {
+                culprit = Some((*number, name, f.untrusted));
+                break;
+            }
+            installed.push(name);
+        }
+    }
+    let rule = "A role that is not a superuser, such as the unprivileged roles that own NTNT's target and scratch databases, can create only trusted extensions (pg_trgm, citext, hstore, pgcrypto and uuid-ossp, for example), and only with CREATE privilege on the database; an untrusted extension, such as postgres_fdw, dblink or pg_stat_statements, needs a superuser.";
+    let message = match culprit {
+        Some((number, name, true)) => format!(
+            "CREATE EXTENSION {name} (statement {number}) failed: PostgreSQL refused to create an untrusted extension for a role that is not a superuser (SQLSTATE 42501). {rule}"
+        ),
+        Some((number, name, false)) => format!(
+            "CREATE EXTENSION {name} (statement {number}) failed: PostgreSQL refused to create a trusted extension for a role without CREATE privilege on the database (SQLSTATE 42501). {rule}"
+        ),
+        None => format!("CREATE EXTENSION (or ALTER EXTENSION ... UPDATE) failed for lack of privilege (SQLSTATE 42501) in a statement NTNT cannot attribute: a DO block or routine, a requirement that CASCADE installs, or an ALTER EXTENSION. {rule}"),
+    };
+    let mut d = Diagnostic::new("DB_EXTENSION_PRIVILEGE", &message);
+    d.next_action = "A migration cannot create an untrusted extension: replay runs it as the unprivileged scratch role. Use a trusted extension if one serves, or remove the CREATE EXTENSION from the migration. For a trusted extension, give the role CREATE privilege on the database (an owner has it). See docs/DATABASE_MIGRATIONS.md, Extensions.".into();
+    Some(d)
 }
 /// Expose only SQLSTATE, never server error payloads.
 fn driver_error(e: &tokio_postgres::Error) -> Diagnostic {
@@ -154,6 +228,21 @@ pub(crate) struct Identity {
     pub transport: Value,
 }
 use super::model::{Catalog, History, HistoryEntry};
+
+impl Identity {
+    /// Whether the login role bypasses row-level security: it has BYPASSRLS
+    /// or is a superuser. Neither attribute is inherited through membership.
+    pub fn bypasses_row_security(&self) -> bool {
+        self.authority["roles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| {
+                r["role"] == self.role.as_str()
+                    && (r["bypassrls"] == true || r["superuser"] == true)
+            })
+    }
+}
 
 /// Small relational boundary: each adapter owns its native catalog and operation
 /// capabilities. A driver alone does not confer migration support.
@@ -947,14 +1036,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         // Scripts must see row-level security as the target role does. Scratch
         // may bypass RLS only when the target login role bypasses it (directly
         // or as a superuser); it never gains other elevated attributes.
-        let target_bypasses_rls = target.authority["roles"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|r| {
-                r["role"] == target.role.as_str()
-                    && (r["bypassrls"] == true || r["superuser"] == true)
-            });
+        let target_bypasses_rls = target.bypasses_row_security();
         self.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE; SET LOCAL search_path=pg_catalog; SET LOCAL default_table_access_method=heap; SET LOCAL default_tablespace=''; SET LOCAL temp_tablespaces='';").await?;
         let r=bounded(self.client.query_one(r#"
 SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $1))
@@ -1220,6 +1302,54 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         Ok(found)
     }
 
+    /// What a check naming `tables` of the managed schema would read where
+    /// row-level security applies to this session's role: those tables, and
+    /// what views among them that this role owns read, transitively. Checks
+    /// read with row_security=off so that no policy can silently filter
+    /// them, and PostgreSQL refuses such a read (SQLSTATE 42501) instead of
+    /// filtering it. `row_security_active` is PostgreSQL's own test: row
+    /// security is enabled and the role neither bypasses it (BYPASSRLS or
+    /// superuser) nor owns the table, unless the table forces it on its
+    /// owner. Views another role owns read as that role and are not
+    /// followed. A view's dependencies may include a relation it only names
+    /// (a `regclass` constant), so only a relation the check names itself
+    /// (`direct`) is certainly read. Each relation comes as its qualified
+    /// name, its catalog key, whether it forces row security on its owner
+    /// and whether the check names it.
+    pub async fn row_security_blocked(
+        &self,
+        schema: &str,
+        tables: &[String],
+    ) -> Result<Vec<super::RowSecurity>> {
+        if tables.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(self
+            .rows(
+                r#"WITH RECURSIVE reach(rel) AS (
+            SELECT c.oid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relname=ANY($2)
+            UNION
+            SELECT d.refobjid FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v' AND pg_catalog.pg_get_userbyid(v.relowner)=current_user
+            JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
+            JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::regclass)
+SELECT pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(c.relname),
+            CASE WHEN n.nspname=$1 THEN '' ELSE pg_catalog.quote_ident(n.nspname)||'.' END||'relation:'||c.relname, c.relforcerowsecurity,
+            n.nspname=$1 AND c.relname=ANY($2)
+          FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+          WHERE c.oid IN (SELECT rel FROM reach) AND c.relrowsecurity AND pg_catalog.row_security_active(c.oid) ORDER BY 1"#,
+                &[&schema, &tables],
+            )
+            .await?
+            .iter()
+            .map(|r| super::RowSecurity {
+                relation: r.get(0),
+                key: r.get(1),
+forced: r.get(2),
+                direct: r.get(3),
+            })
+            .collect())
+    }
+
     /// Execute captured check bytes once; consume at most two rows and inspect
     /// types without displaying values. False/NULL/shape/type/error/timeout fail.
     /// On any failure the caller rolls back or discards this dedicated session.
@@ -1329,6 +1459,32 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
                 d.source = Some(migration.name.clone());
                 d
             })?;
+        // Creating an extension this role may not create fails with a bare
+        // SQLSTATE 42501. Learn first which of the named ones are trusted,
+        // so that the failure can say why (#430).
+        let created = super::analysis::created_extensions(&migration.sql);
+        let can_create = created.is_empty()
+            || self
+                .rows(
+                    "SELECT pg_catalog.has_database_privilege(pg_catalog.current_database(),'CREATE')",
+                    &[],
+                )
+                .await?[0]
+                .get::<_, bool>(0);
+        let facts = if created.is_empty() {
+            vec![]
+        } else {
+            let names: Vec<&str> = created.iter().map(|(_, name, _)| name.as_str()).collect();
+            self.rows("SELECT a.name::text, coalesce(v.superuser AND NOT v.trusted, false), a.installed_version IS NOT NULL FROM pg_catalog.pg_available_extensions a LEFT JOIN pg_catalog.pg_available_extension_versions v ON v.name=a.name AND v.version=a.default_version WHERE a.name::text=ANY($1::text[])", &[&names])
+                .await?
+                .iter()
+                .map(|r| ExtensionFacts {
+                    name: r.get(0),
+                    untrusted: r.get(1),
+                    installed: r.get(2),
+                })
+                .collect()
+        };
         // pg_catalog is implicitly searched first when omitted, while CREATE
         // uses the first explicit namespace. Never let app objects shadow builtins.
         // Inspection and checks use row_security=off so a policy can never
@@ -1341,19 +1497,18 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         ))
         .await?;
         // Do not split on semicolons: PostgreSQL receives the captured full script.
-        match tokio::time::timeout(
+        bounded_classified(
             limit + SERVER_LIMIT_MARGIN,
             self.client.batch_execute(script),
+            |e| {
+                if e.code().map(|c| c.code()) == Some("55P04") {
+                    Some(new_enum_value(e, script))
+                } else {
+                    extension_privilege(e, &created, &facts, can_create)
+                }
+            },
         )
         .await
-        {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) if e.code().map(|c| c.code()) == Some("55P04") => {
-                Err(new_enum_value(&e, script))
-            }
-            Ok(Err(e)) => Err(driver_error(&e)),
-            Err(_) => Err(deadline_error()),
-        }
         .map_err(|mut d| {
             d.source = Some(migration.name.clone());
             d

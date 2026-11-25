@@ -2085,6 +2085,44 @@ pub(crate) fn protected_targets(sql: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
+/// The top-level statements of a PostgreSQL migration that create or alter
+/// an extension, in order: the 1-based statement number, the extension's
+/// name and whether the statement acts on that extension alone. That is a
+/// `CREATE EXTENSION [IF NOT EXISTS] name` without `CASCADE`; one with
+/// `CASCADE` may install others, and `ALTER EXTENSION name` may update it.
+/// Read from tokens: sqlparser does not parse `SCHEMA s` without `WITH`.
+/// Extensions created in a `DO` block are not listed.
+pub(crate) fn created_extensions(sql: &str) -> Vec<(usize, String, bool)> {
+    use sqlparser::tokenizer::Token;
+    let mut found = vec![];
+    for (index, tokens) in statements(sql).unwrap_or_default().into_iter().enumerate() {
+        let t: Vec<&Token> = tokens
+            .iter()
+            .map(|t| &t.token)
+            .filter(|t| !matches!(t, Token::Whitespace(_)))
+            .collect();
+        let alter = keyword(t.first(), "ALTER");
+        if !((alter || keyword(t.first(), "CREATE")) && keyword(t.get(1), "EXTENSION")) {
+            continue;
+        }
+        let at =
+            if keyword(t.get(2), "IF") && keyword(t.get(3), "NOT") && keyword(t.get(4), "EXISTS") {
+                5
+            } else {
+                2
+            };
+        if let Some(Token::Word(w)) = t.get(at) {
+            let cascade = t.iter().skip(at + 1).any(|t| keyword(Some(t), "CASCADE"));
+            found.push((
+                index + 1,
+                folded(&w.value, w.quote_style.is_some()),
+                !alter && !cascade,
+            ));
+        }
+    }
+    found
+}
+
 /// The statements of a PostgreSQL migration that may create, change, drop,
 /// grant or revoke objects in a schema outside the managed scope: neither
 /// `schema` nor one the history creates (`created`), `pg_catalog` or
@@ -2738,6 +2776,23 @@ mod tests {
         let a = analyze("DO $$ BEGIN RAISE NOTICE 'COMMIT; SET ROLE x'; END $$; INSERT INTO app.t VALUES ('BEGIN;')", "app");
         assert!(a.replay_supported, "{a:?}");
         assert_eq!(a.operations.len(), 2, "{a:?}");
+    }
+    #[test]
+    fn created_extensions_are_named_with_their_statements() {
+        assert_eq!(
+            created_extensions(
+                "CREATE TABLE app.t (id int);\n-- CREATE EXTENSION commented\nCREATE EXTENSION IF NOT EXISTS postgres_fdw SCHEMA app;\ncreate extension \"Quoted\" WITH SCHEMA app CASCADE;\nCREATE EXTENSION Pg_Trgm;\nDO $$ BEGIN CREATE EXTENSION citext; END $$;"
+            ),
+[
+                (2, "postgres_fdw".to_string(), true),
+                (3, "Quoted".to_string(), false),
+                (4, "pg_trgm".to_string(), true)
+            ]
+        );
+        assert_eq!(
+            created_extensions("ALTER EXTENSION pg_trgm UPDATE"),
+            [(1, "pg_trgm".to_string(), false)]
+        );
     }
     #[test]
     fn check_tables_lists_every_table_a_check_reads() {
