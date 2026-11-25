@@ -816,8 +816,8 @@ impl Postgres {
     /// Right after `migration` ran on scratch, before it is inspected and
     /// commits: it must leave the session as the scratch role and holding
     /// the replay lock, NTNT's marker as it was, the role and databases as
-    /// they were (but for what cleanup restores), and nothing owned by
-    /// another role.
+    /// they were (but for what cleanup restores), the scratch role able to
+    /// connect to scratch again, and nothing owned by another role.
     pub(super) async fn refuse_lasting_effects(
         &self,
         migration: &Migration,
@@ -909,6 +909,34 @@ impl Postgres {
             return Err(attributed(
                 "DB_REPLAY_UNSUPPORTED",
                 "Replaying this migration set the scratch database's connection limit to 0 (ALTER DATABASE ... CONNECTION LIMIT 0, in a DO block or function). Cleanup would restore it, but a replay stopped before cleanup would leave scratch refusing every connection of the scratch role, so no later plan, status or verify could connect to clean it up; on the target it would refuse the application's connections. Make such changes outside the migration history.",
+                vec![],
+            ));
+        }
+        // The same for the scratch database's privileges: a migration may
+        // revoke CONNECT from the scratch role, or from PUBLIC when the role
+        // connects through PUBLIC's grant. The session acts as the scratch
+        // role here (checked above), which is the role a new connection logs
+        // in as. Cleanup restores the privileges in its one transaction, on
+        // the connection it already holds, so restoring them cannot lock it
+        // out.
+        let row = self
+            .rows(
+                &format!(
+                    "{DATABASE_GRANTS} SELECT pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CONNECT'), ARRAY(SELECT DISTINCT CASE WHEN w.grantee=0 THEN 'PUBLIC' WHEN w.grantee=(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname=current_user) THEN 'the scratch role '||pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(w.grantee)) ELSE 'role '||pg_catalog.quote_ident(pg_catalog.pg_get_userbyid(w.grantee)) END FROM want w WHERE w.privilege_type='CONNECT' AND NOT EXISTS (SELECT FROM have h WHERE h.grantee=w.grantee AND h.privilege_type='CONNECT') ORDER BY 1)"
+                ),
+                &[&scope.marker.database.acl],
+            )
+            .await?;
+        let (connect, revoked): (bool, Vec<String>) = (row[0].get(0), row[0].get(1));
+        if !connect {
+            let from = if revoked.is_empty() {
+                String::new()
+            } else {
+                format!(" (it revoked CONNECT from {})", revoked.join(", "))
+            };
+            return Err(attributed(
+                "DB_REPLAY_UNSUPPORTED",
+                &format!("Replaying this migration left the scratch role without the CONNECT privilege on the scratch database{from}: REVOKE CONNECT ON DATABASE in a DO block or function, from the role itself or from PUBLIC when the role connects through PUBLIC's grant. Cleanup would restore the privilege, but a replay stopped before cleanup would leave the scratch role unable to connect to scratch, so no later plan, status or verify could clean it up; on the target it would lock the deployment role out of its database. Make such changes outside the migration history."),
                 vec![],
             ));
         }
