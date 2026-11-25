@@ -441,6 +441,17 @@ async fn checks(
     db.lock_for_checks(&tables).await?;
     db.check_purity(schema, &inputs.history_schemas, outside)
         .await?;
+    // Before any check of this phase runs, refuse one that would compare a
+    // column with another operator than the application's, or read a view
+    // that writes or takes locks (#456).
+    for (name, sql) in checks {
+        let hazards = db.check_hazards(schema, sql).await?;
+        if !hazards.is_empty() {
+            let mut d = super::check_hazard_refusal(name, phase, &hazards);
+            d.source = Some(source.into());
+            return Err(d);
+        }
+    }
     for (name, sql) in checks {
         let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
         report["assertions"]["executed"] = json!(count + 1);
@@ -634,6 +645,7 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
                 db.execute_captured(
                     migration,
                     &inputs.config.schema,
+                    &inputs.history_schemas,
                     inputs.limits().statement(),
                 )
                 .await?;
@@ -780,7 +792,10 @@ async fn build_concurrent(
     progress["attempt_recorded"] = json!(true);
     progress["phase"] = json!("build");
     let limit = inputs.limits().statement();
-    if let Err(d) = db.build_concurrent_index(migration, schema, limit).await {
+    if let Err(d) = db
+        .build_concurrent_index(migration, schema, &inputs.history_schemas, limit)
+        .await
+    {
         // Delete the attempt only once the index is confirmed absent. A build
         // can succeed and still return an error (e.g. restoring settings
         // failed); a valid or unknown index keeps the attempt for reconcile.
