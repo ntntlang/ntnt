@@ -84,8 +84,35 @@
   such as `postgres_fdw`, fails with `DB_EXTENSION_PRIVILEGE`, naming the
   statement and the extension, explaining that roles that are not superusers
   can create only trusted extensions, and saying what to do. It used to fail
-  with a bare SQLSTATE 42501. Support for extensions that a superuser installs
-  remains open in #430.
+  with a bare SQLSTATE 42501.
+- **Extensions a superuser installs.** `[databases.<name>] extensions =
+  ["postgres_fdw", "pg_stat_statements"]` declares extensions that a superuser
+  installs in both the target and the scratch database, at one version and in
+  one schema, which may be `public`. Inspection compares each by its version and
+  schema, so a mismatch between the two databases is drift; scratch may hold the
+  extension and what it owns, and one missing from scratch is refused by name;
+  migrations may keep `CREATE EXTENSION IF NOT EXISTS`, which then does nothing.
+  An undeclared extension outside the managed scope, such as a DBA's
+  `pg_stat_statements` in `public`, still leaves the catalog uncovered, and the
+  diagnostic now says to declare it. Replay's cleanup, and its recovery of a
+  replay that never finished, keep the declared extensions. A privilege a DBA
+  grants the scratch role on what they install, such as `USAGE` on
+  postgres_fdw's foreign-data wrapper, is refused by name with
+  `DB_SCRATCH_UNSAFE`, since cleanup's `DROP OWNED` would revoke it; grant it to
+  `PUBLIC` in the scratch database instead. The key is part of the plan only
+  when present (#430).
+- **Foreign servers are inspected.** A server a migration creates (with a
+  declared postgres_fdw) is covered as `server:<name>` by its wrapper, owner,
+  privileges and options (shown only as a digest, since they hold host names),
+  so a superuser's out-of-band `ALTER SERVER ... OPTIONS (SET host ...)` or
+  `OWNER TO` is drift; before, `verify` passed. A server no migration creates,
+  and a foreign-data wrapper no extension installed, are reported uncovered by
+  name. `CREATE USER MAPPING` (and `ALTER`/`DROP`) is refused with its own
+  reason, `USER_MAPPING`, instead of as role DDL: create mappings outside the
+  history as a DBA step, with the credentials in the secrets provider. NTNT
+  does not inspect them, so they cause no drift. An undeclared extension in
+  scratch is named (`extension:hstore`), and moving a declared extension to
+  another schema is one drift entry with its members under it (#430).
 
 - **Replay commits each migration on scratch, as `migrate` does on the target.**
   Replay used to run the whole history in one rollback-only transaction. A

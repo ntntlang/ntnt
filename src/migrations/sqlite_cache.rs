@@ -583,6 +583,7 @@ impl Cache {
         Catalog {
             objects: self.objects.clone(),
             uncovered: self.uncovered.clone(),
+            owned: Default::default(),
         }
     }
     /// `json_digest` of `catalog()`, from each object's stored form.

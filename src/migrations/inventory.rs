@@ -158,6 +158,27 @@ pub(crate) struct Database {
     /// of a manifest without this table are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<Limits>,
+    /// PostgreSQL extensions a superuser installs in both the target and the
+    /// scratch database, at one version and in one schema (#430). Absent
+    /// serializes nothing, so the policy digest of a manifest without the key
+    /// is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Vec<String>>,
+}
+impl Database {
+    /// The declared extensions, `[databases.<name>] extensions`.
+    pub fn declared_extensions(&self) -> &[String] {
+        self.extensions.as_deref().unwrap_or_default()
+    }
+}
+
+/// A PostgreSQL extension name as `extensions` may list it: what extension
+/// control files use (`postgres_fdw`, `uuid-ossp`), at most 63 bytes.
+fn extension_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 63
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 
 const DEFAULT_STATEMENT_SECONDS: u64 = 90;
@@ -838,6 +859,27 @@ impl CapturedInputs {
         if !raw.get("limits").is_none_or(toml::Value::is_table) {
             return Err(invalid(&format!("[databases.{database_name}.limits] must be a table of statement_seconds and migrator_wait_seconds, each a whole number of seconds.")));
         }
+        // Names are shown in diagnostics only once they are known to be
+        // plain extension names.
+        let extensions_rule = format!("[databases.{database_name}] extensions lists PostgreSQL extensions a superuser installs in the target and scratch databases, each once, by name (letters, digits, _ and -, at most 63 bytes): extensions = [\"postgres_fdw\"]. plpgsql is always installed and is not listed.");
+        if let Some(listed) = raw.get("extensions") {
+            let names = listed.as_array().and_then(|names| {
+                names
+                    .iter()
+                    .map(|name| name.as_str().filter(|name| extension_name(name)))
+                    .collect::<Option<Vec<&str>>>()
+            });
+            let Some(names) = names else {
+                return Err(invalid(&extensions_rule));
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            if names
+                .iter()
+                .any(|name| *name == "plpgsql" || !seen.insert(*name))
+            {
+                return Err(invalid(&extensions_rule));
+            }
+        }
         if !raw.is_table()
             || !table(raw.get("scratch"))
             || !raw.get("targets").is_none_or(|targets| {
@@ -880,6 +922,11 @@ impl CapturedInputs {
             _ => return Err(invalid(
                 "Use PostgreSQL with `public` or another non-system schema, or SQLite with schema=main.",
             )),
+        }
+        if config.extensions.is_some() && config.engine != "postgresql" {
+            return Err(invalid(&format!(
+                "[databases.{database_name}] extensions applies only to PostgreSQL: SQLite has no extensions to declare."
+            )));
         }
         if let Some(limits) = &config.limits {
             let declares_wait = raw
@@ -1294,6 +1341,73 @@ role="target_role"
         )
         .unwrap();
         root
+    }
+    /// #430: `extensions` is part of the policy digest only when present, so
+    /// a manifest without it keeps its digest; SQLite and malformed lists
+    /// are refused without echoing the names.
+    #[test]
+    fn declared_extensions_bind_the_policy_only_when_present() {
+        let load = |root: &tempfile::TempDir| {
+            CapturedInputs::load(&root.path().join("ntnt.toml"), "local", None)
+        };
+        let with = |list: &str| {
+            let root = project();
+            let manifest = root.path().join("ntnt.toml");
+            let text = std::fs::read_to_string(&manifest).unwrap().replacen(
+                "migrations_dir=\"migrations\"\n",
+                &format!("migrations_dir=\"migrations\"\nextensions = {list}\n"),
+                1,
+            );
+            std::fs::write(&manifest, text).unwrap();
+            root
+        };
+        let absent = load(&project()).unwrap();
+        assert!(absent.config.declared_extensions().is_empty());
+        let serialized = serde_json::to_value(&absent.config).unwrap();
+        assert!(serialized.get("extensions").is_none(), "{serialized}");
+        let declared = load(&with(r#"["postgres_fdw", "uuid-ossp"]"#)).unwrap();
+        assert_eq!(
+            declared.config.declared_extensions(),
+            ["postgres_fdw", "uuid-ossp"]
+        );
+        assert_ne!(declared.policy_digest, absent.policy_digest);
+        for bad in [
+            r#""postgres_fdw""#,
+            r#"["postgres_fdw", "postgres_fdw"]"#,
+            r#"["plpgsql"]"#,
+            r#"["bad name"]"#,
+            r#"[""]"#,
+            "[1]",
+        ] {
+            let Err(error) = load(&with(bad)) else {
+                panic!("accepted extensions = {bad}");
+            };
+            assert_eq!(error.code, "DB_CONFIG", "{bad}");
+            assert!(
+                error
+                    .message
+                    .contains("extensions lists PostgreSQL extensions")
+                    && !error.message.contains("bad name"),
+                "{bad}: {}",
+                error.message
+            );
+        }
+        let sqlite = sqlite_project(None);
+        let manifest = sqlite.path().join("ntnt.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap().replacen(
+            "migrations_dir = \"migrations\"\n",
+            "migrations_dir = \"migrations\"\nextensions = [\"postgres_fdw\"]\n",
+            1,
+        );
+        std::fs::write(&manifest, text).unwrap();
+        let Err(error) = load(&sqlite) else {
+            panic!("SQLite accepted extensions");
+        };
+        assert!(
+            error.message.contains("applies only to PostgreSQL"),
+            "{}",
+            error.message
+        );
     }
     #[test]
     fn sqlite_takes_statement_seconds_and_binds_it_only_when_declared() {

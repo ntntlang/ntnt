@@ -630,6 +630,7 @@ Before anything runs, the script is tokenized (quoted and dollar-quoted text sta
 - session identity: `SET [LOCAL|SESSION] ROLE`, `SET SESSION AUTHORIZATION`, `SET session_replication_role`, `RESET ROLE|SESSION|ALL`, `DISCARD`;
 - non-transactional work: `VACUUM`, `CONCURRENTLY` operations (except the single-statement index migration described below), `REINDEX DATABASE|SYSTEM`;
 - server scope: `COPY`, `LOAD`, `CHECKPOINT`, `ALTER SYSTEM`, and creating/altering/dropping databases, tablespaces and roles;
+- user mappings: `CREATE`, `ALTER` and `DROP USER MAPPING` (`USER_MAPPING`), which hold a role's credentials for a foreign server; see [Foreign servers and user mappings](#extensions-a-superuser-installs);
 - explicit `CASCADE` drops, whose transitive effects are not bounded. `ON DELETE CASCADE` and `ON UPDATE CASCADE` foreign-key actions are allowed.
 
 Text inside `DO` and function bodies (quoted, or a SQL-standard `BEGIN ATOMIC ... END` body) is not inspected; it runs inside the same transaction with the migration role's privileges. Keep role creation out of migrations and provision roles separately. Database-wide custom implicit/assignment casts still block execution, because ordinary DDL coercion could run them without appearing in the reviewed script. Casts that belong to an extension installed in the managed scope, such as citext's, are the extension's own code, which its version covers, and do not block. Any other is refused before the next migration runs with `DB_CHECK_UNSUPPORTED`, whose `objects` field names each cast (`cast:app.mood AS text`) and whose `source` names that migration: drop the cast, or create it `AS EXPLICIT`.
@@ -675,14 +676,96 @@ as a requirement, is explained without a name), and says what to do. An
 extension's objects must also stay within
 [inspection coverage](#inspection-coverage-and-drift).
 
-NTNT does not yet support an extension that a superuser must install. Installing
-one out of band does not help today: on the target, an extension outside the
-managed scope is reported in `catalog.uncovered` (`DB_COVERAGE_INCOMPLETE`), one in
-the managed schema of a target without a ledger makes `status` report
-`DB_UNRECOGNIZED_HISTORY`, and scratch may hold no extension but `plpgsql`
-(`DB_SCRATCH_NOT_EMPTY`). Use a trusted extension where one serves, or keep the
-untrusted extension out of the databases NTNT manages. #430 tracks support for
-extensions that a superuser installs in both the target and scratch.
+#### Extensions a superuser installs
+
+An untrusted extension, or any extension a DBA installs out of band (monitoring
+such as `pg_stat_statements` is common), is declared in the manifest and installed
+by a superuser in **both** the target and the scratch database, at the same
+version and in the same schema:
+
+```toml
+[databases.app]
+engine = "postgresql"
+schema = "app"
+extensions = ["postgres_fdw", "pg_stat_statements"]
+```
+
+```sql
+-- As a superuser, in the target database and in the scratch database:
+CREATE EXTENSION postgres_fdw SCHEMA public;
+CREATE EXTENSION pg_stat_statements SCHEMA public;
+```
+
+- A declared extension may live in any schema, `public` included, except `_ntnt`
+  and PostgreSQL's own schemas. In the managed schema it must be `public`: replay
+  creates any other managed schema, so scratch cannot hold it beforehand.
+- Migrations may keep `CREATE EXTENSION IF NOT EXISTS postgres_fdw`. With the
+  extension installed it does nothing, in replay and on the target.
+- Inspection covers a declared extension wherever it is installed, as
+  `extension:<name>` with its version and schema. A different version or schema in
+  scratch than on the target is drift on that object. Its members outside the
+  managed scope are not inspected. When `public` is the managed schema, its
+  members there are covered by its version, the relations it installs included,
+  and they are not taken for an unrecognized history on a target without a
+  ledger. When a declared extension itself differs (a superuser moved it to another
+  schema with `ALTER EXTENSION ... SET SCHEMA`, say), drift lists it once, as
+  `extension:<name>`, with the differences of its members, which moved with it,
+  under that entry's `members` rather than each on its own.
+- An extension in scratch that `extensions` does not declare is refused with
+  `DB_SCRATCH_NOT_EMPTY` naming it (`extension:hstore`); declare it (and install it
+  on the target too, at the same version and in the same schema) or have a
+  superuser drop it from the scratch database.
+- Scratch must hold each declared extension. One that is missing, or installed in
+  `_ntnt`, a system schema or a managed schema other than `public`, is refused with
+  `DB_SCRATCH_MISMATCH` naming it. Scratch's `public` and the declared extensions'
+  schemas may hold only what those extensions own: their members, and what
+  depends on a member internally or automatically, such as array and row types,
+  the relations of composite types (tablefunc's and dblink's) and indexes.
+  Anything else there is refused with `DB_SCRATCH_NOT_EMPTY`. Replay does not
+  count what they own as the history's work.
+- A superuser owns the declared extensions and what they install, so replay's
+  cleanup (`DROP OWNED`) keeps them, and cleaning up after a replay that never
+  finished neither counts them as another role's objects nor asks the marker to
+  have recorded their catalog rows: scratch is recovered with them in place.
+- A privilege a DBA grants the scratch role itself on what a declared extension
+  installed, such as `GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO
+  <scratch role>`, is refused with `DB_SCRATCH_UNSAFE` naming it, before anything
+  runs: `DROP OWNED` would revoke it, and only the extension's owner can grant it
+  again. Grant it to `PUBLIC` in the scratch database instead
+  (`GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO PUBLIC`), which
+  `DROP OWNED` keeps. Privileges on what declared extensions install are not
+  compared, so the target's migration role keeps its own grant.
+- **Foreign servers and user mappings.** With a declared foreign-data wrapper's
+  extension (postgres_fdw), a migration may create a server
+  (`CREATE SERVER app_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (...)`); the
+  target role needs `USAGE` on the wrapper, and in scratch `PUBLIC` does. Servers are
+  database-wide. One the history creates is covered as `server:<name>`, by its
+  wrapper, type, version, owner, privileges, comment and options; options can hold
+  host names, so reports show only their digest. An out-of-band change to any of
+  these on the target (`ALTER SERVER ... OPTIONS`, `OWNER TO`) is drift on that
+  object. A server no migration creates (a DBA's) is uncovered by name, and so is a
+  foreign-data wrapper no extension installed (`other:foreign_data_wrapper.<name>`);
+  foreign tables are uncovered as relations. Scratch must hold no server before
+  replay. `CREATE`, `ALTER` and `DROP USER MAPPING` are refused in migrations with
+  `DB_REPLAY_UNSUPPORTED` (`USER_MAPPING` in `analysis.unknowns`): a user mapping
+  holds the credentials a role uses on the server and belongs to that role. Create
+  it outside the history, as a DBA step on the target (and in the scratch database
+  if replay needs it), with the credentials kept in the secrets provider. NTNT does
+  not inspect user mappings, so one created that way is neither drift nor uncovered.
+- A declared extension's casts do not block DDL, as an in-scope extension's do
+  not.
+- The key is part of the plan's policy, so adding or changing it needs a new plan.
+  A manifest without it keeps its plan digests.
+
+An extension installed outside the managed scope without a declaration is still
+reported in `catalog.uncovered` (`DB_COVERAGE_INCOMPLETE`), and the diagnostic says
+to declare it. A declared extension installed in `_ntnt` makes the ledger
+unrecognized (`DB_LEDGER_UNKNOWN`), as anything else there does.
+
+Managed objects that use a declared extension's members outside the scope, such as
+a column of type `public.hstore` or a view that calls `dblink`, stay outside
+inspection coverage. A trusted extension that a migration creates in the managed
+schema is covered with its members.
 
 ### Concurrent index builds
 

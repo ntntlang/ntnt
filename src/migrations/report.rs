@@ -526,9 +526,61 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
         .keys()
         .chain(expected.objects.keys())
         .collect();
-    let differences: Vec<_>=keys.into_iter().filter(|k| observed.objects.get(*k)!=expected.objects.get(*k)).map(|k| json!({
-        "object":k,"change":match (expected.objects.contains_key(k),observed.objects.contains_key(k)) {(true,false)=>"missing",(false,true)=>"unexpected",_=>"changed"},
-        "expected":expected.objects.get(k),"observed":observed.objects.get(k)})).collect();
+    let differing: Vec<&String> = keys
+        .into_iter()
+        .filter(|k| observed.objects.get(*k) != expected.objects.get(*k))
+        .collect();
+    // A declared extension that differs (moved to another schema, say)
+    // lists its members' differences under it, as `members`, rather than
+    // each on its own (#430): its members follow it.
+    let declared_changed: std::collections::BTreeSet<&str> = differing
+        .iter()
+        .filter(|k| expected.owned.contains(**k) || observed.owned.contains(**k))
+        .filter_map(|k| k.strip_prefix("extension:"))
+        .collect();
+    // Routines, types and other members name their extension; the
+    // relations a declared extension installs (pg_stat_statements' views)
+    // and their columns do not, so they follow the one that differs, when
+    // only one does.
+    let sole = match declared_changed.iter().collect::<Vec<_>>().as_slice() {
+        [only] => Some(**only),
+        _ => None,
+    };
+    let member_of = |k: &str| -> Option<String> {
+        if k.starts_with("extension:") {
+            return None;
+        }
+        let named = [expected.objects.get(k), observed.objects.get(k)]
+            .into_iter()
+            .flatten()
+            .find_map(|v| v["extension"].as_str());
+        match named {
+            Some(e) => declared_changed.contains(e).then(|| e.to_owned()),
+            None if expected.owned.contains(k) || observed.owned.contains(k) => {
+                sole.map(str::to_owned)
+            }
+            None => None,
+        }
+    };
+    let mut members: std::collections::BTreeMap<String, Vec<&String>> = Default::default();
+    for k in &differing {
+        if let Some(extension) = member_of(k.as_str()) {
+            members.entry(extension).or_default().push(*k);
+        }
+    }
+    let differences: Vec<_> = differing
+        .into_iter()
+        .filter(|k| member_of(k.as_str()).is_none())
+        .map(|k| {
+            let mut d = json!({
+                "object":k,"change":match (expected.objects.contains_key(k),observed.objects.contains_key(k)) {(true,false)=>"missing",(false,true)=>"unexpected",_=>"changed"},
+                "expected":expected.objects.get(k),"observed":observed.objects.get(k)});
+            if let Some(list) = k.strip_prefix("extension:").and_then(|e| members.get(e)) {
+                d["members"] = json!(list);
+            }
+            d
+        })
+        .collect();
     let outcome = if !observed.uncovered.is_empty() || !expected.uncovered.is_empty() {
         "unknown"
     } else if differences.is_empty() {
@@ -705,11 +757,12 @@ async fn replay_prefix(
         if let (Some(migration), false) = (migration, uncovered.is_empty()) {
             // The target's catalog.uncovered cannot name these:
             // they exist only in the replayed intermediate catalog.
-            let mut d = Diagnostic::new(
-                "DB_COVERAGE_INCOMPLETE",
+            let mut d = super::coverage_incomplete(
                 "Intermediate catalog exceeds execution coverage.",
-            )
-            .with_objects(&uncovered);
+                &uncovered,
+                &inputs.database_name,
+                inputs.config.declared_extensions(),
+            );
             d.source = Some(migration.name.clone());
             return Err(d);
         }
@@ -799,6 +852,7 @@ async fn observe(
         &inputs.endpoint,
         &inputs.config.engine,
         Access::Inspect,
+        inputs.config.declared_extensions(),
     )
     .await?;
     let observed = async {
@@ -908,10 +962,11 @@ async fn inspect_observed(
     }
     if adoption.is_none()
         && !history.present
-        && catalog
-            .objects
-            .iter()
-            .any(|(k, v)| !k.starts_with("schema:") && v["external"] != true)
+        && catalog.objects.iter().any(|(k, v)| {
+            // What declared extensions own came from a superuser, not
+            // from a history (#430).
+            !k.starts_with("schema:") && v["external"] != true && !catalog.owned.contains(k)
+        })
     {
         report["history"]["outcome"] = json!("fail");
         report["outcome"] = json!("fail");
@@ -945,6 +1000,7 @@ async fn inspect_observed(
                 &scratch_config.endpoint,
                 &inputs.config.engine,
                 Access::Scratch(json!(&identity)),
+                inputs.config.declared_extensions(),
             )
             .await?;
             let work = async {
@@ -1034,7 +1090,12 @@ async fn inspect_observed(
     if !catalog.uncovered.is_empty() {
         report["diagnostics"].as_array_mut().unwrap().insert(
             coverage_at,
-            json!(Diagnostic::new("DB_COVERAGE_INCOMPLETE","Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted.").with_objects(&catalog.uncovered)),
+            json!(super::coverage_incomplete(
+                "Observed objects or privileges exceed declared catalog coverage; equality cannot be asserted.",
+                &catalog.uncovered,
+                &inputs.database_name,
+                inputs.config.declared_extensions(),
+            )),
         );
     }
     let Replayed {
@@ -1218,6 +1279,7 @@ mod tests {
             endpoint,
             "sqlite",
             Access::Inspect,
+            &[],
         )
         .await
         .unwrap();
@@ -1229,6 +1291,7 @@ mod tests {
             scratch_endpoint,
             "sqlite",
             Access::Scratch(json!(&identity)),
+            &[],
         )
         .await
         .unwrap();

@@ -14,12 +14,37 @@
 //!   its key. A reference to one is covered. Nothing else in those schemas is
 //!   inspected.
 //!
+//! - `$4` (text[]), for the queries `WITH_DECLARED_EXTENSIONS` names only:
+//!   the declared extensions (`[databases.<name>] extensions`, #430), which
+//!   a superuser installed. Each is covered wherever it is installed, but in
+//!   `_ntnt` and PostgreSQL's schemas, by its version and schema, and the
+//!   relations it installs in the scope are covered with it. Its members
+//!   outside the scope are not inspected. Empty, these queries return what
+//!   they did before `$4` was added.
+//!
 //! Each returns the object's name, its definition, whether it is covered, and
 //! the schema that qualifies its catalog key: NULL in the managed schema and
 //! for database-wide objects, `quote_ident(schema)` anywhere else. With `$2`
 //! the managed schema alone and `$3` empty, the queries return exactly what
 //! they did before either was added, so catalogs and plan digests of
 //! histories that stay in the managed schema are unchanged.
+// `DECLARED_OWNED`, with the declared extensions in parameter `$p`.
+macro_rules! declared_owned {
+    ($p:literal) => {
+        concat!(
+            r#"owned(classid, objid) AS (
+  SELECT d.classid, d.objid FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
+   WHERE d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND e.extname=ANY("#,
+            $p,
+            r#"::text[])
+  UNION
+  SELECT d.classid, d.objid FROM owned o JOIN pg_catalog.pg_depend d ON d.refclassid=o.classid AND d.refobjid=o.objid
+   WHERE d.deptype IN ('i','a'))"#
+        )
+    };
+}
+pub(super) use declared_owned;
+
 pub(super) const QUERIES: &[(&str, &str)] = &[
     (
         "schema",
@@ -33,30 +58,37 @@ FROM pg_catalog.pg_namespace n WHERE n.nspname=$1 OR n.nspname=ANY($2) OR (cardi
     ),
     (
         "relation",
-        r#"
-SELECT c.relname::text, jsonb_build_object('kind',c.relkind,'owner',pg_get_userbyid(c.relowner),
+        concat!(
+            "\nWITH RECURSIVE ",
+            declared_owned!("$4"),
+            r#",
+owned_rel AS (SELECT o.objid FROM owned o WHERE o.classid='pg_catalog.pg_class'::pg_catalog.regclass)
+-- What the declared extensions ($4) own keeps its installer's owner and
+-- grants, which are not compared, as for an extension's routines and types.
+SELECT c.relname::text, jsonb_build_object('kind',c.relkind,'owner',CASE WHEN c.oid IN (SELECT objid FROM owned_rel) THEN NULL ELSE pg_get_userbyid(c.relowner) END,
  'persistence',c.relpersistence,'row_security',c.relrowsecurity,'force_row_security',c.relforcerowsecurity,
  'partition',c.relispartition,'replica_identity',c.relreplident,'access_method',am.amname,
  'options',c.reloptions,'tablespace',ts.spcname,'comment',obj_description(c.oid,'pg_class'),
  'partition_key',CASE WHEN c.relkind='p' THEN pg_get_partkeydef(c.oid) END,'partition_bound',pg_get_expr(c.relpartbound,c.oid),
  'partition_of',(SELECT pc.relname FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_class pc ON pc.oid=h.inhparent WHERE h.inhrelid=c.oid AND c.relispartition),
- 'grants',CASE WHEN c.relkind IN ('i','I') THEN NULL ELSE (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
+ 'grants',CASE WHEN c.relkind IN ('i','I') OR c.oid IN (SELECT objid FROM owned_rel) THEN NULL ELSE (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
  FROM aclexplode(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 's'::"char" ELSE 'r'::"char" END,c.relowner))) a) END)
  -- A composite type's privileges and comment are its pg_type row's.
- ||CASE WHEN c.relkind='c' THEN (SELECT jsonb_build_object('grants',(SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
- FROM aclexplode(coalesce(ct.typacl,acldefault('T',ct.typowner))) a),
+ ||CASE WHEN c.relkind='c' THEN (SELECT jsonb_build_object('grants',CASE WHEN c.oid IN (SELECT objid FROM owned_rel) THEN NULL ELSE (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
+ FROM aclexplode(coalesce(ct.typacl,acldefault('T',ct.typowner))) a) END,
  'comment',obj_description(ct.oid,'pg_type')) FROM pg_catalog.pg_type ct WHERE ct.oid=c.reltype) ELSE '{}'::jsonb END,
  ((c.relkind='r' AND am.amname='heap') OR (c.relkind IN ('i','I') AND am.oid<16384) OR c.relkind IN ('p','v','S','c'))
  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_class ch ON ch.oid=h.inhrelid JOIN pg_catalog.pg_class pa ON pa.oid=h.inhparent
    WHERE (h.inhrelid=c.oid OR h.inhparent=c.oid) AND (NOT ch.relispartition OR ch.relnamespace<>c.relnamespace OR pa.relnamespace<>c.relnamespace))
- AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend WHERE classid='pg_catalog.pg_class'::regclass AND objid=c.oid AND deptype='e'),
+ AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend xd JOIN pg_catalog.pg_extension xe ON xe.oid=xd.refobjid WHERE xd.classid='pg_catalog.pg_class'::regclass AND xd.objid=c.oid AND xd.deptype='e' AND xe.extname<>ALL($4)),
  CASE WHEN n.nspname<>$1 THEN quote_ident(n.nspname) END
 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
 LEFT JOIN pg_catalog.pg_am am ON am.oid=c.relam LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid=c.reltablespace
 -- An index follows its table.
 LEFT JOIN pg_catalog.pg_index x ON x.indexrelid=c.oid LEFT JOIN pg_catalog.pg_class xt ON xt.oid=x.indrelid
 WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||coalesce(xt.relname,c.relname)=ANY($3)) ORDER BY c.relname LIMIT 10001
-"#,
+"#
+        ),
     ),
     (
         "column",
@@ -225,8 +257,29 @@ WHERE (n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname
     (
         "extension",
         r#"
-SELECT e.extname::text,jsonb_build_object('version',e.extversion,'schema',n.nspname,'external',n.nspname<>ALL($2)),n.nspname=ANY($2),NULL::text
+SELECT e.extname::text,jsonb_build_object('version',e.extversion,'schema',n.nspname,'external',n.nspname<>ALL($2)),
+ n.nspname=ANY($2) OR (e.extname=ANY($4) AND n.nspname NOT IN ('_ntnt','information_schema') AND NOT starts_with(n.nspname,'pg_')),NULL::text
 FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace WHERE e.extname<>'plpgsql' AND $1::text IS NOT NULL AND $3::text[] IS NOT NULL ORDER BY e.extname LIMIT 10001
+"#,
+    ),
+    (
+        // Foreign servers are database-wide (#430). One the history creates
+        // (in `$3`, as replay finds it) is covered by its wrapper, type,
+        // version, owner, privileges, comment and options; options can hold
+        // host names, so `protect_definitions` reduces them to a digest. Any
+        // other server is uncovered. A server is database-wide, so `external`
+        // (as an extension outside the scope): never a sign of a history or
+        // a ledger's content. User mappings hold credentials and are not
+        // inspected. Without servers this returns nothing.
+        "server",
+        r#"
+SELECT s.srvname::text,jsonb_build_object('wrapper',w.fdwname,'type',s.srvtype,'version',s.srvversion,'owner',pg_get_userbyid(s.srvowner),
+ 'grants',(SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
+ FROM aclexplode(coalesce(s.srvacl,acldefault('S',s.srvowner))) a),
+ 'options',to_jsonb(s.srvoptions),'comment',obj_description(s.oid,'pg_foreign_server'),'external',true),
+ cardinality($3::text[])>0 AND 'server:'||s.srvname=ANY($3),NULL::text
+FROM pg_catalog.pg_foreign_server s JOIN pg_catalog.pg_foreign_data_wrapper w ON w.oid=s.srvfdw
+WHERE $1::text IS NOT NULL AND $2::text[] IS NOT NULL ORDER BY s.srvname LIMIT 10001
 "#,
     ),
     (
@@ -258,6 +311,8 @@ UNION ALL SELECT 'text_search_parser.'||quote_ident(p.prsname),jsonb_build_objec
 UNION ALL SELECT 'text_search_template.'||quote_ident(t.tmplname),jsonb_build_object('kind','text_search'),false,n.nspname,'pg_catalog.pg_ts_template'::regclass::oid,t.oid FROM pg_catalog.pg_ts_template t JOIN pg_catalog.pg_namespace n ON n.oid=t.tmplnamespace WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.other:text_search_template.'||quote_ident(t.tmplname)=ANY($3))
 UNION ALL SELECT 'security_label.'||pg_describe_object(s.classoid,s.objoid,s.objsubid)||'.'||s.provider,jsonb_build_object('kind','security_label','definition',s.label,'external',true),false,NULL,NULL,NULL FROM pg_catalog.pg_seclabel s
 UNION ALL SELECT 'shared_security_label.'||pg_describe_object(s.classoid,s.objoid,0)||'.'||s.provider,jsonb_build_object('kind','security_label','definition',s.label,'external',true),false,NULL,NULL,NULL FROM pg_catalog.pg_shseclabel s
+UNION ALL SELECT 'foreign_data_wrapper.'||quote_ident(w.fdwname),jsonb_build_object('kind','foreign_data_wrapper','external',true),false,NULL,'pg_catalog.pg_foreign_data_wrapper'::regclass::oid,w.oid FROM pg_catalog.pg_foreign_data_wrapper w
+ WHERE NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_foreign_data_wrapper'::regclass AND d.objid=w.oid AND d.deptype='e')
 UNION ALL SELECT 'event_trigger.'||quote_ident(e.evtname),jsonb_build_object('kind','event_trigger','enabled',e.evtenabled,'external',true),false,NULL,NULL,NULL FROM pg_catalog.pg_event_trigger e
 UNION ALL SELECT 'statistics.'||s.stxname,jsonb_build_object('kind','statistics'),false,n.nspname,'pg_catalog.pg_statistic_ext'::regclass::oid,s.oid FROM pg_catalog.pg_statistic_ext s JOIN pg_catalog.pg_namespace n ON n.oid=s.stxnamespace WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.other:statistics.'||s.stxname=ANY($3))
 UNION ALL SELECT 'text_search_config.'||c.cfgname,jsonb_build_object('kind','text_search'),false,n.nspname,'pg_catalog.pg_ts_config'::regclass::oid,c.oid FROM pg_catalog.pg_ts_config c JOIN pg_catalog.pg_namespace n ON n.oid=c.cfgnamespace WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.other:text_search_config.'||c.cfgname=ANY($3))
@@ -269,6 +324,18 @@ WHERE $1::text IS NOT NULL
     ),
 ];
 
+/// The `QUERIES` that take `$4`, the declared extensions.
+pub(super) const WITH_DECLARED_EXTENSIONS: &[&str] = &["relation", "extension"];
+
+/// What the declared extensions (`$1`, text[]) own, as a `WITH RECURSIVE`
+/// element: `owned(classid, objid)`, their members (pg_depend `e`) and,
+/// transitively, what depends on one of those internally or automatically
+/// (`i`, `a`), such as array and row types, indexes and TOAST tables.
+/// Superuser-owned, it is what `prepare_scratch` accepts in a scratch
+/// database's `public` and in the declared extensions' schemas, and what
+/// `OUTSIDE_OBJECTS` does not take for a replayed history's work (#430).
+pub(super) const DECLARED_OWNED: &str = declared_owned!("$1");
+
 /// What a replayed history has created outside the managed scope in scratch,
 /// by the catalog key `QUERIES` give it, for their `$3`. Scratch holds nothing
 /// else outside the scope, so this is exactly the history's work there:
@@ -276,16 +343,27 @@ WHERE $1::text IS NOT NULL
 ///   scratch was prepared with, such as `public`, which it did not create);
 /// - in any other schema but PostgreSQL's, `_ntnt` and NTNT's replay marker
 ///   `_ntnt_replay`: its relations other than indexes, routines, types and
-///   other namespace objects.
+///   other namespace objects;
+/// - each foreign server it created (`server:<name>`; scratch holds none
+///   before replay).
 ///
 /// A relation's indexes, constraints, triggers, policies and rules follow
 /// it, and an extension's members follow the extension, which `QUERIES`
 /// inspect database-wide, so neither is listed. Default privileges for a
 /// schema are not objects and are not listed either.
-pub(super) const OUTSIDE_OBJECTS: &str = r#"
-WITH o AS (SELECT n.oid,n.nspname FROM pg_catalog.pg_namespace n
+///
+/// What the declared extensions (`$3`) own (`DECLARED_OWNED`) was installed
+/// before replay, as on the target, so it is not listed either: their
+/// members, and what is not a member but depends on one, such as the
+/// relations of tablefunc's and dblink's composite types (#430).
+pub(super) const OUTSIDE_OBJECTS: &str = concat!(
+    r#"
+WITH RECURSIVE "#,
+    declared_owned!("$3"),
+    r#",
+o AS (SELECT n.oid,n.nspname FROM pg_catalog.pg_namespace n
  WHERE n.nspname<>ALL($1) AND n.nspname NOT IN ('information_schema','_ntnt','_ntnt_replay') AND NOT starts_with(n.nspname,'pg_')),
-e AS (SELECT d.classid,d.objid FROM pg_catalog.pg_depend d WHERE d.deptype='e')
+e AS (SELECT d.classid,d.objid FROM pg_catalog.pg_depend d WHERE d.deptype='e' UNION SELECT w.classid,w.objid FROM owned w)
 SELECT 'schema:'||o.nspname FROM o WHERE o.nspname<>ALL($2)
 UNION ALL SELECT quote_ident(o.nspname)||'.relation:'||c.relname FROM pg_catalog.pg_class c JOIN o ON o.oid=c.relnamespace
  WHERE c.relkind NOT IN ('i','I') AND NOT EXISTS(SELECT 1 FROM e WHERE e.classid='pg_catalog.pg_class'::regclass AND e.objid=c.oid)
@@ -312,5 +390,7 @@ UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_config.'||x.cfgname
  WHERE NOT EXISTS(SELECT 1 FROM e WHERE e.classid='pg_catalog.pg_ts_config'::regclass AND e.objid=x.oid)
 UNION ALL SELECT quote_ident(o.nspname)||'.other:text_search_dictionary.'||x.dictname FROM pg_catalog.pg_ts_dict x JOIN o ON o.oid=x.dictnamespace
  WHERE NOT EXISTS(SELECT 1 FROM e WHERE e.classid='pg_catalog.pg_ts_dict'::regclass AND e.objid=x.oid)
+UNION ALL SELECT 'server:'||s.srvname FROM pg_catalog.pg_foreign_server s
 ORDER BY 1 LIMIT 10001
-"#;
+"#,
+);

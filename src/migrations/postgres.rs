@@ -175,10 +175,16 @@ fn quote(identifier: &str) -> String {
 pub(crate) struct Postgres {
     client: Client,
     task: tokio::task::JoinHandle<()>,
-    /// sslmode, trust source and the TLS version this client negotiated.
-    transport: Value,
+    /// sslmode, trust source and the TLS version this client negotiated,
+    /// boxed, like `replay` and `extensions`, so that `Adapter`'s variants
+    /// stay alike in size.
+    transport: Box<Value>,
     /// Set once `prepare_scratch` validated this session as scratch.
     scratch: std::sync::OnceLock<Box<ScratchScope>>,
+    /// The declared extensions (`[databases.<name>] extensions`, #430): a
+    /// superuser installed them in the target and scratch databases, and
+    /// inspection covers them wherever they are installed.
+    extensions: Box<[String]>,
     /// What a scratch session's replay set up (see `scratch`), boxed so
     /// that `Adapter`'s variants stay alike in size.
     replay: Box<scratch::Replay>,
@@ -531,10 +537,16 @@ impl Postgres {
         Ok(Self {
             client,
             task,
-            transport,
+            transport: Box::new(transport),
             scratch: std::sync::OnceLock::new(),
+            extensions: Box::default(),
             replay: Box::new(scratch::Replay::new(cancel_tls)),
         })
+    }
+    /// This session with the declared `extensions` (see `extensions`).
+    pub fn with_declared_extensions(mut self, extensions: &[String]) -> Self {
+        self.extensions = extensions.into();
+        self
     }
     pub async fn batch(&self, sql: &str) -> Result<()> {
         bounded(self.client.batch_execute(sql)).await
@@ -597,7 +609,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         ))
         .await?
         .get(0);
-        let mut transport = self.transport.clone();
+        let mut transport = Value::clone(&self.transport);
         if transport.get("tls_version").is_none() {
             transport["tls_version"] = Value::Null;
         }
@@ -1126,7 +1138,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         let recovered = self
             .recover_leftovers(&identity.cluster, identity.database_oid)
             .await?;
-        self.check_empty(target_bypasses_rls).await?;
+        self.check_empty(target_bypasses_rls, Some(schema)).await?;
         let (public, shared, foreign) = self.scratch_baseline().await?;
         self.check_cleanable(public.oid).await?;
         self.create_marker(&public, &identity.cluster, identity.database_oid)
@@ -1166,27 +1178,105 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     }
     /// The emptiness check of `prepare_scratch`, which cleanup runs again:
     /// an unprivileged, non-member owner role (`bypass_rls` as the target's
-    /// role) and nothing but the empty stock `public` and system objects.
-    async fn check_empty(&self, bypass_rls: bool) -> Result<()> {
-        let r=bounded(self.client.query_one(r#"
-SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $1))
+    /// role) and nothing but the empty stock `public`, system objects and
+    /// the declared extensions (#430), each installed where it may be, with
+    /// what they own. `schema` is the managed schema prepare creates, where
+    /// no declared extension may be; cleanup has dropped it again.
+    async fn check_empty(&self, bypass_rls: bool, schema: Option<&str>) -> Result<()> {
+        let declared: &[String] = &self.extensions;
+        // A superuser installs each declared extension here as on the target
+        // (#430). One that is missing, or sits where NTNT keeps its ledger or
+        // PostgreSQL its own objects, or in the schema this transaction
+        // creates, is refused by name.
+        for row in self
+            .rows("SELECT x.name, n.nspname::text FROM pg_catalog.unnest($1::text[]) x(name) LEFT JOIN pg_catalog.pg_extension e ON e.extname=x.name LEFT JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace ORDER BY 1", &[&declared])
+            .await?
+        {
+            let (name, installed): (String, Option<String>) = (row.get(0), row.get(1));
+            let message = match installed.as_deref() {
+                None => format!("Scratch lacks the declared extension {name}. A superuser installs each extension in extensions = [...] in the scratch database too, at the target's version and in the target's schema."),
+                Some(nsp) if nsp == "_ntnt" || nsp == "information_schema" || nsp.starts_with("pg_") => format!("The declared extension {name} is installed in schema {nsp} in scratch: declared extensions may live in any schema but _ntnt and PostgreSQL's own."),
+                Some(nsp) if Some(nsp) == schema && schema != Some("public") => format!("The declared extension {name} is installed in the managed schema {nsp} in scratch, which replay creates: install it in public or another schema, in both databases."),
+                Some(_) => continue,
+            };
+            let mut d = Diagnostic::new("DB_SCRATCH_MISMATCH", &message);
+            d.next_action = "As a superuser, install each declared extension in the scratch database with the target's version and schema (CREATE EXTENSION name VERSION 'v' SCHEMA s), then run the command again. See docs/DATABASE_MIGRATIONS.md, Extensions.".into();
+            return Err(d);
+        }
+        // An extension nothing declares is named, with what to do about it.
+        let undeclared: Vec<String> = self
+            .rows("SELECT 'extension:'||e.extname FROM pg_catalog.pg_extension e WHERE e.extname<>'plpgsql' AND e.extname<>ALL($1::text[]) ORDER BY 1", &[&declared])
+            .await?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
+        if !undeclared.is_empty() {
+            let names: Vec<&str> = undeclared
+                .iter()
+                .map(|k| k.trim_start_matches("extension:"))
+                .collect();
+            let mut d = Diagnostic::new(
+                "DB_SCRATCH_NOT_EMPTY",
+                &format!("Scratch holds the extension(s) {}, which [databases.<name>] extensions does not declare (its objects field names them). Scratch must be empty but for the declared extensions, which a superuser installs in both databases.", names.join(", ")),
+            )
+            .with_objects(&undeclared);
+            d.next_action = format!("Either declare it in [databases.<name>] extensions and have a superuser install it on the target too, at the same version and in the same schema, or have a superuser drop it from the scratch database (DROP EXTENSION {}). Then run the command again.", names.join(", "));
+            return Err(d);
+        }
+        // `public` and the declared extensions' schemas hold only what the
+        // declared extensions own (`DECLARED_OWNED`). With none declared,
+        // `public` is empty and no other schema exists, as before. Below,
+        // inspection checks every kind of object in `public` by catalog key;
+        // in the extensions' own schemas this query does, for each kind
+        // replay would take for the history's work (`OUTSIDE_OBJECTS`).
+        let r=bounded(self.client.query_one(&format!(r#"
+WITH RECURSIVE {owned},
+prepared AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname='public' OR n.oid IN (SELECT e.extnamespace FROM pg_catalog.pg_extension e WHERE e.extname=ANY($1::text[]))),
+extension_schemas AS (SELECT oid FROM prepared WHERE oid NOT IN (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname='public'))
+SELECT NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR (r.rolbypassrls AND NOT $2))
  AND d.datdba=r.oid AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=r.oid)
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_event_trigger)
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname<>'plpgsql')
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_extension WHERE extname<>'plpgsql' AND extname<>ALL($1::text[]))
  AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_default_acl)
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('public','information_schema') AND nspname NOT LIKE 'pg_%')
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public')
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public')
- AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public')
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_foreign_server)
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname NOT IN ('public','information_schema') AND n.nspname NOT LIKE 'pg_%' AND n.oid NOT IN (SELECT oid FROM prepared))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_class'::pg_catalog.regclass AND o.objid=c.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_proc p WHERE p.pronamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_proc'::pg_catalog.regclass AND o.objid=p.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_type t WHERE t.typnamespace IN (SELECT oid FROM prepared) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_type'::pg_catalog.regclass AND o.objid=t.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_operator x WHERE x.oprnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_operator'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_collation x WHERE x.collnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_collation'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_conversion x WHERE x.connamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_conversion'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_opclass x WHERE x.opcnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_opclass'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_opfamily x WHERE x.opfnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_opfamily'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_statistic_ext x WHERE x.stxnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_statistic_ext'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_ts_parser x WHERE x.prsnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_ts_parser'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_ts_template x WHERE x.tmplnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_ts_template'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_ts_config x WHERE x.cfgnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_ts_config'::pg_catalog.regclass AND o.objid=x.oid))
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_ts_dict x WHERE x.dictnamespace IN (SELECT oid FROM extension_schemas) AND NOT EXISTS(SELECT 1 FROM owned o WHERE o.classid='pg_catalog.pg_ts_dict'::pg_catalog.regclass AND o.objid=x.oid))
 FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user AND d.datname=pg_catalog.current_database()
-"#,&[&bypass_rls])).await?;
+"#, owned = super::catalog_sql::DECLARED_OWNED),&[&declared, &bypass_rls])).await?;
         if !r.get::<_, bool>(0) {
-            return Err(scratch::not_empty());
+            return Err(if declared.is_empty() {
+                scratch::not_empty()
+            } else {
+                Diagnostic::new(
+                    "DB_SCRATCH_NOT_EMPTY",
+                    "Scratch must be an empty disposable database owned by an unprivileged, non-member role, with no user objects, event triggers, extensions but the declared ones, or default grants; public and the declared extensions' schemas may hold only what those extensions own.",
+                )
+            });
         }
+        // Inspection ignores what the declared extensions own there, by
+        // catalog key (`Catalog::owned`).
         let public = self.catalog("public", &[], &[], "").await?;
-        if public.objects.len() != 1
-            || !public.objects.contains_key("schema:public")
-            || !public.uncovered.is_empty()
+        if !public.objects.contains_key("schema:public")
+            || public
+                .objects
+                .keys()
+                .any(|key| key != "schema:public" && !public.owned.contains(key))
+            || public
+                .uncovered
+                .iter()
+                .any(|key| !public.owned.contains(key))
         {
             return Err(Diagnostic::new("DB_SCRATCH_NOT_EMPTY","Scratch public namespace contains unsupported objects or cannot be fully inspected."));
         }
@@ -1209,7 +1299,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
         Ok(self
             .rows(
                 super::catalog_sql::OUTSIDE_OBJECTS,
-                &[&scope(schema, extra), &scratch.schemas],
+                &[&scope(schema, extra), &scratch.schemas, &self.extensions],
             )
             .await?
             .iter()
@@ -1219,14 +1309,16 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// Reject custom implicit/assignment casts database-wide before DDL:
     /// ordinary coercion could run them without appearing in the reviewed
     /// script. The casts of an extension installed in the managed `scope`
-    /// (citext's, say) are the extension's own code, which its version
-    /// covers like its routines and operators, so they are allowed.
+    /// (citext's, say) or declared (#430) are the extension's own code,
+    /// which its version covers like its routines and operators, so they are
+    /// allowed.
     async fn reject_custom_casts(&self, scope: &[String]) -> Result<()> {
+        let declared: &[String] = &self.extensions;
         let casts: Vec<String> = self
             .rows("SELECT 'cast:'||pg_catalog.format_type(c.castsource,NULL)||' AS '||pg_catalog.format_type(c.casttarget,NULL) FROM pg_catalog.pg_cast c
  WHERE c.oid>=16384 AND c.castcontext IN ('i','a') AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
- WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=c.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND en.nspname=ANY($1))
- ORDER BY 1 LIMIT 101", &[&scope])
+ WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=c.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND (en.nspname=ANY($1) OR e.extname=ANY($2)))
+ ORDER BY 1 LIMIT 101", &[&scope, &declared])
             .await?
             .iter()
             .map(|r| r.get(0))
@@ -1292,7 +1384,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
           WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind='r'
           AND a.attnum>0 AND NOT a.attisdropped AND EXISTS(SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace WHERE t.oid=a.atttypid AND tn.nspname<>'pg_catalog' AND tn.nspname<>ALL($2)))
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast k WHERE k.oid>=16384 AND k.castcontext IN ('i','a') AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
-            WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND en.nspname=ANY($2)))
+            WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND (en.nspname=ANY($2) OR e.extname=ANY($3::text[]))))
           -- A composite type (relkind c) holds no rows to read.
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind NOT IN ('r','p','i','I','S','v','c'))
           -- A check may read a view, and through it what the view reads.
@@ -1301,7 +1393,7 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class v
             JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid
             JOIN pg_catalog.pg_proc p ON d.refclassid='pg_catalog.pg_proc'::regclass AND p.oid=d.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
-            WHERE v.oid IN (SELECT rel FROM reach) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema, &scope(schema, extra)]).await?;
+            WHERE v.oid IN (SELECT rel FROM reach) AND v.relkind='v' AND (pn.nspname<>'pg_catalog' OR p.provolatile='v'))"#, &[&schema, &scope(schema, extra), &self.extensions]).await?;
         if !safe[0].get::<_, bool>(0) {
             return Err(Diagnostic::new(
                 "DB_CHECK_UNSUPPORTED",
@@ -1526,8 +1618,13 @@ forced: r.get(2),
             d.source = Some(migration.name.clone());
             return Err(d);
         }
-        if !super::analysis::analyze(&migration.sql, schema).replay_supported {
-            let mut d=Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.");
+        let analysis = super::analysis::analyze(&migration.sql, schema);
+        if !analysis.replay_supported {
+            let mut d = if analysis.unknowns.iter().any(|u| u == "USER_MAPPING") {
+                user_mapping_refused()
+            } else {
+                Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.")
+            };
             d.source = Some(migration.name.clone());
             return Err(d);
         }
@@ -1657,6 +1754,17 @@ forced: r.get(2),
 
 /// Replace potentially sensitive deparsed definitions with identities before reporting.
 /// Structural metadata remains available for object-level differences.
+/// `DB_REPLAY_UNSUPPORTED` for a migration that creates, alters or drops a
+/// user mapping (analysis `USER_MAPPING`, #430): it holds the credentials a
+/// role uses on a foreign server, so it stays out of the history.
+fn user_mapping_refused() -> Diagnostic {
+    let mut d = Diagnostic::new(
+        "DB_REPLAY_UNSUPPORTED",
+        "Migration creates, alters or drops a user mapping (USER_MAPPING in analysis.unknowns). A user mapping holds the credentials a role uses on a foreign server and belongs to that role, so NTNT keeps user mappings out of migration histories, which are reviewed, recorded and replayed as plain text.",
+    );
+    d.next_action = "Remove the statement from the migration. Create the user mapping outside the history, as a DBA step on the target, and in the scratch database too if replay needs it, with the credentials kept in the secrets provider rather than written into SQL. NTNT does not inspect user mappings, so one created that way is neither drift nor uncovered.".into();
+    d
+}
 fn protect_definitions(value: &mut Value) {
     // Engine-deparsed SQL may itself contain credentials (for example a view
     // invoking a remote database). Keep exact-byte identities, never literals or
@@ -1738,10 +1846,17 @@ impl RelationalAdapter for Postgres {
     ) -> Result<Catalog> {
         self.batch("SET LOCAL search_path=pg_catalog").await?;
         let scope = scope(schema, extra);
+        let declared: &[String] = &self.extensions;
         let mut catalog = Catalog::default();
         for (kind, sql) in super::catalog_sql::QUERIES {
-            // $1, $2 and $3 as `catalog_sql` describes them.
-            for r in self.rows(sql, &[&schema, &scope, &outside]).await? {
+            // $1, $2, $3 and $4 as `catalog_sql` describes them.
+            let rows = if super::catalog_sql::WITH_DECLARED_EXTENSIONS.contains(kind) {
+                self.rows(sql, &[&schema, &scope, &outside, &declared])
+                    .await?
+            } else {
+                self.rows(sql, &[&schema, &scope, &outside]).await?
+            };
+            for r in rows {
                 let name: String = r.get(0);
                 let mut value: Value = r.get(1);
                 let supported: bool = r.get(2);
@@ -1771,8 +1886,68 @@ impl RelationalAdapter for Postgres {
         }
         catalog.uncovered.sort();
         catalog.uncovered.dedup();
+        if !declared.is_empty() {
+            // The relations the declared extensions own in the scope, as
+            // their keys are qualified: in the managed schema, none.
+            let relations: Vec<(Option<String>, String, String)> = self
+                .rows(
+                    &format!("WITH RECURSIVE {} SELECT CASE WHEN n.nspname<>$2::text THEN pg_catalog.quote_ident(n.nspname) END, c.relname::text, pg_catalog.quote_ident(c.relname) FROM pg_catalog.pg_class c JOIN owned o ON o.classid='pg_catalog.pg_class'::pg_catalog.regclass AND o.objid=c.oid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=ANY($3::text[])", super::catalog_sql::DECLARED_OWNED),
+                    &[&declared, &schema, &scope],
+                )
+                .await?
+                .iter()
+                .map(|r| (r.get(0), r.get(1), r.get(2)))
+                .collect();
+            catalog.owned = catalog
+                .objects
+                .iter()
+                .filter(|(key, value)| declared_owned(key, value, declared, &relations))
+                .map(|(key, _)| key.clone())
+                .collect();
+        }
         Ok(catalog)
     }
+}
+
+/// Whether catalog object `key` (`value`) is owned by a declared extension
+/// (#430): one of `declared` itself, a member (inspection marks routines,
+/// types and other objects with their extension), or one of its
+/// `relations` (qualifier, name, quoted name) with the columns,
+/// constraints, triggers, policies and rules that follow it.
+fn declared_owned(
+    key: &str,
+    value: &Value,
+    declared: &[String],
+    relations: &[(Option<String>, String, String)],
+) -> bool {
+    let is_declared = |name: &str| declared.iter().any(|d| d == name);
+    if let Some(name) = key.strip_prefix("extension:") {
+        return is_declared(name);
+    }
+    if value["extension"].as_str().is_some_and(is_declared) {
+        return true;
+    }
+    relations.iter().any(|(qualifier, name, quoted)| {
+        let key = match qualifier {
+            Some(qualifier) => match key.strip_prefix(&format!("{qualifier}.")) {
+                Some(key) => key,
+                None => return false,
+            },
+            None => key,
+        };
+        ["relation:", "index:", "view:", "sequence:"]
+            .iter()
+            .any(|kind| key.strip_prefix(kind) == Some(name.as_str()))
+            || [
+                "column:",
+                "constraint:",
+                "trigger:",
+                "policy:",
+                "other:rule.",
+            ]
+            .iter()
+            .any(|kind| key.starts_with(&format!("{kind}{quoted}.")))
+    })
 }
 
 #[cfg(test)]

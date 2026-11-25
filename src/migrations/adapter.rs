@@ -56,16 +56,20 @@ pub(super) enum Adapter {
     Sqlite(Sqlite),
 }
 impl Adapter {
+    /// `extensions` are the declared PostgreSQL extensions
+    /// (`Database::declared_extensions`), which this session's inspection
+    /// covers wherever they are installed; empty for SQLite.
     pub async fn connect(
         secret: &crate::interpreter::SecretValue,
         endpoint: &Endpoint,
         engine: &str,
         access: Access,
+        extensions: &[String],
     ) -> Result<Self> {
         match engine {
             "postgresql" => Postgres::connect(secret, endpoint)
                 .await
-                .map(Self::Postgres),
+                .map(|pg| Self::Postgres(pg.with_declared_extensions(extensions))),
             "sqlite" => Sqlite::connect(secret, access).await.map(Self::Sqlite),
             _ => Err(Diagnostic::new(
                 "DB_ENGINE",

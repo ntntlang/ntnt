@@ -134,6 +134,34 @@
 - `ntnt db`: `migrate --plan` with a saved plan that holds no plan (outcome
   `fail`, no `plan_digest`) says the plan is blocked instead of edited (#427).
 
+### Added
+
+- `ntnt db` (PostgreSQL): `[databases.<name>] extensions = [...]` declares
+  extensions a superuser installs in both the target and the scratch database,
+  in any schema but `_ntnt` and PostgreSQL's, `public` included. Each is compared
+  by version and schema, scratch may hold it and what it owns, and migrations may
+  keep `CREATE EXTENSION IF NOT EXISTS` for it. An undeclared extension outside
+  the managed scope is still uncovered, and `DB_COVERAGE_INCOMPLETE` now says to
+  declare it. Replay's cleanup and its recovery of an unfinished replay keep the
+  declared extensions; a privilege a DBA grants the scratch role on what they
+  install is refused by name (`DB_SCRATCH_UNSAFE`), since cleanup would revoke
+  it, and the diagnostic says to grant it to `PUBLIC` in scratch instead.
+  Manifests without the key keep their plan digests (#430).
+- `ntnt db` (PostgreSQL): a foreign server a migration creates is covered as
+  `server:<name>` (wrapper, owner, privileges and options, redacted to a
+  digest), so an out-of-band `ALTER SERVER ... OPTIONS` or `OWNER TO` on the
+  target is drift; a server no migration creates, and a foreign-data wrapper no
+  extension installed, are uncovered by name instead of ignored. Histories
+  without servers keep their digests (#430).
+- `ntnt db` (PostgreSQL): `CREATE`, `ALTER` and `DROP USER MAPPING` are refused
+  with their own reason (`USER_MAPPING`: credentials bound to a role) and a
+  next action (a DBA step outside the history, credentials in the secrets
+  provider) instead of as role DDL; user mappings are not inspected (#430).
+- `ntnt db` (PostgreSQL): an undeclared extension in scratch is named in
+  `DB_SCRATCH_NOT_EMPTY` (`extension:hstore`) with what to do, and a declared
+  extension moved to another schema is one drift entry, its members listed
+  under it (#430).
+
 ### Changed
 
 - `ntnt db` (PostgreSQL): the `capabilities.inspection` keys of the JSON

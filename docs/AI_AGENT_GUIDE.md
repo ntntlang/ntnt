@@ -1782,7 +1782,11 @@ refuse, several per check if need be: `CHECK_OPERATOR_MISMATCH` and
 `row_security=off`, `CHECK_ROW_SECURITY` for one that would read a
 `FORCE ROW LEVEL SECURITY` table as a migration role without `BYPASSRLS`
 (`DB_CHECK_ROW_SECURITY`). Migrations can create only trusted extensions; an
-untrusted one such as `postgres_fdw` fails with `DB_EXTENSION_PRIVILEGE`. See
+untrusted one such as `postgres_fdw` fails with `DB_EXTENSION_PRIVILEGE`. A
+superuser can install one in both the target and scratch, at one version and in
+one schema (`public` is fine), and `[databases.<name>] extensions = ["postgres_fdw"]`
+declares it: it is then compared by version and schema, and migrations may keep
+`CREATE EXTENSION IF NOT EXISTS`. See
 [Checks and row-level security](DATABASE_MIGRATIONS.md#checks-and-row-level-security)
 and [Extensions](DATABASE_MIGRATIONS.md#extensions).
 

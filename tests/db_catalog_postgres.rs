@@ -2855,6 +2855,409 @@ fn leftovers_of_an_unfinished_replay_are_cleaned_only_with_the_marker() {
         .get::<_, bool>(0));
 }
 
+/// A superuser session in `f`'s target database.
+fn target_admin(f: &Fixture) -> Client {
+    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.dbname(&f.target);
+    config.connect(NoTls).unwrap()
+}
+
+/// `f`'s manifest with `[databases.app] extensions = <list>` (#430).
+fn declare_extensions(f: &Fixture, list: &str) {
+    let path = f.root.path().join("ntnt.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        text.contains("approval_secret = \"DB_APPROVAL\"\n"),
+        "{text}"
+    );
+    let text = text.replacen(
+        "approval_secret = \"DB_APPROVAL\"\n",
+        &format!("approval_secret = \"DB_APPROVAL\"\nextensions = {list}\n"),
+        1,
+    );
+    std::fs::write(path, text).unwrap();
+}
+
+/// Two untrusted extensions of #430, as a superuser installs them in `public`.
+const FDW_AND_STATEMENTS: &str = "CREATE EXTENSION postgres_fdw SCHEMA public; CREATE EXTENSION pg_stat_statements SCHEMA public;";
+
+/// The extensions installed in a database, with their OIDs and schemas.
+fn installed_extensions(c: &mut Client) -> Vec<String> {
+    c.query(
+        "SELECT e.extname||' '||e.oid::text||' '||n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname<>'plpgsql' ORDER BY 1",
+        &[],
+    )
+    .unwrap()
+    .iter()
+    .map(|r| r.get(0))
+    .collect()
+}
+
+/// #430: postgres_fdw and pg_stat_statements, declared and installed in
+/// `public` of both databases by a superuser, survive the recovery of a
+/// replay that never finished. A superuser owns them and wrote their catalog
+/// rows before any replay, so recovery takes them neither for another
+/// role's objects nor for writes the marker must record, and DROP OWNED
+/// keeps them. Scratch is then as it was before the first replay, with
+/// `public`'s privileges and the scratch database's comment, which the
+/// replay changed, restored; the next plan needs no recovery and migrates.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn declared_extensions_survive_the_recovery_of_an_unfinished_replay() {
+    let f = Fixture::new();
+    target_admin(&f).batch_execute(FDW_AND_STATEMENTS).unwrap();
+    let mut scratch = scratch_admin(&f);
+    scratch.batch_execute(FDW_AND_STATEMENTS).unwrap();
+    declare_extensions(&f, r#"["postgres_fdw", "pg_stat_statements"]"#);
+    let public = public_state(&f);
+    let before = scratch_leftovers(&f, &public);
+    let installed = installed_extensions(&mut scratch);
+    assert_eq!(installed.len(), 2, "{installed:?}");
+    f.sql(
+        "0001_t.sql",
+        "CREATE EXTENSION IF NOT EXISTS postgres_fdw; CREATE TABLE app.t (id int PRIMARY KEY); GRANT CREATE ON SCHEMA public TO PUBLIC;
+         DO $$ BEGIN EXECUTE format('COMMENT ON DATABASE %I IS %L', current_database(), 'replayed'); END $$;",
+    );
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    assert!(
+        scratch
+            .query_one(
+                "SELECT to_regnamespace('_ntnt_replay') IS NOT NULL AND to_regclass('app.t') IS NOT NULL",
+                &[],
+            )
+            .unwrap()
+            .get::<_, bool>(0),
+        "the crash left no marker"
+    );
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(installed_extensions(&mut scratch), installed);
+    assert!(scratch
+        .query_one(
+            "SELECT to_regclass('public.pg_stat_statements') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname='postgres_fdw')",
+            &[],
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+    assert_eq!(scratch_leftovers(&f, &public), before);
+    let p = f.plan("plan.json");
+    assert!(p["scratch"]["recovered"].is_null(), "{p}");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "pass", "{v}");
+    assert_eq!(installed_extensions(&mut scratch), installed);
+    assert_eq!(scratch_leftovers(&f, &public), before);
+}
+
+/// postgres_fdw, declared and installed in `public` of both databases, with
+/// USAGE on its wrapper for the target role and, in scratch, for PUBLIC.
+fn declare_postgres_fdw(f: &Fixture) {
+    target_admin(f)
+        .batch_execute(&format!(
+            "CREATE EXTENSION postgres_fdw SCHEMA public; GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO {}",
+            f.target
+        ))
+        .unwrap();
+    scratch_admin(f)
+        .batch_execute("CREATE EXTENSION postgres_fdw SCHEMA public; GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO PUBLIC")
+        .unwrap();
+    declare_extensions(f, r#"["postgres_fdw"]"#);
+}
+
+/// The objects `verify` (or another inspecting command) reports as drift.
+fn drift_objects(r: &Value) -> Vec<String> {
+    r["drift"]["differences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["object"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// #430 round 2: a foreign server the history creates is covered as
+/// `server:<name>`, by its wrapper, owner, privileges and options, which are
+/// redacted to a digest because they can hold host names. A user mapping a
+/// DBA creates for it is not inspected (neither drift nor uncovered); an
+/// out-of-band change to its options or owner is drift naming it.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_foreign_server_the_history_creates_is_covered_and_changing_it_is_drift() {
+    let f = Fixture::new();
+    declare_postgres_fdw(&f);
+    f.sql(
+        "0001_server.sql",
+        "CREATE TABLE app.t (id int PRIMARY KEY); CREATE SERVER app_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'remote.invalid', dbname 'x');",
+    );
+    let p = f.plan("plan.json");
+    assert!(
+        names(&p["target"]["outside_objects"]).contains(&"server:app_remote"),
+        "{p}"
+    );
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "pass", "{v}");
+    let server = &v["catalog"]["objects"]["server:app_remote"];
+    assert_eq!(server["wrapper"], "postgres_fdw", "{v}");
+    assert_eq!(server["owner"]["managed_role"], true, "{v}");
+    assert_eq!(server["options"]["redacted"], true, "{v}");
+    assert!(!v.to_string().contains("remote.invalid"), "{v}");
+    assert!(names(&v["catalog"]["uncovered"]).is_empty(), "{v}");
+    let mut target = target_admin(&f);
+    target
+        .batch_execute(&format!(
+            "CREATE USER MAPPING FOR {} SERVER app_remote OPTIONS (user 'u', password 'dba-only')",
+            f.target
+        ))
+        .unwrap();
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "pass", "a DBA's user mapping: {v}");
+    target
+        .batch_execute("ALTER SERVER app_remote OPTIONS (SET host 'attacker.invalid')")
+        .unwrap();
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "fail", "{v}");
+    assert!(diagnostic(&v, "DB_DRIFT").is_some(), "{v}");
+    assert_eq!(drift_objects(&v), ["server:app_remote"], "{v}");
+    assert!(!v.to_string().contains("attacker.invalid"), "{v}");
+    target
+        .batch_execute("ALTER SERVER app_remote OPTIONS (SET host 'remote.invalid'); ALTER SERVER app_remote OWNER TO CURRENT_USER")
+        .unwrap();
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "fail", "{v}");
+    assert_eq!(drift_objects(&v), ["server:app_remote"], "{v}");
+}
+
+/// #430 round 2: a server a DBA created on the target, which no migration
+/// creates, is reported uncovered by name rather than ignored, and so is a
+/// foreign-data wrapper that no extension installed.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_server_or_wrapper_outside_the_history_is_uncovered() {
+    let f = Fixture::new();
+    declare_postgres_fdw(&f);
+    f.sql("0001_t.sql", "CREATE TABLE app.t (id int PRIMARY KEY);");
+    let p = f.plan("plan.json");
+    assert_eq!(
+        f.apply("plan.json", p["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    target_admin(&f)
+        .batch_execute("CREATE SERVER dba_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'remote.invalid'); CREATE FOREIGN DATA WRAPPER dba_wrapper")
+        .unwrap();
+    let v = f.command("verify");
+    let d = diagnostic(&v, "DB_COVERAGE_INCOMPLETE").unwrap_or_else(|| panic!("{v}"));
+    let uncovered = names(&v["catalog"]["uncovered"]);
+    assert!(uncovered.contains(&"server:dba_remote"), "{v}");
+    assert!(
+        uncovered.contains(&"other:foreign_data_wrapper.dba_wrapper"),
+        "{v}"
+    );
+    assert!(names(&d["objects"]).contains(&"server:dba_remote"), "{d}");
+}
+
+/// #430 round 2: CREATE USER MAPPING is refused with its own reason, not as
+/// role DDL, and says how to create the mapping outside the history.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_user_mapping_in_a_migration_is_refused_by_name() {
+    let f = Fixture::new();
+    declare_postgres_fdw(&f);
+    f.sql(
+        "0001_server.sql",
+        "CREATE SERVER app_remote FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'remote.invalid'); CREATE USER MAPPING FOR CURRENT_USER SERVER app_remote OPTIONS (user 'u');",
+    );
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["source"], "0001_server.sql", "{d}");
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.contains("user mapping") && message.contains("USER_MAPPING"),
+        "{d}"
+    );
+    assert!(!message.contains("act outside this database"), "{d}");
+    let next = d["next_action"].as_str().unwrap();
+    assert!(
+        next.contains("DBA step") && next.contains("secrets provider"),
+        "{d}"
+    );
+}
+
+/// #430 round 2: an extension in scratch that nothing declares is named, with
+/// what to do: declare it (and install it on the target) or drop it.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn an_undeclared_extension_in_scratch_is_named() {
+    let f = Fixture::new();
+    scratch_admin(&f)
+        .batch_execute("CREATE EXTENSION hstore SCHEMA public")
+        .unwrap();
+    f.sql("0001_t.sql", "CREATE TABLE app.t (id int);");
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_NOT_EMPTY").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(names(&d["objects"]), ["extension:hstore"], "{d}");
+    assert!(d["message"].as_str().unwrap().contains("hstore"), "{d}");
+    let next = d["next_action"].as_str().unwrap();
+    assert!(
+        next.contains("declare it") && next.contains("DROP EXTENSION hstore"),
+        "{d}"
+    );
+}
+
+/// #430 round 2: a declared extension a superuser moves to another schema on
+/// the target, out of the managed schema `public`, is one drift entry, with
+/// its members (which moved with it) listed under it: postgres_fdw's
+/// routines, and pg_stat_statements' views and their columns, which carry no
+/// extension name of their own (Greptile on #458).
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn relocating_a_declared_extension_is_one_drift_entry() {
+    let f = Fixture::with_schema("public");
+    target_admin(&f).batch_execute(FDW_AND_STATEMENTS).unwrap();
+    scratch_admin(&f).batch_execute(FDW_AND_STATEMENTS).unwrap();
+    declare_extensions(&f, r#"["postgres_fdw", "pg_stat_statements"]"#);
+    f.sql(
+        "0001_widgets.sql",
+        "CREATE TABLE widgets (id int PRIMARY KEY, label text);",
+    );
+    let p = f.plan("plan.json");
+    assert_eq!(
+        f.apply("plan.json", p["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    target_admin(&f)
+        .batch_execute("CREATE SCHEMA ext; ALTER EXTENSION postgres_fdw SET SCHEMA ext")
+        .unwrap();
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "fail", "{v}");
+    assert_eq!(drift_objects(&v), ["extension:postgres_fdw"], "{v}");
+    let members = names(&v["drift"]["differences"][0]["members"]);
+    assert!(
+        members
+            .iter()
+            .any(|m| m.starts_with("routine:postgres_fdw_handler")),
+        "{v}"
+    );
+    target_admin(&f)
+        .batch_execute("ALTER EXTENSION postgres_fdw SET SCHEMA public; ALTER EXTENSION pg_stat_statements SET SCHEMA ext")
+        .unwrap();
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "fail", "{v}");
+    assert_eq!(drift_objects(&v), ["extension:pg_stat_statements"], "{v}");
+    let members = names(&v["drift"]["differences"][0]["members"]);
+    assert!(members.contains(&"relation:pg_stat_statements"), "{v}");
+    assert!(
+        members
+            .iter()
+            .any(|m| m.starts_with("column:pg_stat_statements.")),
+        "{v}"
+    );
+}
+
+/// #430: USAGE on postgres_fdw's foreign-data wrapper, which a DBA granted
+/// the scratch role directly, is refused by name before anything runs:
+/// cleanup's DROP OWNED would revoke it, and only the superuser who owns the
+/// extension could grant it again. Granted to PUBLIC in scratch instead, as
+/// the diagnostic says, it survives replay, cleanup and recovery.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn a_dba_grant_on_a_declared_extension_to_the_scratch_role_is_refused_by_name() {
+    let f = Fixture::new();
+    target_admin(&f)
+        .batch_execute(&format!(
+            "{FDW_AND_STATEMENTS} GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO {}",
+            f.target
+        ))
+        .unwrap();
+    let mut scratch = scratch_admin(&f);
+    scratch
+        .batch_execute(&format!(
+            "{FDW_AND_STATEMENTS} GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO {}",
+            f.scratch
+        ))
+        .unwrap();
+    declare_extensions(&f, r#"["postgres_fdw", "pg_stat_statements"]"#);
+    f.sql("0001_t.sql", "CREATE TABLE app.t (id int PRIMARY KEY);");
+    let acl = |c: &mut Client| -> String {
+        c.query_one(
+            "SELECT coalesce(fdwacl::text, '') FROM pg_foreign_data_wrapper WHERE fdwname='postgres_fdw'",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+    };
+    let public_usage = |c: &mut Client| -> bool {
+        c.query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_foreign_data_wrapper w, aclexplode(w.fdwacl) a WHERE w.fdwname='postgres_fdw' AND a.grantee=0 AND a.privilege_type='USAGE')",
+            &[],
+        )
+        .unwrap()
+        .get(0)
+    };
+    let granted = acl(&mut scratch);
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_UNSAFE").unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(
+        names(&d["objects"]),
+        ["foreign-data wrapper postgres_fdw"],
+        "{d}"
+    );
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.contains("that the postgres_fdw extension(s) installed")
+            && message.contains("DROP OWNED")
+            && message.contains("cannot grant these back"),
+        "{d}"
+    );
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO PUBLIC"),
+        "{d}"
+    );
+    // Nothing ran: no marker, and the grant is as it was.
+    assert!(!scratch
+        .query_one("SELECT to_regnamespace('_ntnt_replay') IS NOT NULL", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+    assert_eq!(acl(&mut scratch), granted);
+    // As the diagnostic says: PUBLIC holds it in scratch instead.
+    scratch
+        .batch_execute(&format!(
+            "REVOKE USAGE ON FOREIGN DATA WRAPPER postgres_fdw FROM {0}; GRANT USAGE ON FOREIGN DATA WRAPPER postgres_fdw TO PUBLIC",
+            f.scratch
+        ))
+        .unwrap();
+    assert!(public_usage(&mut scratch));
+    let held = acl(&mut scratch);
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
+    assert_eq!(acl(&mut scratch), held);
+    // A replay that never finished is recovered, and PUBLIC keeps it.
+    f.sql(
+        "0002_wait.sql",
+        "SET LOCAL lock_timeout = 0; SELECT pg_catalog.pg_advisory_xact_lock(4242);",
+    );
+    crash_during_replay(&f);
+    let r = f.command("plan");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert!(r["scratch"]["recovered"]["replay_id"].is_string(), "{r}");
+    assert_eq!(acl(&mut scratch), held);
+}
+
 /// A plan waiting for the replay lock, `pg_advisory_lock(1853124212, 430)`.
 const REPLAY_LOCK_WAITER: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=1853124212 AND objid=430 AND objsubid=2 AND NOT granted)";
 

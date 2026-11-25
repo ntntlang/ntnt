@@ -1,12 +1,18 @@
 //! Shared catalog and immutable history models; native identities remain adapter-owned.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct Catalog {
     pub objects: BTreeMap<String, Value>,
     pub uncovered: Vec<String>,
+    /// PostgreSQL: the keys of `objects` that declared extensions own
+    /// (#430): each declared extension, its members, and its relations with
+    /// what follows them. Not part of the catalog's identity, so never
+    /// serialized; empty without declared extensions.
+    #[serde(skip)]
+    pub owned: BTreeSet<String>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct HistoryEntry {

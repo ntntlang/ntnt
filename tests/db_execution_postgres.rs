@@ -1471,6 +1471,391 @@ fn a_check_with_several_hazards_gets_each_warning_and_is_refused() {
     assert!(!created, "the refused migration was rolled back");
 }
 
+/// #430: a superuser session in the fixture database `db`.
+fn superuser_in(db: &str) -> postgres::Client {
+    let mut config: postgres::Config = std::env::var("NTNT_DB_TEST_ADMIN")
+        .unwrap()
+        .parse()
+        .unwrap();
+    config.dbname(db);
+    config.connect(postgres::NoTls).unwrap()
+}
+
+/// `f`'s manifest with `[databases.app] extensions = <list>`, or without the
+/// key when `list` is `None`.
+fn declare_extensions(f: &Fixture, list: Option<&str>) {
+    let path = f.root.path().join("ntnt.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let text: String = text
+        .lines()
+        .filter(|line| !line.starts_with("extensions = "))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let text = match list {
+        Some(list) => text.replacen(
+            "approval_secret = \"DB_APPROVAL\"\n",
+            &format!("approval_secret = \"DB_APPROVAL\"\nextensions = {list}\n"),
+            1,
+        ),
+        None => text,
+    };
+    std::fs::write(path, text).unwrap();
+}
+
+fn diagnostic<'a>(r: &'a Value, code: &str) -> &'a Value {
+    r["diagnostics"]
+        .as_array()
+        .and_then(|ds| ds.iter().find(|d| d["code"] == code))
+        .unwrap_or_else(|| panic!("{code}: {r}"))
+}
+
+/// The untrusted extensions of #430, installed by a superuser in `public`.
+const DECLARED: &str = "CREATE EXTENSION postgres_fdw SCHEMA public; CREATE EXTENSION pg_stat_statements SCHEMA public; CREATE EXTENSION pageinspect SCHEMA public;";
+
+/// #430: an extension a superuser installs in the target and the scratch
+/// database, declared in the manifest, is compared by version and schema
+/// wherever it is installed, in `public` too, and a migration may keep
+/// `CREATE EXTENSION IF NOT EXISTS` for it, which does nothing. Undeclared,
+/// a DBA's monitoring extension in `public` still makes the catalog
+/// uncovered, and the diagnostic says to declare it. With `public` as the
+/// managed schema, the extensions' members there are covered by their
+/// versions, the relations of pg_stat_statements included.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn declared_superuser_installed_extensions_plan_migrate_and_verify() {
+    for schema in ["app", "public"] {
+        let f = Fixture::with_schema(schema);
+        f.sql(
+            "0001_fdw.sql",
+            &format!("CREATE EXTENSION IF NOT EXISTS postgres_fdw;\nCREATE TABLE {schema}.accounts (id BIGINT PRIMARY KEY);\n"),
+        );
+        // A DBA installed pg_stat_statements on the target only, and nothing
+        // declares it: still uncovered, now with the remedy.
+        superuser_in(&f.target)
+            .batch_execute("CREATE EXTENSION pg_stat_statements SCHEMA public")
+            .unwrap();
+        let r = f.command("plan");
+        if schema == "app" {
+            let d = diagnostic(&r, "DB_COVERAGE_INCOMPLETE");
+            assert_eq!(
+                d["objects"],
+                serde_json::json!(["extension:pg_stat_statements"]),
+                "{d}"
+            );
+            assert!(
+                d["message"].as_str().unwrap().contains(
+                    "Extension pg_stat_statements is installed outside the managed scope. If a superuser installed it, declare it in [databases.app] extensions"
+                ),
+                "{d}"
+            );
+        } else {
+            // In the managed schema, its objects look like a history.
+            diagnostic(&r, "DB_UNRECOGNIZED_HISTORY");
+        }
+        // Declared and installed in both databases, by a superuser.
+        superuser_in(&f.target)
+            .batch_execute(
+                "CREATE EXTENSION postgres_fdw SCHEMA public; CREATE EXTENSION pageinspect SCHEMA public;",
+            )
+            .unwrap();
+        superuser_in(&f.scratch).batch_execute(DECLARED).unwrap();
+        declare_extensions(
+            &f,
+            Some(r#"["postgres_fdw", "pg_stat_statements", "pageinspect"]"#),
+        );
+        let p = f.plan("plan.json");
+        assert!(
+            p["catalog"]["uncovered"].as_array().unwrap().is_empty(),
+            "{schema}: {p}"
+        );
+        let fdw = &p["catalog"]["objects"]["extension:postgres_fdw"];
+        assert_eq!(fdw["schema"], "public", "{schema}: {p}");
+        assert!(fdw["version"].is_string(), "{schema}: {p}");
+        let r = f.apply("plan.json", p["plan_digest"].as_str());
+        assert_eq!(r["outcome"], "pass", "{schema}: {r}");
+        let v = f.command("verify");
+        assert_eq!(v["outcome"], "pass", "{schema}: {v}");
+        if schema == "public" {
+            // Members in the managed schema are inspected and covered.
+            assert!(
+                v["catalog"]["objects"]["relation:pg_stat_statements"].is_object(),
+                "{v}"
+            );
+        }
+    }
+}
+
+/// #430: a declared extension owns what depends on its members internally,
+/// not just its members. tablefunc's composite types
+/// (`tablefunc_crosstab_2`, ...) and dblink's `dblink_pkey_results` are
+/// members, but their relations are not. Installed in `public` of both
+/// databases and declared, they leave scratch acceptable, and replay does
+/// not take them for the history's work: the plan migrates and verifies.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn declared_extensions_own_what_depends_on_their_members() {
+    for schema in ["app", "public"] {
+        let f = Fixture::with_schema(schema);
+        f.sql(
+            "0001_t.sql",
+            &format!("CREATE TABLE {schema}.t (id BIGINT PRIMARY KEY);\n"),
+        );
+        for db in [&f.target, &f.scratch] {
+            superuser_in(db)
+                .batch_execute(
+                    "CREATE EXTENSION tablefunc SCHEMA public; CREATE EXTENSION dblink SCHEMA public;",
+                )
+                .unwrap();
+        }
+        declare_extensions(&f, Some(r#"["tablefunc", "dblink"]"#));
+        let p = f.plan("plan.json");
+        assert!(
+            p["catalog"]["uncovered"].as_array().unwrap().is_empty(),
+            "{schema}: {p}"
+        );
+        let r = f.apply("plan.json", p["plan_digest"].as_str());
+        assert_eq!(r["outcome"], "pass", "{schema}: {r}");
+        let v = f.command("verify");
+        assert_eq!(v["outcome"], "pass", "{schema}: {v}");
+    }
+}
+
+/// #430: a declared extension's implicit casts do not block checks, as they
+/// do not block DDL: citext's, in `public` of both databases, with a check on
+/// an ordinary managed table.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn declared_extensions_casts_do_not_block_checks() {
+    let f = Fixture::new();
+    for db in [&f.target, &f.scratch] {
+        superuser_in(db)
+            .batch_execute("CREATE EXTENSION citext SCHEMA public")
+            .unwrap();
+    }
+    declare_extensions(&f, Some(r#"["citext"]"#));
+    f.sql(
+        "0001_accounts.sql",
+        "CREATE TABLE app.accounts (id BIGINT PRIMARY KEY, name TEXT);\n",
+    );
+    let p = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", p["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0002_active.sql",
+        "ALTER TABLE app.accounts ADD COLUMN active BOOLEAN NOT NULL DEFAULT true;",
+    );
+    std::fs::write(
+        f.root.path().join("migrations/0002_active.toml"),
+        "[ensures]\nactive = \"SELECT NOT EXISTS (SELECT 1 FROM app.accounts WHERE NOT active)\"\n",
+    )
+    .unwrap();
+    let p = f.plan("checked.json");
+    let r = f.apply("checked.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
+/// #430: with `public` managed, what a declared extension installs there is
+/// inspected, but its owner and grants are its installer's and are not
+/// compared, as for an extension's routines and types. Another superuser may
+/// install it in scratch.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn declared_extensions_installed_by_another_superuser_match() {
+    let f = Fixture::with_schema("public");
+    f.sql(
+        "0001_t.sql",
+        "CREATE TABLE public.t (id BIGINT PRIMARY KEY);\n",
+    );
+    let installer = format!("{}_inst", f.scratch);
+    let install = "CREATE EXTENSION pg_stat_statements SCHEMA public; CREATE EXTENSION tablefunc SCHEMA public;";
+    superuser_in(&f.target).batch_execute(install).unwrap();
+    let mut scratch = superuser_in(&f.scratch);
+    scratch
+        .batch_execute(&format!(
+            "CREATE ROLE {installer} SUPERUSER; SET ROLE {installer}; {install} RESET ROLE;"
+        ))
+        .unwrap();
+    declare_extensions(&f, Some(r#"["pg_stat_statements", "tablefunc"]"#));
+    let p = f.plan("plan.json");
+    let r = f.apply("plan.json", p["plan_digest"].as_str());
+    assert_eq!(r["outcome"], "pass", "{r}");
+    let v = f.command("verify");
+    assert_eq!(v["outcome"], "pass", "{v}");
+    assert!(
+        v["catalog"]["objects"]["relation:pg_stat_statements"].is_object(),
+        "{v}"
+    );
+    scratch
+        .batch_execute(&format!(
+            "REASSIGN OWNED BY {installer} TO CURRENT_USER; DROP OWNED BY {installer}; DROP ROLE {installer};"
+        ))
+        .unwrap();
+}
+
+/// #430: a declared extension must be in the scratch database as on the
+/// target. A version that differs is drift on the extension, by name; one
+/// missing from scratch, or installed where NTNT keeps its ledger, is
+/// refused by name; and on the target, one installed in `_ntnt` still fails
+/// ledger validation.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn declared_extensions_must_match_between_target_and_scratch() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_t.sql",
+        "CREATE TABLE app.t (id BIGINT PRIMARY KEY);\n",
+    );
+    declare_extensions(&f, Some(r#"["pg_stat_statements"]"#));
+    let mut target = superuser_in(&f.target);
+    let mut scratch = superuser_in(&f.scratch);
+    target
+        .batch_execute("CREATE EXTENSION pg_stat_statements SCHEMA public")
+        .unwrap();
+    // Missing from scratch: refused by name.
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_SCRATCH_MISMATCH");
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Scratch lacks the declared extension pg_stat_statements."),
+        "{d}"
+    );
+    // An older version in scratch: drift on the extension.
+    let older: String = scratch
+        .query_one(
+            "SELECT version FROM pg_available_extension_versions WHERE name='pg_stat_statements' AND version <> (SELECT default_version FROM pg_available_extensions WHERE name='pg_stat_statements') AND string_to_array(version,'.')::int[] >= '{1,8}' ORDER BY string_to_array(version,'.')::int[] DESC LIMIT 1",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    scratch
+        .batch_execute(&format!(
+            "CREATE EXTENSION pg_stat_statements VERSION '{older}' SCHEMA public"
+        ))
+        .unwrap();
+    let r = f.command("plan");
+    assert_eq!(diagnostic(&r, "DB_DRIFT")["code"], "DB_DRIFT");
+    assert!(
+        r["drift"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["object"] == "extension:pg_stat_statements"),
+        "{r}"
+    );
+    // The same version in another schema: drift on the extension too.
+    scratch
+        .batch_execute("DROP EXTENSION pg_stat_statements; CREATE SCHEMA monitoring; CREATE EXTENSION pg_stat_statements SCHEMA monitoring")
+        .unwrap();
+    let r = f.command("plan");
+    assert!(
+        r["drift"]["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["object"] == "extension:pg_stat_statements"),
+        "{r}"
+    );
+    // In scratch's _ntnt: refused by name.
+    scratch
+        .batch_execute("DROP EXTENSION pg_stat_statements; DROP SCHEMA monitoring; CREATE SCHEMA _ntnt; CREATE EXTENSION pg_stat_statements SCHEMA _ntnt")
+        .unwrap();
+    let r = f.command("plan");
+    assert!(
+        diagnostic(&r, "DB_SCRATCH_MISMATCH")["message"]
+            .as_str()
+            .unwrap()
+            .starts_with(
+                "The declared extension pg_stat_statements is installed in schema _ntnt in scratch"
+            ),
+        "{r}"
+    );
+    scratch
+        .batch_execute("DROP EXTENSION pg_stat_statements; DROP SCHEMA _ntnt; CREATE EXTENSION pg_stat_statements SCHEMA public")
+        .unwrap();
+    let p = f.plan("plan.json");
+    assert_eq!(
+        f.apply("plan.json", p["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    // On the target, a declared extension in _ntnt fails ledger validation.
+    target
+        .batch_execute("CREATE EXTENSION pageinspect SCHEMA _ntnt")
+        .unwrap();
+    declare_extensions(&f, Some(r#"["pg_stat_statements", "pageinspect"]"#));
+    scratch
+        .batch_execute("CREATE SCHEMA ext; CREATE EXTENSION pageinspect SCHEMA ext")
+        .unwrap();
+    let r = f.command("status");
+    assert!(
+        r["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "DB_LEDGER_UNKNOWN"),
+        "{r}"
+    );
+    // Declared, but where NTNT keeps its ledger: never covered.
+    assert_eq!(
+        r["catalog"]["uncovered"],
+        serde_json::json!(["extension:pageinspect"]),
+        "{r}"
+    );
+}
+
+/// #430: scratch's `public`, and a declared extension's own schema, may hold
+/// only what the declared extensions own: members, and what depends on a
+/// member internally or automatically (array and row types, indexes).
+/// Anything else there is refused before replay: a table, an operator over
+/// builtin functions in `public`, a sequence in the extension's schema.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn scratch_holds_only_what_declared_extensions_own() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_t.sql",
+        "CREATE TABLE app.t (id BIGINT PRIMARY KEY);\n",
+    );
+    declare_extensions(&f, Some(r#"["pg_stat_statements", "pageinspect"]"#));
+    let setup = "CREATE EXTENSION pg_stat_statements SCHEMA public; CREATE SCHEMA ext; CREATE EXTENSION pageinspect SCHEMA ext;";
+    superuser_in(&f.target).batch_execute(setup).unwrap();
+    let mut scratch = superuser_in(&f.scratch);
+    scratch.batch_execute(setup).unwrap();
+    f.plan("before.json");
+    for (stray, undo) in [
+        ("CREATE TABLE public.stray (id int)", "DROP TABLE public.stray"),
+        (
+            "CREATE OPERATOR public.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = pg_catalog.int4eq)",
+            "DROP OPERATOR public.=== (int, int)",
+        ),
+        // A sequence has no row type: only the relation check sees it.
+        ("CREATE SEQUENCE ext.stray", "DROP SEQUENCE ext.stray"),
+        // Every kind of object counts in a declared extension's schema too.
+        (
+            "CREATE OPERATOR ext.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = pg_catalog.int4eq)",
+            "DROP OPERATOR ext.=== (int, int)",
+        ),
+    ] {
+        scratch.batch_execute(stray).unwrap();
+        let r = f.command("plan");
+        assert_eq!(
+            diagnostic(&r, "DB_SCRATCH_NOT_EMPTY")["code"],
+            "DB_SCRATCH_NOT_EMPTY",
+            "{stray}"
+        );
+        scratch.batch_execute(undo).unwrap();
+    }
+    let p = f.plan("plan.json");
+    assert_eq!(
+        f.apply("plan.json", p["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+}
+
 /// #430 (pg-09): the unprivileged roles NTNT requires can create only
 /// trusted extensions. Creating an untrusted one fails with a diagnostic
 /// that names the statement and the extension and explains trusted and
