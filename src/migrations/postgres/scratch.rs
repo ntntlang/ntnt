@@ -831,6 +831,24 @@ impl Postgres {
                 changed,
             ));
         }
+        // Cleanup restores the scratch database's connection limit, but a
+        // replay stopped before cleanup would leave a limit of 0, which
+        // refuses every connection of the scratch role: no later plan could
+        // connect to recover scratch.
+        let limit: i32 = self
+            .rows(
+                "SELECT d.datconnlimit FROM pg_catalog.pg_database d WHERE d.datname=pg_catalog.current_database()",
+                &[],
+            )
+            .await?[0]
+            .get(0);
+        if limit == 0 {
+            return Err(attributed(
+                "DB_REPLAY_UNSUPPORTED",
+                "Replaying this migration set the scratch database's connection limit to 0 (ALTER DATABASE ... CONNECTION LIMIT 0, in a DO block or function). Cleanup would restore it, but a replay stopped before cleanup would leave scratch refusing every connection of the scratch role, so no later plan, status or verify could connect to clean it up; on the target it would refuse the application's connections. Make such changes outside the migration history.",
+                vec![],
+            ));
+        }
         let foreign: Vec<String> = self
             .foreign_objects(scope.marker.public.oid)
             .await?
