@@ -16,5 +16,11 @@ SQL runs, while PostgreSQL still holds its write locks. A newly visible key
 rolls back that migration without recording it as applied; earlier migrations
 stay committed (#447).
 
+`ntnt db plan` does less repeated work when many PostgreSQL tables have the
+same shape. In a PostgreSQL 17 test, the default deadline used to expire
+before all 1,024 single-table migrations could be planned; the same history
+now plans in 84 seconds, with unchanged fingerprints. Live target checks and
+deadlines have not changed (#421).
+
 See [NTNT v0.6.5](v0.6.5.md) for the latest release announcement and upgrade
 guidance.

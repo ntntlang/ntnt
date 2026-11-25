@@ -9,6 +9,7 @@ use std::time::Duration;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::{Client, Config, NoTls, Row};
 
+mod replay_catalog;
 mod restore;
 mod scratch;
 
@@ -599,12 +600,7 @@ impl Postgres {
         args: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> Result<Vec<Row>> {
         let rows = bounded(self.client.query(sql, args)).await?;
-        if rows.len() > 10000 {
-            return Err(Diagnostic::new(
-                "DB_CATALOG_LIMIT",
-                "Inspection exceeded 10,000 rows per object class.",
-            ));
-        }
+        check_catalog_limit(rows.len())?;
         Ok(rows)
     }
     pub async fn begin_readonly(&self) -> Result<()> {
@@ -1939,6 +1935,41 @@ fn canonical_roles(value: &mut Value, role: &str) {
         _ => (),
     }
 }
+#[cfg(test)]
+thread_local! { static CATALOG_VALUES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+fn check_catalog_limit(count: usize) -> Result<()> {
+    if count > 10_000 {
+        Err(Diagnostic::new(
+            "DB_CATALOG_LIMIT",
+            "Inspection exceeded 10,000 rows per object class.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn ambiguous_key(key: String) -> Diagnostic {
+    Diagnostic::new(
+        "DB_CATALOG_AMBIGUOUS",
+        "Two catalog objects share one key; inspection is incomplete.",
+    )
+    .with_objects(&[key])
+}
+
+/// Exactly the value used by full inspection and stable prefix fingerprints.
+fn catalog_value(kind: &str, mut value: Value, role: &str) -> (Value, Option<Value>) {
+    #[cfg(test)]
+    CATALOG_VALUES.with(|n| n.set(n.get() + 1));
+    canonical_roles(&mut value, role);
+    let (mut stable, mut stored) = restore::restore_stable(kind, value);
+    protect_definitions(&mut stable);
+    if let Some(v) = stored.as_mut() {
+        protect_definitions(v);
+    }
+    (stable, stored)
+}
+
 impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":2,"server_version_num":version,
@@ -1967,13 +1998,8 @@ impl RelationalAdapter for Postgres {
             };
             for r in rows {
                 let name: String = r.get(0);
-                let mut value: Value = r.get(1);
                 let supported: bool = r.get(2);
-                canonical_roles(&mut value, role);
-                // Compared as a dump and restore leaves it; plans saved
-                // before #460 fingerprinted the stored form.
-                let (mut value, stored) = restore::restore_stable(kind, value);
-                protect_definitions(&mut value);
+                let (value, stored) = catalog_value(kind, r.get(1), role);
                 // Keys in the managed schema stay unqualified; keys anywhere
                 // else lead with the quoted schema name.
                 let key = match r.get::<_, Option<String>>(3) {
@@ -1984,14 +2010,9 @@ impl RelationalAdapter for Postgres {
                     catalog.uncovered.push(key.clone());
                 }
                 if catalog.objects.contains_key(&key) {
-                    return Err(Diagnostic::new(
-                        "DB_CATALOG_AMBIGUOUS",
-                        "Two catalog objects share one key; inspection is incomplete.",
-                    )
-                    .with_objects(&[key]));
+                    return Err(ambiguous_key(key));
                 }
-                if let Some(mut stored) = stored {
-                    protect_definitions(&mut stored);
+                if let Some(stored) = stored {
                     catalog.stored.insert(key.clone(), stored);
                 }
                 catalog.objects.insert(key, value);
@@ -2199,6 +2220,54 @@ mod tests {
             capabilities["operations"]["concurrent_indexes"],
             "lone_named_create_index_concurrently"
         );
+    }
+
+    /// Scratch must fingerprint all keys, but not decode and canonicalize an
+    /// identical native definition once per table at every prefix (#421).
+    #[test]
+    #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+    fn repeated_table_shapes_inspect_linearly_many_catalog_values() {
+        use super::super::inventory::CatalogDigests;
+        let url =
+            std::env::var("NTNT_DB_TEST_ADMIN").expect("explicit disposable fixture URL required");
+        let config: Config = url.parse().unwrap();
+        let endpoint = Endpoint {
+            connection_secret: "FIXTURE".into(),
+            database: config.get_dbname().unwrap().into(),
+            role: config.get_user().unwrap().into(),
+        };
+        let secret = crate::interpreter::SecretValue::new("FIXTURE", url).unwrap();
+        let schema = format!("replay_{}", uuid::Uuid::new_v4().simple());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let pg = Postgres::connect(&secret, &endpoint).await.unwrap();
+                pg.begin_replay_step().await.unwrap();
+                pg.batch(&format!("CREATE SCHEMA {schema}")).await.unwrap();
+                let mut digests = CatalogDigests::default();
+                let mut values = 0;
+                for i in 1..=16 {
+                    pg.batch(&format!("CREATE TABLE {schema}.t{i}(id integer)"))
+                        .await
+                        .unwrap();
+                    let expected = pg.catalog(&schema, &[], &[], &endpoint.role).await.unwrap();
+                    CATALOG_VALUES.with(|n| n.set(0));
+                    let (uncovered, fp) = pg
+                        .replay_catalog_state(&schema, &[], &[], &endpoint.role, Some(&mut digests))
+                        .await
+                        .unwrap();
+                    values += CATALOG_VALUES.with(|n| n.get());
+                    assert_eq!(fp.unwrap(), super::super::inventory::json_digest(&expected));
+                    assert_eq!(uncovered, expected.uncovered);
+                    if i == 8 || i == 16 {
+                        // The schema, a table shape, and a column shape per state.
+                        assert_eq!(values, 3 * i, "definitions inspected for {i} prefixes");
+                    }
+                }
+                pg.rollback().await.unwrap();
+            });
     }
 
     #[test]
