@@ -1727,6 +1727,8 @@ struct RebuildGuard {
     counts: std::collections::BTreeMap<String, i64>,
     /// The table's AUTOINCREMENT counter (`sqlite_sequence`), if it has one.
     sequence: Option<i64>,
+    /// The counters of every other table (`RebuildGuard::counters`).
+    counters: std::collections::BTreeMap<String, Option<i64>>,
 }
 impl RebuildGuard {
     fn counts(state: &State) -> Result<std::collections::BTreeMap<String, i64>> {
@@ -1773,6 +1775,33 @@ impl RebuildGuard {
             row.and_then(|row| row[1].as_i64()).unwrap_or(0),
         ))
     }
+    /// The AUTOINCREMENT counter SQLite uses for each table but `table`:
+    /// the first `sqlite_sequence` row of its name, the one SQLite reads
+    /// and updates (#457 review). A migration in rebuild mode may write
+    /// sqlite_sequence, so these must not go back either.
+    fn counters(
+        state: &State,
+        table: &str,
+    ) -> Result<std::collections::BTreeMap<String, Option<i64>>> {
+        let mut counters = std::collections::BTreeMap::new();
+        if integer(
+            &state.conn,
+            "SELECT count(*) FROM main.sqlite_schema WHERE type='table' AND name='sqlite_sequence'",
+        )? == 0
+        {
+            return Ok(counters);
+        }
+        for row in rows(
+            &state.conn,
+            "SELECT s.name, CASE WHEN typeof(s.seq) = 'integer' THEN s.seq END FROM main.sqlite_sequence s WHERE s.rowid = (SELECT min(f.rowid) FROM main.sqlite_sequence f WHERE f.name = s.name) AND s.name <> ?1 ORDER BY s.name",
+            &[&table],
+        )? {
+            if let Some(name) = row[0].as_str() {
+                counters.insert(name.to_owned(), row[1].as_i64());
+            }
+        }
+        Ok(counters)
+    }
     fn capture(state: &mut State, table: &str) -> Result<Self> {
         let catalog = state.catalog()?;
         if !catalog.uncovered.is_empty() {
@@ -1805,11 +1834,13 @@ impl RebuildGuard {
             })
             .collect();
         let (sequence, _) = Self::sequence(state, &selected)?;
+        let counters = Self::counters(state, &selected)?;
         Ok(Self {
             table: selected,
             required,
             counts,
             sequence,
+            counters,
         })
     }
     /// Refuse a rebuild that did not keep what it must, naming each rule it
@@ -1904,6 +1935,27 @@ impl RebuildGuard {
                 objects.push(format!("table:{}", quote(rebuilt)));
             }
         }
+        // The other tables keep their counters too (#457 review): one that
+        // went back, or away, would give new rows the ids of deleted ones.
+        let mut counters = false;
+        let after = Self::counters(state, &self.table)?;
+        for (name, before) in &self.counters {
+            let Some(before) = *before else { continue };
+            if !counts.contains_key(name) {
+                continue;
+            }
+            let now = after.get(name).copied().flatten();
+            let broke = match now {
+                Some(now) if now < before => Some(format!("the AUTOINCREMENT counter of table `{name}` went back from {before} to {now} (sqlite_sequence), so SQLite would give new rows the ids of deleted ones")),
+                None if autoincrement(state, name)? => Some(format!("table `{name}` lost its AUTOINCREMENT counter (sqlite_sequence held {before} for it and now holds none), so SQLite would give new rows the ids of deleted ones")),
+                _ => None,
+            };
+            if let Some(broke) = broke {
+                broken.push(broke);
+                counters = true;
+                objects.push(format!("table:{}", quote(name)));
+            }
+        }
         if !catalog.uncovered.is_empty() {
             broken.push("the rebuilt catalog has objects outside supported coverage".to_owned());
             objects.extend(catalog.uncovered.iter().cloned());
@@ -1949,6 +2001,9 @@ impl RebuildGuard {
             );
             advice.push(format!("Before the DROP TABLE, copy the counter to the replacement table: `UPDATE sqlite_sequence SET seq = (SELECT max(seq) FROM sqlite_sequence WHERE name IN ('{from}', '{to}')) WHERE name='{to}'; DELETE FROM sqlite_sequence WHERE name='{to}' AND rowid <> (SELECT min(rowid) FROM sqlite_sequence WHERE name='{to}'); INSERT INTO sqlite_sequence (name, seq) SELECT '{to}', max(seq) FROM sqlite_sequence WHERE name='{from}' AND NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name='{to}') HAVING count(*) > 0;`. A statement that writes the replacement gives it a counter row, even when it copies no row, and each INSERT into sqlite_sequence adds one more. The UPDATE raises every counter row of the replacement to the highest counter of both tables, the DELETE keeps only the first of those rows, the one SQLite reads, and the INSERT adds a row only when the replacement has none, so the replacement keeps one counter, never lower than that of `{rebuilt}` or its own."));
         }
+        if counters {
+            advice.push("Leave the sqlite_sequence rows of the other tables as they were: a rebuild may raise only the rebuilt table's counter.".to_owned());
+        }
         if !catalog.uncovered.is_empty() {
             advice.push("Keep the rebuilt catalog within the coverage in docs/DATABASE_MIGRATIONS.md, Supported SQL and catalog coverage.".to_owned());
         }
@@ -1985,6 +2040,30 @@ fn subject(key: &str) -> String {
 /// `name` inside a SQL string literal.
 fn literal(name: &str) -> String {
     name.replace('\'', "''")
+}
+
+/// Whether the open transaction of `conn` holds foreign-key violations
+/// that SQLite checks only at COMMIT (`SQLITE_DBSTATUS_DEFERRED_FKS`).
+fn deferred_foreign_keys(conn: &Connection) -> Result<bool> {
+    let (mut current, mut highwater) = (0, 0);
+    // SAFETY: `conn` holds an open database handle for the whole call, and
+    // sqlite3_db_status only writes the two integers it is given.
+    let code = unsafe {
+        rusqlite::ffi::sqlite3_db_status(
+            conn.handle(),
+            rusqlite::ffi::SQLITE_DBSTATUS_DEFERRED_FKS,
+            &mut current,
+            &mut highwater,
+            0,
+        )
+    };
+    if code != rusqlite::ffi::SQLITE_OK {
+        return Err(Diagnostic::new(
+            "DB_RUNTIME",
+            "SQLite could not report its pending deferred foreign-key violations.",
+        ));
+    }
+    Ok(current != 0)
 }
 
 /// Whether table `name`'s stored definition declares AUTOINCREMENT.
@@ -2345,6 +2424,25 @@ impl Sqlite {
                 s.dropped = Some((migration.name.clone(), dropped));
                 s.history(None)?;
                 s.foreign_keys()?;
+                // Replay never commits, so SQLite never checks there the
+                // deferred foreign keys a migration leaves broken; the target
+                // does at its COMMIT (#458 review). Fail where it would.
+                if replay && deferred_foreign_keys(&s.conn)? {
+                    let tables = s
+                        .dropped
+                        .as_ref()
+                        .map(|(_, t)| t.clone())
+                        .unwrap_or_default();
+                    let mut d = sql_error(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+                        Some("FOREIGN KEY constraint failed".into()),
+                    ));
+                    d.message = format!("SQLite would not commit the migration: {}", d.message);
+                    if let Some(advice) = dropped_parent_advice(&s.conn, None, &tables, true) {
+                        d.next_action = advice;
+                    }
+                    return Err(d);
+                }
                 if let Some(guard) = guard {
                     guard.verify(s)?;
                 }

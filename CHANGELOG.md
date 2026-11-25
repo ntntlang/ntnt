@@ -20,6 +20,20 @@
   record `canonicalization_version` 2 and new fingerprints, so a new plan
   needs approving; other histories keep their fingerprints and plan digests,
   and plans saved by earlier versions still migrate (#460).
+- `ntnt db` (PostgreSQL, review follow-ups): a check that compares a value it
+  computes (`id + 1 = 2`, `count(*) = 0`) is refused, like a direct column
+  comparison, when an operator outside `pg_catalog` could take the value's type;
+  unquoted names in checks fold like PostgreSQL's (ASCII letters only in UTF-8),
+  so a citext column named `Émail` is screened; checks may read columns of types
+  the history created outside the managed scope; a domain whose constraints use
+  an uninspected operator outside the scope is uncovered; only PostgreSQL's
+  row-security refusal of a check's read is reported as `DB_CHECK_ROW_SECURITY`;
+  `DB_EXTENSION_PRIVILEGE` names no statement for `CREATE EXTENSION ... VERSION`;
+  declared-extension drift lists a relation under the extension that owns it.
+- `ntnt db` (SQLite, review follow-ups): `sqlite_rebuild` also refuses a
+  rebuild that lowers or removes another table's AUTOINCREMENT counter, and
+  replay checks deferred foreign keys at the end of each migration, so `plan`
+  refuses what the target's COMMIT would.
 - `ntnt db` (PostgreSQL): enums, domains and composite types plan, migrate and
   verify, in the managed schema and in schemas the history creates; a change
   to one outside a migration is drift (#430).

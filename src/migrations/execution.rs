@@ -474,11 +474,12 @@ async fn checks(
                 // Only checks that actually run count as executed.
                 let count = report["assertions"]["executed"].as_u64().unwrap_or(0);
                 report["assertions"]["executed"] = json!(count + 1);
+                // Only PostgreSQL's row-security refusal is explained so: a
+                // view may name a table it does not read, and another
+                // SQLSTATE 42501 (a missing SELECT privilege) stays the
+                // server's (#457 review).
                 db.check(sql, schema).await.map_err(|d| {
-                    if !blocked.is_empty()
-                        && d.code == "DB_POSTGRES"
-                        && d.message.contains("(SQLSTATE 42501)")
-                    {
+                    if !blocked.is_empty() && d.code == "DB_CHECK_ROW_SECURITY" {
                         super::row_security_refusal(name, phase, role, &blocked, true)
                     } else {
                         d

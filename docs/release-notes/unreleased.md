@@ -235,6 +235,26 @@
 Catalogs that use none of these keep their fingerprints, so saved plans and
 applied history stay valid.
 
+### Review follow-ups: checks, coverage and diagnostics
+
+- **Computed comparisons.** A check that compares a value it computes, such
+  as `id + 1 = 2` or `count(*) = 0`, is screened like a column comparison:
+  each column the value is computed from, and the types the computation can
+  give it, are checked against operators of that name outside `pg_catalog`.
+- **Identifier folding.** Unquoted names in checks fold as PostgreSQL folds
+  them, only ASCII letters in a UTF-8 database, so a citext column named
+  `Émail` is screened and a schema qualifier is not mistaken for the managed
+  schema.
+- **Coverage.** Checks may read columns whose types the history created
+  outside the managed scope (an enum in `public`); a domain whose constraints
+  use an operator outside the scope that inspection does not compare is
+  uncovered, as one that calls such a routine is.
+- **Diagnostics.** Only PostgreSQL's row-security refusal of a check's read is
+  `DB_CHECK_ROW_SECURITY`; another SQLSTATE 42501 stays `DB_POSTGRES`.
+  `DB_EXTENSION_PRIVILEGE` names no statement for `CREATE EXTENSION ...
+  VERSION`. Declared-extension drift lists a relation under the extension
+  that owns it.
+
 ### Changed: capabilities keys
 
 `capabilities.inspection` in the JSON reports names what PostgreSQL inspection
@@ -315,6 +335,12 @@ A script that reads these keys must use the new names (#430).
   saved when `plan` stopped before it could make a plan (outcome `fail`, no
   `plan_digest`) says the plan is blocked instead of calling it edited. The
   quick start checks a plan's outcome before approving its digest (#427).
+- **Rebuilds and counters.** `sqlite_rebuild` also refuses a rebuild that
+  lowers or removes another table's AUTOINCREMENT counter in
+  `sqlite_sequence`.
+- **Deferred foreign keys in replay.** Replay never commits, so it now checks
+  deferred foreign keys at the end of each migration: when the history's rows
+  show it, `plan` refuses a drop that the target's COMMIT would fail.
 
 ## Security
 
