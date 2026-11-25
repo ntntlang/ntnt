@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+No changes recorded since 0.6.5.
+
+## 0.6.5
+
+See the [versioned announcement and upgrade guidance](docs/release-notes/v0.6.5.md).
+
 ### Security
 
 - Update `cookie` to 0.18.3 for RUSTSEC-2026-0594 (#456).
