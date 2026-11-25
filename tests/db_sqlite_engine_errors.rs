@@ -345,8 +345,8 @@ fn sqlite_read_only_target_is_named_and_the_advice_works() {
     let r = f.apply("writable.json", p["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
 }
-/// The parser gate names the statement it stops at and why: a syntax error
-/// near a keyword, identifier or symbol (never a literal), the token limit,
+/// Native preparation and migration policy name the statement and cause:
+/// a syntax error near a keyword, identifier or symbol (never a literal),
 /// an authored PRAGMA or a construct outside the subset (#424 sq-05, cli-20).
 #[test]
 fn sqlite_parser_gate_names_the_statement_and_the_cause() {
@@ -377,29 +377,12 @@ fn sqlite_parser_gate_names_the_statement_and_the_cause() {
         "CREATE TABLE t (a TEXT);\nCREATE TRIGGER g AFTER INSERT ON t BEGIN DELETE FROM t WHERE a IS NULL; DELETE FROM t WHERE a = 'y'; END;\nCREAT TABLE u (id INTEGER);\n",
     );
     assert_eq!(message(&d), "Statement 3 has a syntax error near `CREAT`.");
-    // A UTF-8 byte order mark.
-    let d = refusal("\u{feff}CREATE TABLE a (id INTEGER PRIMARY KEY);\n");
-    assert_eq!(
-        message(&d),
-        "Statement 1 has a syntax error near a UTF-8 byte order mark (BOM) at the start of the file."
-    );
     // Near a literal: the literal is not shown.
     let d = refusal("CREATE TABLE t (a TEXT);\nINSERT INTO t VALUES ('rowsecret-syntax' 5);\n");
     assert_eq!(
         message(&d),
         "Statement 2 has a syntax error near a literal."
     );
-    // The token limit, crossed in statement 316: each line is 13 tokens.
-    let mut sql = String::from("CREATE TABLE t (a INTEGER);\n");
-    for _ in 0..400 {
-        sql.push_str("INSERT INTO t VALUES (1);\n");
-    }
-    let d = refusal(&sql);
-    assert!(
-        message(&d).starts_with("Statement 316 passes the 4096-token limit"),
-        "{d}"
-    );
-    assert!(next_action(&d).starts_with("Split the migration"), "{d}");
     // An authored PRAGMA is named; its value is not shown.
     let d = refusal("CREATE TABLE a (id INTEGER PRIMARY KEY);\nPRAGMA user_version = 31337;\n");
     assert_eq!(
