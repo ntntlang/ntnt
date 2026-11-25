@@ -13,6 +13,11 @@ pub(crate) struct Catalog {
     /// serialized; empty without declared extensions.
     #[serde(skip)]
     pub owned: BTreeSet<String>,
+    /// PostgreSQL: for each key of `owned` whose declared extension is
+    /// known, that extension (#458 review: a relation names none). Never
+    /// serialized.
+    #[serde(skip)]
+    pub owners: BTreeMap<String, String>,
     /// PostgreSQL: for each object whose restore-stable value (#460,
     /// `postgres::restore`) is not the value as PostgreSQL stores it, the
     /// stored value, which plans with canonicalization_version 1

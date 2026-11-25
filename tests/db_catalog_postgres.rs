@@ -2021,6 +2021,25 @@ CREATE OPERATOR app.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = app.int
             "SELECT EXISTS (SELECT 1 FROM app.users WHERE id = 1)",
             &["compares column id of app.users (type integer) with =", "app.=(integer,integer)"][..],
         ),
+        // #457 review: a computed operand meets the operator too, by the
+        // columns it is computed from and by what computes it.
+        (
+            "CREATE FUNCTION app.int_eq(integer, integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1 <> $2';
+CREATE OPERATOR app.= (LEFTARG = integer, RIGHTARG = integer, FUNCTION = app.int_eq);
+",
+            "SELECT EXISTS (SELECT 1 FROM app.users WHERE id + 1 = 2)",
+            &[
+                "compares column id of app.users (type integer) with =",
+                "compares id + ? over app.users with =, and pg_catalog's + can give it type integer, which app.=(integer,integer) takes",
+            ][..],
+        ),
+        (
+            "CREATE FUNCTION app.count_eq(bigint, integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1 <> $2';
+CREATE OPERATOR app.= (LEFTARG = bigint, RIGHTARG = integer, FUNCTION = app.count_eq);
+",
+            "SELECT count(*) = 0 FROM app.users WHERE id < 0",
+            &["compares count(*) over app.users with =, and count(*) can give it type bigint, which app.=(bigint,integer) takes"][..],
+        ),
         (
             "CREATE FUNCTION app.users_eq(app.users, app.users) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false';
 CREATE OPERATOR app.= (LEFTARG = app.users, RIGHTARG = app.users, FUNCTION = app.users_eq);
@@ -2049,6 +2068,28 @@ CREATE OPERATOR app.= (LEFTARG = app.users, RIGHTARG = app.users, FUNCTION = app
         assert_eq!(r["progress"][1]["state"], "failed", "{r}");
         assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0, "{r}");
     }
+}
+
+/// #457 review: a column whose type the history created outside the
+/// managed scope, which inspection covers by its key, does not stop the
+/// checks that read its table: an enum, an array of one and a composite
+/// type in `public`.
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn checks_read_columns_of_types_the_history_created_outside_the_scope() {
+    let (plan, r) = citext_checks(
+        "CREATE TYPE public.mood AS ENUM ('ok', 'sad');
+CREATE TYPE public.pair AS (a integer, b integer);
+CREATE TABLE app.items (id integer, mood public.mood, moods public.mood[], pair public.pair);
+",
+        &[(
+            "items_set",
+            "SELECT NOT EXISTS (SELECT 1 FROM app.items WHERE mood IS NULL AND moods IS NULL AND pair IS NULL)",
+        )],
+    );
+    assert!(plan["plan"]["check_warnings"].is_null(), "{plan}");
+    assert_eq!(r["outcome"], "pass", "{r}");
+    assert_eq!(r["assertions"]["executed"], 1, "{r}");
 }
 
 /// #456: a comparison on a builtin-typed column of a table that also has
