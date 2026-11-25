@@ -87,6 +87,89 @@
   with a bare SQLSTATE 42501. Support for extensions that a superuser installs
   remains open in #430.
 
+- **Replay commits each migration on scratch, as `migrate` does on the target.**
+  Replay used to run the whole history in one rollback-only transaction. A
+  history whose migration adds an enum value with `ALTER TYPE ... ADD VALUE`
+  (as Prisma generates) and whose next migration uses it could never plan on
+  PostgreSQL 16 (SQLSTATE 55P04); it now plans, migrates and verifies on 16,
+  17 and 18. A migration that adds a value and uses it in the same script
+  used to plan on 17 and 18 and then fail at `migrate`; it now fails at plan
+  with `DB_ENUM_VALUE_UNCOMMITTED`. Each migration runs in a `READ COMMITTED`
+  transaction with the target's settings and commits (#430).
+- **Scratch is cleaned up, fail-safe.** Replay commits a marker (schema
+  `_ntnt_replay`) before the first migration and, whatever the outcome, drops
+  what the scratch role owns with `DROP OWNED`, restores `public`'s owner,
+  privileges and comment, and checks scratch is empty again. A plan after one
+  that was killed between migrations cleans up its leftovers when only the
+  scratch role owns them, and reports `scratch.recovered`; without the marker,
+  or with another role's objects, scratch is refused with
+  `DB_SCRATCH_NOT_EMPTY` as before and left untouched. A failed cleanup is
+  `DB_SCRATCH_CLEANUP` (#430).
+- **Recovery drops only what it can prove the unfinished replay committed.**
+  The marker is bound to the database's OID and the cluster's system
+  identifier, and records each transaction of the replay that wrote the
+  catalog, in that transaction. A plan recovers only when every catalog row in
+  scratch was last written by one of them and scratch holds no `_ntnt` ledger;
+  otherwise it refuses with `DB_SCRATCH_NOT_EMPTY`, names why, and drops
+  nothing. A database another project uses as its target, reached through a
+  misconfigured scratch, is therefore never wiped, and that project's
+  `status`, `plan`, `verify` and `migrate` refuse a target holding the marker
+  with `DB_TARGET_IS_SCRATCH` (#430).
+- **Replay has its own deadline.** It stops at the inspection deadline, cancels
+  the running statement, and cleanup still gets 30 seconds; `DB_TIMEOUT` says
+  scratch may keep leftovers for the next plan to recover. `scratch.cleanup`
+  is `not_needed` when nothing was committed. Cleanup drops nothing unless it
+  holds the replay lock, and a committed marker that is gone is
+  `DB_SCRATCH_CLEANUP` (#430).
+- **Cleanup keeps to its limits.** Each of its locks waits at most 2 seconds,
+  `DROP OWNED` runs at most 10, and cleanup as a whole fits its 30 seconds. A
+  session that holds a lock on a table the replay committed (an open
+  transaction that read it, say) makes cleanup fail fast with
+  `DB_SCRATCH_CLEANUP` naming that session's PID and role; the marker stays,
+  and the next plan, status or verify recovers once the session is gone. A
+  wait that autovacuum caused is tried again, up to three times (#430).
+- **Concurrent plans on one scratch database wait for each other** instead of
+  interleaving: a session advisory lock covers each replay, a second plan,
+  status or verify waits up to `migrator_wait_seconds` and then fails with
+  `DB_SCRATCH_BUSY`. A migration that releases the lock
+  (`pg_advisory_unlock_all()`) is refused before it commits, and a killed
+  replay's leftovers wait until no other session of the scratch role is
+  connected (`DB_SCRATCH_BUSY`) (#430).
+- **Cleanup restores the scratch database and role.** Its privileges
+  (compared as sets), connection limit, comment and settings, and the scratch
+  role's settings, are recorded in the marker and restored, so histories that
+  run `ALTER DATABASE current_database() SET ...` or `GRANT`/`REVOKE CONNECT`
+  in a `DO` block, or recreate `public` for `pg_database_owner`, plan with the
+  same digests as before (#430).
+- **Changes cleanup cannot undo are refused before they commit**, with
+  `DB_REPLAY_UNSUPPORTED` naming the migration: passwords (PostgreSQL's write
+  counters also count one an exception block rolled back), memberships, role
+  attributes and comments, other databases, objects given to another role, and
+  a session left acting as another role (#430). So are a connection limit of 0
+  on scratch and a `REVOKE CONNECT`, from the scratch role or from `PUBLIC`
+  when the role connects through it, that leaves the scratch role unable to
+  connect; the message names whose grant was revoked. Cleanup would restore
+  both, but a replay stopped before cleanup would leave no way to connect and
+  clean scratch up. A `GRANT` or `REVOKE CONNECT` that keeps the role
+  connectable plans as before, with the same digests.
+- **`_ntnt_replay` cannot be the managed schema**, like `_ntnt`: `DB_CONFIG`
+  says both are NTNT's own (the ledger and replay's marker in scratch), where a
+  plan used to fail on a duplicate schema (#430).
+- **Three new scratch requirements:** the scratch role may hold no privileges
+  on objects it does not own other than on `public` (`DROP OWNED` would revoke
+  them), and `track_counts` must be on, as it is by default. Otherwise plans
+  fail with `DB_SCRATCH_UNSAFE` and change nothing. Before replay the scratch
+  role must also own nothing in scratch but `public`, such as a large object
+  or a publication, which the emptiness check did not look for: `DROP OWNED`
+  would drop it. Such a scratch is refused with `DB_SCRATCH_NOT_EMPTY` and
+  kept (#430).
+- Same-named constraints with different `INITIALLY DEFERRED` defaults no
+  longer stop replay with `DB_REPLAY_UNSUPPORTED` (#430).
+- `capabilities.operations.transactional_script_replay` now reads
+  `per_migration_commits_on_scratch` instead of `rollback_only_scratch`.
+  Capabilities feed no digest: plans saved by earlier 0.6.x builds stay valid,
+  and accepted histories keep their plan digests and fingerprints.
+
 Catalogs that use none of these keep their fingerprints, so saved plans and
 applied history stay valid.
 

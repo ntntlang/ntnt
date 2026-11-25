@@ -276,15 +276,20 @@ impl Adapter {
             Self::Sqlite(db) => db.commit().await,
         }
     }
+    /// PostgreSQL waits up to `wait` for another replay of the same scratch
+    /// database and commits each replayed migration, so the caller must end
+    /// with `cleanup_scratch`, whatever happens. SQLite keeps one rollback-only
+    /// transaction.
     pub async fn prepare_scratch(
         &self,
         target: &Identity,
         endpoint: &Endpoint,
         schema: &str,
+        wait: Duration,
     ) -> Result<Identity> {
         match (self, target) {
             (Self::Postgres(pg), Identity::Postgres(target)) => pg
-                .prepare_scratch(target, endpoint, schema)
+                .prepare_scratch(target, endpoint, schema, wait)
                 .await
                 .map(Identity::Postgres),
             (Self::Sqlite(db), Identity::Sqlite(target)) => {
@@ -294,6 +299,45 @@ impl Adapter {
                 "DB_SCRATCH_MISMATCH",
                 "Scratch and target engines differ.",
             )),
+        }
+    }
+    /// PostgreSQL: the replay whose leftovers `prepare_scratch` cleaned up.
+    pub fn scratch_recovered(&self) -> Option<Value> {
+        match self {
+            Self::Postgres(pg) => pg.scratch_recovered(),
+            Self::Sqlite(_) => None,
+        }
+    }
+    /// PostgreSQL opens the transaction one replayed migration commits in,
+    /// set up as the target's; SQLite replays in its one transaction.
+    pub async fn begin_replay_step(&self) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.begin_replay_step().await,
+            Self::Sqlite(_) => Ok(()),
+        }
+    }
+    /// PostgreSQL refuses what `migration` did that cleanup could not undo,
+    /// then commits it.
+    pub async fn finish_replay_step(&self, migration: Option<&Migration>) -> Result<()> {
+        match self {
+            Self::Postgres(pg) => pg.finish_replay_step(migration).await,
+            Self::Sqlite(_) => Ok(()),
+        }
+    }
+    /// After replay, on every exit: PostgreSQL drops what the replay
+    /// committed in scratch and checks it is empty again, false when it had
+    /// committed nothing; SQLite rolls back.
+    pub async fn cleanup_scratch(&self) -> Result<bool> {
+        match self {
+            Self::Postgres(pg) => pg.cleanup_scratch().await,
+            Self::Sqlite(db) => db.rollback().await.map(|()| true),
+        }
+    }
+    /// PostgreSQL cancels the statement the scratch session is running,
+    /// which replay's deadline interrupted, before cleanup.
+    pub async fn cancel_running(&self) {
+        if let Self::Postgres(pg) = self {
+            pg.cancel_running().await;
         }
     }
     /// `limit` bounds the migration on a target: each PostgreSQL statement, or

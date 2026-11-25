@@ -861,11 +861,20 @@ impl CapturedInputs {
                 invalid("Unknown or invalid database configuration field.")
             }
         })?;
+        // NTNT's own schemas: the ledger, and the replay marker that
+        // replay creates in scratch before the managed schema.
+        if config.engine == "postgresql"
+            && ["_ntnt", "_ntnt_replay"].contains(&config.schema.as_str())
+        {
+            return Err(invalid(&format!(
+                "[databases.{database_name}] schema = \"{}\" names a schema NTNT reserves: _ntnt holds its migration ledger and _ntnt_replay marks a replay in the scratch database, so neither can be the managed schema. Use `public` or another schema.",
+                config.schema
+            )));
+        }
         match config.engine.as_str() {
             "postgresql"
                 if identifier(&config.schema)
-                    && !["information_schema", "_ntnt"]
-                        .contains(&config.schema.as_str())
+                    && config.schema != "information_schema"
                     && !config.schema.starts_with("pg_") => {}
             "sqlite" if config.schema == "main" => (),
             _ => return Err(invalid(
@@ -1227,6 +1236,43 @@ role="target_role"
         )
         .unwrap();
         root
+    }
+    /// NTNT's own schemas cannot be the managed schema: `_ntnt` holds the
+    /// ledger, and replay creates `_ntnt_replay` in scratch before the
+    /// managed schema, so a plan would fail on a duplicate schema.
+    #[test]
+    fn ntnt_schemas_are_refused_as_the_managed_schema() {
+        let root = project();
+        let manifest = root.path().join("ntnt.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        for schema in ["_ntnt", "_ntnt_replay"] {
+            std::fs::write(
+                &manifest,
+                text.replace("schema=\"app\"", &format!("schema=\"{schema}\"")),
+            )
+            .unwrap();
+            let Err(error) = CapturedInputs::load(&manifest, "local", None) else {
+                panic!("{schema} was accepted as the managed schema");
+            };
+            assert_eq!(error.code, "DB_CONFIG", "{schema}");
+            assert!(
+                error.message.contains(&format!(
+                    "[databases.app] schema = \"{schema}\" names a schema NTNT reserves"
+                )),
+                "{}",
+                error.message
+            );
+        }
+        for schema in ["public", "app", "ntnt", "ntnt_replay"] {
+            std::fs::write(
+                &manifest,
+                text.replace("schema=\"app\"", &format!("schema=\"{schema}\"")),
+            )
+            .unwrap();
+            if let Err(error) = CapturedInputs::load(&manifest, "local", None) {
+                panic!("{schema}: {}", error.message);
+            }
+        }
     }
     fn with_limits(root: &tempfile::TempDir, limits: &str) -> std::path::PathBuf {
         let manifest = root.path().join("ntnt.toml");
