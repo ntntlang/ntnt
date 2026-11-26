@@ -380,6 +380,7 @@ impl Diagnostic {
             "DB_CATALOG_AMBIGUOUS" => "Two catalog objects share the key its objects field names, or catalog metadata was missing; when replaying a migration produced them, its source field names that migration. Rename one of the objects (or drop the one that is not needed), or obtain manual evidence; do not interpret this result as no drift.",
             "DB_OUTSIDE_SCOPE" => "Remove the named statements from the migration that source names. The _ntnt schema holds NTNT's migration ledger, _ntnt_replay marks a replay in scratch, and pg_catalog, information_schema and the other pg_* schemas belong to PostgreSQL: migrations may not create, change, drop, grant or revoke on them, or put _ntnt on the search_path (pg_temp is allowed). Statements on other schemas, such as public, are allowed. See docs/DATABASE_MIGRATIONS.md#managed-scope.",
             "DB_DRIFT" => "Review drift.differences against the applied release. Reconcile deliberately; these commands never repair or adopt state.",
+            "DB_MIGRATIONS_PENDING" => "Review and approve a plan for the pending migrations, apply it with `ntnt db migrate`, then rerun `ntnt db verify --require-no-pending` on the same target.",
             "DB_TARGET_CHANGED" => "Another session changed the target while it was being inspected, for example a concurrent migrate. Rerun the command once that work has finished.",
             "DB_UNRECOGNIZED_HISTORY" => "Review the existing managed scope. To adopt a matching captured prefix, declare named adoption_checks and create an explicit plan --adopt-through <migration-id>; obtain separate exact-plan approval before migrate. Never insert fictional applied rows.",
             "DB_LEDGER_UNKNOWN" => "Inspect the existing ledger and managed scope with an operator. Unknown ledgers are not eligible for automatic adoption or repair; never reset, rewrite or insert fictional applied rows.",
@@ -451,7 +452,13 @@ pub enum DbCommand {
     /// Capture a target-bound, non-authorizing plan (never applies target SQL).
     Plan(PlanArgs),
     /// Verify the applied catalog/history; never runs application checks or repairs.
-    Verify(InspectArgs),
+    Verify {
+        #[command(flatten)]
+        options: InspectArgs,
+        /// Exit nonzero if any migration in this release is still pending.
+        #[arg(long)]
+        require_no_pending: bool,
+    },
     /// Execute an externally authorized exact plan, one transaction per migration.
     Migrate {
         #[command(flatten)]
@@ -532,6 +539,7 @@ struct Options {
     object: Option<String>,
     against: Option<PathBuf>,
     adopt_through: Option<u64>,
+    require_no_pending: bool,
 }
 impl Options {
     fn new(selection: Selection, against: Option<PathBuf>, adopt_through: Option<u64>) -> Self {
@@ -552,6 +560,7 @@ impl Options {
             object,
             against,
             adopt_through,
+            require_no_pending: false,
         }
     }
 }
@@ -956,9 +965,15 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             Options::new(a.selection, a.against, a.adopt_through),
             None,
         ),
-        DbCommand::Verify(a) => (
+        DbCommand::Verify {
+            options: a,
+            require_no_pending,
+        } => (
             "verify",
-            Options::new(a.selection, a.against, a.adopt_through),
+            Options {
+                require_no_pending,
+                ..Options::new(a.selection, a.against, a.adopt_through)
+            },
             None,
         ),
         DbCommand::Migrate { options, plan } => (
@@ -1150,6 +1165,24 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             }
         }
     }
+    // The deployment check uses the recognized ledger, not the scratch
+    // replay or --against result. Neither drift nor plan validation changes.
+    let pending = if command == "verify" && report["history"]["outcome"] == "pass" {
+        report["history"]["pending_count"].as_u64()
+    } else {
+        None
+    };
+    if let Some(n) = pending.filter(|&n| options.require_no_pending && n > 0) {
+        let d = Diagnostic::new(
+            "DB_MIGRATIONS_PENDING",
+            &format!("--require-no-pending requires all migrations to be applied; {n} pending."),
+        );
+        report["outcome"] = serde_json::json!("fail");
+        report["diagnostics"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(d));
+    }
     // Only `--against` above reads it.
     if let Some(report) = report.as_object_mut() {
         report.remove(report::STORED_BINDING);
@@ -1182,10 +1215,12 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
     if options.json {
         println!("{output}");
     } else {
-        println!(
-            "Database {command}: {}",
-            report["outcome"].as_str().unwrap_or("unknown")
-        );
+        let outcome = report["outcome"].as_str().unwrap_or("unknown");
+        match (command, pending) {
+            ("verify", Some(n)) => println!("Database verify: {outcome} ({n} pending)"),
+            ("verify", None) => println!("Database verify: {outcome} (pending count unknown)"),
+            _ => println!("Database {command}: {outcome}"),
+        }
         if let Some(database) = report.get("database") {
             println!("Logical database: {database}");
         }
@@ -1202,7 +1237,7 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             }
         }
         if let Some(h) = report.get("history") {
-            if h["applied_count"].is_null() {
+            if h["applied_count"].is_null() || (command == "verify" && pending.is_none()) {
                 // Unknown or refused history has no counts (#423).
                 let entries = match h["observed_entry_count"].as_u64() {
                     Some(1) => "; its ledger has 1 entry".to_owned(),

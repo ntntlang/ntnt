@@ -464,23 +464,27 @@ fn each_subcommand_help_lists_only_the_flags_it_accepts() {
         (
             "status",
             &["--against"][..],
-            &["--adopt-through", "--plan", "--fail-on-pending"][..],
+            &["--adopt-through", "--plan", "--require-no-pending"][..],
         ),
         (
             "plan",
             &["--against", "--adopt-through"],
-            &["--plan", "--fail-on-pending"],
+            &["--plan", "--require-no-pending"],
         ),
-        ("verify", &["--against"], &["--adopt-through", "--plan"]),
+        (
+            "verify",
+            &["--against", "--require-no-pending"],
+            &["--adopt-through", "--plan"],
+        ),
         (
             "migrate",
             &["--plan"],
-            &["--against", "--adopt-through", "--fail-on-pending"],
+            &["--against", "--adopt-through", "--require-no-pending"],
         ),
         (
             "reconcile",
             &["--plan"],
-            &["--against", "--adopt-through", "--fail-on-pending"],
+            &["--against", "--adopt-through", "--require-no-pending"],
         ),
     ] {
         let text = help(command);
