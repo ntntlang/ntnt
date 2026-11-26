@@ -28,6 +28,8 @@ migration may do still apply (#426).
 
 ## PostgreSQL migrations
 
+For `CREATE INDEX CONCURRENTLY`, `plan` now runs the command PostgreSQL will run on the target. Supply a fresh matching instance on the inspection runner; a database on the deployment cluster is not sufficient. See [Concurrent index builds](../DATABASE_MIGRATIONS.md#concurrent-index-builds) for the Linux dev/CI recipe. Transactional histories and deployment approval are unchanged.
+
 `ntnt db plan` now names the migration file and suggests an explicit schema
 name for `CREATE SCHEMA AUTHORIZATION CURRENT_USER`. Without a name, scratch
 and target create differently named schemas, so the migration used to pass

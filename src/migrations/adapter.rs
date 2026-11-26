@@ -298,10 +298,11 @@ impl Adapter {
         endpoint: &Endpoint,
         schema: &str,
         wait: Duration,
+        isolated: bool,
     ) -> Result<Identity> {
         match (self, target) {
             (Self::Postgres(pg), Identity::Postgres(target)) => pg
-                .prepare_scratch(target, endpoint, schema, wait)
+                .prepare_scratch(target, endpoint, schema, wait, isolated)
                 .await
                 .map(Identity::Postgres),
             (Self::Sqlite(db), Identity::Sqlite(target)) => {
@@ -319,6 +320,10 @@ impl Adapter {
             Self::Postgres(pg) => pg.scratch_recovered(),
             Self::Sqlite(_) => None,
         }
+    }
+    /// Whether prepare attempted its marker commit on verified isolated scratch.
+    pub fn external_cleanup_required(&self) -> bool {
+        matches!(self, Self::Postgres(pg) if pg.external_cleanup_required())
     }
     /// PostgreSQL opens the transaction one replayed migration commits in,
     /// set up as the target's; SQLite replays in its one transaction.

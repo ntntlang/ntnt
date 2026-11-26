@@ -79,11 +79,14 @@ pub(super) fn validate_named(
         })
         .map(|m| {
             let mut s = m.summary();
-            s["analysis"] = json!(super::analysis::analyze_in_scope(
+            // A pre-native descriptor can identify a running attempt, but
+            // is not replay evidence for starting a new concurrent build.
+            s["analysis"] = json!(super::analysis::analyze_descriptor(
                 &inputs.config.engine,
                 &m.sql,
                 &inputs.config.schema,
-                &inputs.history_schemas
+                &inputs.history_schemas,
+                plan["execution"].get("replay").is_none()
             ));
             s
         })
@@ -529,6 +532,25 @@ fn uncertain_commit(report: &Value) -> Option<usize> {
         .position(|entry| entry["state"] == "unknown" && entry["phase"] == "commit")
 }
 
+/// Can this artifact start pending work? Inspection with `--against` and
+/// migration agree; reconciling an existing attempt does not start work.
+pub(super) fn validate_replay_evidence(saved: &Value) -> Result<()> {
+    if saved["plan"]["execution"]["replay"] != "native-isolated-v1"
+        && saved["plan"]["pending"].as_array().is_some_and(|ms| {
+            ms.iter()
+                .any(|m| m["analysis"]["non_transactional"] == true)
+        })
+    {
+        let mut d = Diagnostic::new(
+            "DB_PLAN_STALE",
+            "This plan has no native replay evidence for its pending non-transactional migration.",
+        );
+        d.next_action = "Generate a fresh plan on a private replay instance, review it and approve its new digest.".into();
+        return Err(d);
+    }
+    Ok(())
+}
+
 /// Execute one immutable transition per transaction. No bootstrap precedes
 /// authorization and locked revalidation. Any failure discards the physical
 /// session; an uncertain commit only triggers fresh inspection, never SQL retry.
@@ -539,6 +561,7 @@ pub(super) async fn migrate(
     report: &mut Value,
 ) -> Result<()> {
     validate(inputs, saved)?;
+    validate_replay_evidence(saved)?;
     let action = Adoption::from_plan(inputs, saved)?;
     authorize(inputs, saved, "migrate", rerun)?;
     report["database"] = json!(inputs.database_name);

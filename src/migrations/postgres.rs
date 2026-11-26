@@ -181,6 +181,11 @@ fn new_enum_value(e: &tokio_postgres::Error, script: &str) -> Diagnostic {
         &format!("{uses} uses an enum value that ALTER TYPE ... ADD VALUE added in the same transaction (SQLSTATE 55P04).{added} PostgreSQL cannot use an enum value in the transaction that added it."),
     )
 }
+pub(super) fn isolation_required() -> Diagnostic {
+    let mut d = Diagnostic::new("DB_REPLAY_ISOLATION_REQUIRED", "This replay needs a command outside a transaction. NTNT did not substitute different SQL or run it on the target.");
+    d.next_action = "Run the same command in the private replay job: point its scratch secret at a fresh matching PostgreSQL instance and bind NTNT_DB_REPLAY_CLUSTER to the system identifier of the instance the job created. Discard that instance on every exit.".into();
+    d
+}
 fn deadline_error() -> Diagnostic {
     Diagnostic::new(
         "DB_TIMEOUT",
@@ -201,6 +206,9 @@ pub(crate) struct Postgres {
     transport: Box<Value>,
     /// Set once `prepare_scratch` validated this session as scratch.
     scratch: std::sync::OnceLock<Box<ScratchScope>>,
+    /// Reporting only: a verified job-owned instance may have committed its
+    /// marker, even if prepare never received the acknowledgement.
+    external_cleanup_required: std::sync::atomic::AtomicBool,
     /// The declared extensions (`[databases.<name>] extensions`, #430): a
     /// superuser installed them in the target and scratch databases, and
     /// inspection covers them wherever they are installed.
@@ -214,6 +222,8 @@ pub(crate) struct Postgres {
 /// outside the managed scope later are the replayed history's
 /// (`outside_objects`).
 struct ScratchScope {
+    /// The outer job owns the entire cluster and discards it on every exit.
+    isolated: bool,
     /// The schemas scratch was prepared with; the history did not create them.
     schemas: Vec<String>,
     /// The committed replay marker, as each replayed migration must leave it.
@@ -582,6 +592,7 @@ impl Postgres {
             task,
             transport: Box::new(transport),
             scratch: std::sync::OnceLock::new(),
+            external_cleanup_required: false.into(),
             extensions: Box::default(),
             replay: Box::new(scratch::Replay::new(cancel_tls)),
         })
@@ -1115,9 +1126,17 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         endpoint: &Endpoint,
         schema: &str,
         wait: Duration,
+        isolated: bool,
     ) -> Result<Identity> {
         self.begin_readonly().await?;
         let identity = self.identity(endpoint).await?;
+        if isolated
+            && (target.cluster == identity.cluster
+                || std::env::var("NTNT_DB_REPLAY_CLUSTER").as_deref()
+                    != Ok(identity.cluster.as_str()))
+        {
+            return Err(isolation_required());
+        }
         if target.cluster == identity.cluster && target.database_oid == identity.database_oid {
             return Err(Diagnostic::new("DB_SCRATCH_COLLISION","Scratch resolves to the deployment database, regardless of connection-string spelling."));
         }
@@ -1143,7 +1162,8 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         };
         let mut deferred = None;
         if target.version != identity.version || target.settings != identity.settings {
-            if target.version != identity.version
+            if isolated
+                || target.version != identity.version
                 || session_defaults(&target.settings) != session_defaults(&identity.settings)
             {
                 return Err(mismatch);
@@ -1200,9 +1220,12 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         }
         // Cleaned up in this transaction, so a refusal below keeps the
         // leftovers, and their marker, as they were.
-        let recovered = self
-            .recover_leftovers(&identity.cluster, identity.database_oid)
-            .await?;
+        let recovered = if isolated {
+            None // Never recover, adopt or reset a job-owned instance: require it empty.
+        } else {
+            self.recover_leftovers(&identity.cluster, identity.database_oid)
+                .await?
+        };
         self.check_empty(target_bypasses_rls, Some(schema)).await?;
         let (public, shared, foreign) = self.scratch_baseline().await?;
         self.check_cleanable(public.oid).await?;
@@ -1226,10 +1249,19 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
         let marker = self.own_marker().await?;
         // Recovery after a crash recovers only what this transaction and the
         // replay steps recorded writing (see `scratch`).
-        self.record_xids().await?;
+        if isolated {
+            // An empty writer list can never authorize SQL recovery, including
+            // by an older NTNT if someone later misconfigures this instance.
+            self.replay.mark_external();
+            self.external_cleanup_required
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.record_xids().await?;
+        }
         self.batch("COMMIT").await?;
         self.scratch
             .set(Box::new(ScratchScope {
+                isolated,
                 schemas,
                 marker,
                 shared,
@@ -1350,6 +1382,10 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// The replay whose leftovers `prepare_scratch` cleaned up, if any.
     pub fn scratch_recovered(&self) -> Option<Value> {
         self.scratch.get().and_then(|s| s.recovered.clone())
+    }
+    pub fn external_cleanup_required(&self) -> bool {
+        self.external_cleanup_required
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     /// In a prepared scratch database: what the replayed history created
     /// outside the managed scope (`schema` and the `extra` schemas the history
@@ -1706,24 +1742,20 @@ forced: r.get(2),
         extra: &[String],
         limit: Duration,
     ) -> Result<()> {
-        // A lone CREATE INDEX CONCURRENTLY replays as the equivalent plain
-        // CREATE INDEX inside this transaction; the target runs it outside one.
-        let concurrent = super::analysis::concurrent_index(&migration.sql, schema);
-        if concurrent.is_some() && (!migration.requires.is_empty() || !migration.ensures.is_empty())
+        let analysis = super::analysis::analyze(&migration.sql, schema);
+        if analysis.non_transactional
+            && (!migration.requires.is_empty() || !migration.ensures.is_empty())
         {
             let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", "A CREATE INDEX CONCURRENTLY migration runs outside a transaction, so it cannot have requires/ensures checks. Put checks in a neighbouring migration.");
             d.source = Some(migration.name.clone());
             return Err(d);
         }
-        let script = concurrent
-            .as_ref()
-            .map_or(migration.sql.as_str(), |c| c.replay_sql.as_str());
+        let script = migration.sql.as_str();
         if super::analysis::is_empty(&migration.sql, "postgresql") {
             let mut d = super::empty_migration();
             d.source = Some(migration.name.clone());
             return Err(d);
         }
-        let analysis = super::analysis::analyze(&migration.sql, schema);
         if !analysis.replay_supported {
             let mut d = if analysis.unknowns.iter().any(|u| u == "USER_MAPPING") {
                 user_mapping_refused()
@@ -1756,6 +1788,29 @@ forced: r.get(2),
                 &format!("Migration acts on _ntnt or a PostgreSQL system schema ({statements})."),
                 protected.into_iter().map(|(_, name)| name).collect(),
             ));
+        }
+        if analysis.non_transactional {
+            if !self.scratch.get().is_some_and(|s| s.isolated) {
+                return Err(isolation_required());
+            }
+            // Only NTNT's preflight ran in the current step. End it first:
+            // PostgreSQL must receive the same single top-level command as on
+            // the target. Start a fresh inspection transaction afterwards.
+            self.finish_replay_step(None).await?;
+            let before = self.committed_shared_writes().await?;
+            self.build_concurrent_index(migration, schema, extra, limit).await.map_err(|mut d| {
+                if d.code == "DB_POSTGRES" {
+                    d.next_action = "PostgreSQL rejected the authored command on scratch. Check this migration against its predecessors, then rerun the plan. No migration SQL ran on the target.".into();
+                }
+                d
+            })?;
+            if self.committed_shared_writes().await? != before {
+                let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", "The command changed a protected shared PostgreSQL catalog on the disposable instance. No migration SQL ran on the target.");
+                d.source = Some(migration.name.clone());
+                return Err(d);
+            }
+            self.begin_replay_step().await?;
+            return self.inspect_script_effects(migration).await;
         }
         // Migration SQL may call application routines; that is reviewed SQL.
         // A custom implicit/assignment cast planted elsewhere could instead run
@@ -1838,6 +1893,10 @@ forced: r.get(2),
         // in replay and on the target alike, then restore NTNT's own.
         self.batch(&format!("RESET ALL; {MIGRATION_SETTINGS}"))
             .await?;
+        self.inspect_script_effects(migration).await
+    }
+
+    async fn inspect_script_effects(&self, migration: &Migration) -> Result<()> {
         // Scratch was prepared without _ntnt. One a replayed migration created
         // (in a DO block, say) would let later statements that resolve there
         // replay while they act on the target's ledger.

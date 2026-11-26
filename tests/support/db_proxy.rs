@@ -90,6 +90,10 @@ fn frame(stream: &mut impl Read) -> std::io::Result<Vec<u8>> {
 
 impl Proxy {
     pub fn new(fault: Fault, commit: usize) -> Self {
+        Self::for_host(fault, commit, std::env::var("NTNT_DB_TEST_HOST").unwrap())
+    }
+
+    fn for_host(fault: Fault, commit: usize, host: String) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let listener = UnixListener::bind(directory.path().join(".s.PGSQL.5432")).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -114,7 +118,6 @@ impl Proxy {
                         let _ = client.shutdown(Shutdown::Both);
                         continue;
                     }
-                    let host = std::env::var("NTNT_DB_TEST_HOST").unwrap();
                     let mut server = Upstream::connect(&host).unwrap();
                     sockets.lock().unwrap().push(client.try_clone().unwrap());
                     let fired = fired.clone();
@@ -134,9 +137,10 @@ impl Proxy {
                             let reader = std::thread::spawn(move || {
                                 while let Ok(bytes) = frame(&mut backend) {
                                     if suppress_backend.load(Ordering::SeqCst) {
-                                        // ReadyForQuery follows durable COMMIT. Drop the
-                                        // acknowledgement, not the executed transaction.
-                                        if bytes[0] == b'Z' {
+                                        // A pipelined Close/Sync can still have a pending
+                                        // ReadyForQuery. Wait for this COMMIT's own
+                                        // CommandComplete before severing the connection.
+                                        if bytes[0] == b'C' && &bytes[5..] == b"COMMIT\0" {
                                             break;
                                         }
                                     } else if output.write_all(&bytes).is_err() {
@@ -207,4 +211,57 @@ impl Drop for Proxy {
         }
         self.thread.take().unwrap().join().unwrap();
     }
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL and Docker; mandatory CI execution lane"]
+fn isolated_prepare_lost_commit_ack_requires_external_cleanup() {
+    use super::native_scratch::{assert_discarded, report, NativeScratch};
+
+    let f = super::Fixture::new();
+    f.sql("0001_table.sql", "CREATE TABLE app.t(id integer);");
+    f.sql(
+        "0002_index.sql",
+        "CREATE INDEX CONCURRENTLY t_idx ON app.t(id);",
+    );
+
+    // No disposal instruction for an unverified (here, same-cluster) database.
+    let refused = f.command("plan");
+    assert!(super::code(&refused, "DB_REPLAY_ISOLATION_REQUIRED"));
+    assert_eq!(refused["scratch"]["cleanup"], "not_needed");
+
+    let scratch = NativeScratch::new(&f);
+    let storage = scratch.storage();
+    let upstream = storage.2.join("socket");
+    let proxy = Proxy::for_host(Fault::AfterCommit, 1, upstream.to_str().unwrap().into());
+    let mut cmd = scratch.process(&f, "plan");
+    let host = proxy.host().replace('\\', "\\\\").replace('\'', "\\'");
+    let name = &f.scratch;
+    cmd.env(
+        "DB_SCRATCH",
+        format!("host='{host}' user={name} dbname={name} sslmode=disable"),
+    );
+    let r = report(&mut cmd);
+    assert!(proxy.fired.load(Ordering::SeqCst));
+    assert!(super::code(&r, "DB_POSTGRES"));
+    assert_eq!(r["plan"]["classification"], "blocked");
+    // Independently observe the prepared schemas, but no migration: the
+    // server committed preparation even though the CLI never saw the ACK.
+    let prepared: bool = scratch
+        .observer()
+        .query_one(
+            "SELECT to_regclass('_ntnt_replay.replay_v1') IS NOT NULL
+            AND to_regnamespace('app') IS NOT NULL AND to_regclass('app.t') IS NULL",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        prepared,
+        "expected the committed marker and managed schema only"
+    );
+    assert_eq!(r["scratch"]["cleanup"], "external");
+    drop(proxy);
+    drop(scratch);
+    assert_discarded(storage);
 }
