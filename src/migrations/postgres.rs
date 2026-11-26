@@ -206,6 +206,9 @@ pub(crate) struct Postgres {
     transport: Box<Value>,
     /// Set once `prepare_scratch` validated this session as scratch.
     scratch: std::sync::OnceLock<Box<ScratchScope>>,
+    /// Reporting only: a verified job-owned instance may have committed its
+    /// marker, even if prepare never received the acknowledgement.
+    external_cleanup_required: std::sync::atomic::AtomicBool,
     /// The declared extensions (`[databases.<name>] extensions`, #430): a
     /// superuser installed them in the target and scratch databases, and
     /// inspection covers them wherever they are installed.
@@ -589,6 +592,7 @@ impl Postgres {
             task,
             transport: Box::new(transport),
             scratch: std::sync::OnceLock::new(),
+            external_cleanup_required: false.into(),
             extensions: Box::default(),
             replay: Box::new(scratch::Replay::new(cancel_tls)),
         })
@@ -1249,6 +1253,8 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             // An empty writer list can never authorize SQL recovery, including
             // by an older NTNT if someone later misconfigures this instance.
             self.replay.mark_external();
+            self.external_cleanup_required
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         } else {
             self.record_xids().await?;
         }
@@ -1376,6 +1382,10 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// The replay whose leftovers `prepare_scratch` cleaned up, if any.
     pub fn scratch_recovered(&self) -> Option<Value> {
         self.scratch.get().and_then(|s| s.recovered.clone())
+    }
+    pub fn external_cleanup_required(&self) -> bool {
+        self.external_cleanup_required
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     /// In a prepared scratch database: what the replayed history created
     /// outside the managed scope (`schema` and the `extra` schemas the history

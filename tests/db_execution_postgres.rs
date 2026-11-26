@@ -1,6 +1,8 @@
 //! Real fresh/populated rehearsal uses the production CLI and executor.
 #[path = "support/db_fixture.rs"]
 mod db_fixture;
+#[path = "db_execution_postgres/legacy_reconcile.rs"]
+mod legacy_reconcile;
 #[path = "db_execution_postgres/native_replay.rs"]
 mod native_replay;
 #[path = "support/native_scratch.rs"]
@@ -2743,6 +2745,13 @@ fn saved_by_0_6_1(f: &Fixture, path: &str) -> String {
     assert_eq!(plan_digest(&saved["plan"]), saved["plan_digest"]);
     let target = saved["plan"]["binding"]["target"].as_object_mut().unwrap();
     assert_eq!(target.remove("transport").unwrap()["sslmode"], "disable");
+    assert_eq!(
+        saved["plan"]["execution"]
+            .as_object_mut()
+            .unwrap()
+            .remove("replay"),
+        Some(serde_json::json!("native-isolated-v1"))
+    );
     let digest = plan_digest(&saved["plan"]);
     saved["plan_digest"] = Value::String(digest.clone());
     std::fs::write(

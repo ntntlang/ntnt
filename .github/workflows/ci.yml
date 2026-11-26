@@ -257,6 +257,7 @@ jobs:
       # Backstop if the test runner itself was terminated before its Drop ran.
       - name: Discard this job's remaining native replay clusters and data volumes
         if: always()
+        shell: bash
         run: docker ps -aq --filter "label=ntnt.test.native-replay=$NTNT_DB_TEST_REPLAY_JOB" | xargs -r docker rm -fv
       # These auth cases own separate databases/roles and run on every server
       # version in this matrix, not only the PostgreSQL 16 + Redis backend job.
@@ -272,6 +273,7 @@ jobs:
       - name: Run the documented PostgreSQL development setup
         if: matrix.postgres == '17'
         run: |
+          NTNT_DB_REPLAY_IMAGE=mirror.gcr.io/library/postgres:17 scripts/ci/test-private-replay-cancel.sh
           docker compose -f examples/database-dev/postgresql/compose.yml up -d --wait
           cargo test --locked --test db_dev_recipe -- --include-ignored --test-threads=1 --nocapture
         env:

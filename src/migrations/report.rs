@@ -1157,7 +1157,7 @@ async fn inspect_observed(
                 // Dropping the connection rolls back any uncommitted work and
                 // releases its session locks. No object-level cleanup or claim
                 // that the external owner has already discarded its storage.
-                report["scratch"]["cleanup"] = json!(if report["scratch"]["identity"].is_object() { "external" } else { "not_needed" });
+                report["scratch"]["cleanup"] = json!(if scratch.external_cleanup_required() { "external" } else { "not_needed" });
                 return work;
             }
             let (cleanup, unlocked) = scratch.cleanup_scratch().await;

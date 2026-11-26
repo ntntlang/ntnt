@@ -42,8 +42,11 @@ pub(crate) struct ConcurrentIndex {
     pub name: String,
 }
 pub(crate) fn concurrent_index(sql: &str, schema: &str) -> Option<ConcurrentIndex> {
-    let statements = parse(sql)?;
-    let [Statement::CreateIndex(index)] = statements.as_slice() else {
+    parsed_concurrent_index(sql, schema).map(|(name, _)| ConcurrentIndex { name })
+}
+fn parsed_concurrent_index(sql: &str, schema: &str) -> Option<(String, CreateIndex)> {
+    let [statement]: [Statement; 1] = parse(sql)?.try_into().ok()?;
+    let Statement::CreateIndex(index) = statement else {
         return None;
     };
     if !index.concurrently {
@@ -60,7 +63,7 @@ pub(crate) fn concurrent_index(sql: &str, schema: &str) -> Option<ConcurrentInde
     } else {
         last.value.to_lowercase()
     };
-    Some(ConcurrentIndex { name: folded })
+    Some((folded, index))
 }
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub(crate) struct PredictedLock {
@@ -335,6 +338,9 @@ pub(crate) fn analyze(sql: &str, schema: &str) -> Analysis {
     analyze_for("postgresql", sql, schema)
 }
 pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
+    analyze_script(engine, sql, schema, false)
+}
+fn analyze_script(engine: &str, sql: &str, schema: &str, pre_native: bool) -> Analysis {
     let mut a = Analysis {
         replay_supported: true,
         operations: vec![],
@@ -348,8 +354,24 @@ pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
     if engine == "sqlite" {
         super::sqlite_sql::analyze(&mut a, sql);
     } else {
-        a.non_transactional = concurrent_index(sql, schema).is_some();
-        postgres_script(&mut a, sql, schema);
+        let index = parsed_concurrent_index(sql, schema);
+        let concurrent = index.is_some();
+        if let Some((_, mut index)) = index.filter(|_| pre_native) {
+            // Reconstruct the pre-native descriptor, not SQL to run. The old
+            // classifier reparsed the formatted plain index (with its own
+            // token limit), then corrected its lock predictions.
+            index.concurrently = false;
+            postgres_script(&mut a, &Statement::CreateIndex(index).to_string(), schema);
+            a.non_transactional = true;
+            for lock in &mut a.locks {
+                lock.mode = SHARE_UPDATE_EXCLUSIVE;
+            }
+            a.lock_warnings
+                .retain(|w| w.code != "BLOCKS_WRITES_WHILE_INDEXING");
+        } else {
+            a.non_transactional = concurrent;
+            postgres_script(&mut a, sql, schema);
+        }
     }
     a.hazards.sort();
     a.hazards.dedup();
@@ -1688,7 +1710,17 @@ pub(crate) fn analyze_in_scope(
     schema: &str,
     created: &[String],
 ) -> Analysis {
-    let mut a = analyze_for(engine, sql, schema);
+    analyze_descriptor(engine, sql, schema, created, false)
+}
+
+pub(super) fn analyze_descriptor(
+    engine: &str,
+    sql: &str,
+    schema: &str,
+    created: &[String],
+    pre_native: bool,
+) -> Analysis {
+    let mut a = analyze_script(engine, sql, schema, pre_native);
     if engine == "postgresql" {
         a.outside_scope = outside_scope(sql, schema, created);
         if !a.outside_scope.is_empty() {

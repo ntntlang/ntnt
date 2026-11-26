@@ -1100,7 +1100,9 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 if let Some(prior) = &prior {
                     // An unreadable --against file is reported as such (#422).
                     let saved = prior.as_ref().map_err(Clone::clone)?;
-                    stale_against = execution::validate_named(&inputs, saved, files).err();
+                    stale_against = execution::validate_named(&inputs, saved, files)
+                        .and_then(|_| execution::validate_replay_evidence(saved))
+                        .err();
                     if stale_against.is_none() && saved["plan"].get("action").is_some() {
                         // Reuse the pure descriptor validator, never approval or
                         // the writer path. The explicit CLI target still owns

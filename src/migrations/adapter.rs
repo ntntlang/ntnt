@@ -321,6 +321,10 @@ impl Adapter {
             Self::Sqlite(_) => None,
         }
     }
+    /// Whether prepare attempted its marker commit on verified isolated scratch.
+    pub fn external_cleanup_required(&self) -> bool {
+        matches!(self, Self::Postgres(pg) if pg.external_cleanup_required())
+    }
     /// PostgreSQL opens the transaction one replayed migration commits in,
     /// set up as the target's; SQLite replays in its one transaction.
     pub async fn begin_replay_step(&self) -> Result<()> {

@@ -3,17 +3,41 @@
 use super::Fixture;
 use postgres::{Client, NoTls};
 use serde_json::Value;
-use std::process::Command;
+use std::io::{self, Read, Seek};
+use std::process::{Command, ExitStatus};
+
+// Bound discovery, readiness and teardown too. Capture stdout in a file so
+// even a noisy Docker client cannot block on a full pipe while we wait.
+fn docker_output(args: &[&str]) -> io::Result<(ExitStatus, String)> {
+    let mut stdout = tempfile::tempfile()?;
+    let mut child = Command::new("docker")
+        .args(args)
+        .stdout(stdout.try_clone()?)
+        .spawn()?;
+    let until = std::time::Instant::now() + super::HANG_GUARD;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            stdout.rewind()?;
+            let mut text = String::new();
+            stdout.read_to_string(&mut text)?;
+            return Ok((status, text));
+        }
+        if std::time::Instant::now() >= until {
+            child.kill()?;
+            child.wait()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("docker {}", args[0]),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
 
 fn docker(args: &[&str]) -> String {
-    let out = Command::new("docker").args(args).output().expect("docker");
-    assert!(
-        out.status.success(),
-        "docker {}: {}",
-        args[0],
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    let (status, text) = docker_output(args).expect("docker");
+    assert!(status.success(), "docker {}: {status}", args[0]);
+    text.trim().to_owned()
 }
 
 struct Container(String);
@@ -22,8 +46,8 @@ impl Drop for Container {
     fn drop(&mut self) {
         // Scope removal to our exact container ID. -v includes the anonymous
         // data volume declared by the image (whose mount changed in PG 18).
-        let removed = Command::new("docker").args(["rm", "-fv", &self.0]).output();
-        if !removed.is_ok_and(|out| out.status.success()) {
+        let removed = docker_output(&["rm", "-fv", &self.0]);
+        if !removed.is_ok_and(|(status, _)| status.success()) {
             if std::thread::panicking() {
                 eprintln!("failed to remove native replay container {}", self.0);
             } else {
@@ -83,21 +107,19 @@ impl NativeScratch {
         let container = Container(id);
         super::wait_for("final native PostgreSQL server", || {
             // The image's temporary init server never listens on TCP.
-            Command::new("docker")
-                .args([
-                    "exec",
-                    &container.0,
-                    "pg_isready",
-                    "-h",
-                    "127.0.0.1",
-                    "-U",
-                    "postgres",
-                ])
-                .output()
-                .unwrap()
-                .status
-                .success()
-                .then_some(())
+            docker_output(&[
+                "exec",
+                &container.0,
+                "pg_isready",
+                "-h",
+                "127.0.0.1",
+                "-U",
+                "postgres",
+            ])
+            .unwrap()
+            .0
+            .success()
+            .then_some(())
         });
         let host = socket
             .display()

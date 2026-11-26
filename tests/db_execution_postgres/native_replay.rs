@@ -116,6 +116,14 @@ fn leaf_replays_the_whole_prefix_once_and_applies_with_approval() {
         serde_json::to_vec(&old).unwrap(),
     )
     .unwrap();
+    // Read-only validation must agree with the artifact migrate can start.
+    for (file, expected) in [("leaf.json", "pass"), ("old.json", "fail")] {
+        let verified = report(f.process("verify").args(["--against", file]));
+        assert_eq!(verified["plan_validation"]["outcome"], expected, "{file}");
+        assert_eq!(verified["outcome"], expected, "{file}");
+        assert_eq!(code(&verified, "DB_PLAN_STALE"), expected == "fail");
+        assert_eq!(target_state(&f), before);
+    }
     assert!(code(
         &f.apply("old.json", Some(&old_digest)),
         "DB_PLAN_STALE"
