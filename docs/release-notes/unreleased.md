@@ -19,8 +19,14 @@ stay committed (#447).
 `ntnt db plan` does less repeated work when many PostgreSQL tables have the
 same shape. In a PostgreSQL 17 test, the default deadline used to expire
 before all 1,024 single-table migrations could be planned; the same history
-now plans in 84 seconds, with unchanged fingerprints. Live target checks and
-deadlines have not changed (#421).
+now plans in 84 seconds, with unchanged fingerprints (#421).
+
+`ntnt db migrate` now applies that same history to an empty PostgreSQL 17
+schema within its separate 100-second work budget. In a local debug build,
+492 migrations committed before the old CLI timed out; the new CLI applied
+all 1,024 in 97 seconds using the old saved plan. It still checks the live
+schema before and after each migration, so it still detects changes made by
+another connection between commits. More complex histories can still time out.
 
 See [NTNT v0.6.5](v0.6.5.md) for the latest release announcement and upgrade
 guidance.

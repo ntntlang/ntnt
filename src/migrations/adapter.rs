@@ -113,9 +113,8 @@ impl Adapter {
     ) -> Result<(Vec<String>, Fingerprint)> {
         match self {
             Self::Postgres(pg) => {
-                let catalog = pg.catalog(schema, extra, outside, role).await?;
-                let fingerprint = digests.fingerprint(&catalog);
-                Ok((catalog.uncovered, fingerprint))
+                pg.live_fingerprint(schema, extra, outside, role, digests)
+                    .await
             }
             Self::Sqlite(db) => db.fingerprint().await.map(|(uncovered, stable)| {
                 (

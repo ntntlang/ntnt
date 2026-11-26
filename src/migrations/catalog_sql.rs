@@ -45,20 +45,10 @@ macro_rules! declared_owned {
 }
 pub(super) use declared_owned;
 
-pub(super) const QUERIES: &[(&str, &str)] = &[
-    (
-        "schema",
-        r#"
-SELECT n.nspname::text, jsonb_build_object('owner',pg_get_userbyid(n.nspowner),
- 'grants',(SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
- FROM aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a)),
- has_schema_privilege(n.oid,'USAGE'),NULL::text
-FROM pg_catalog.pg_namespace n WHERE n.nspname=$1 OR n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND 'schema:'||n.nspname=ANY($3))
-"#,
-    ),
-    (
-        "relation",
-        concat!(
+// One definition/coverage projection for both full reads and a group's
+// representative. Only the restriction on the base relation/attribute differs.
+macro_rules! relation_rows {
+    ($filter:literal) => { concat!(
             "\nWITH RECURSIVE ",
             declared_owned!("$4"),
             r#",
@@ -89,13 +79,11 @@ LEFT JOIN pg_catalog.pg_index x ON x.indexrelid=c.oid LEFT JOIN pg_catalog.pg_cl
 -- inputs instead of exploding and formatting the same grants for every heap.
 LEFT JOIN LATERAL (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type) AS value
  FROM aclexplode(coalesce(c.relacl,acldefault(CASE WHEN c.relkind='S' THEN 's'::"char" ELSE 'r'::"char" END,c.relowner))) a) acl ON true
-WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||coalesce(xt.relname,c.relname)=ANY($3)) ORDER BY c.relname LIMIT 10001
-"#
-        ),
-    ),
-    (
-        "column",
-        r#"
+"#, $filter) };
+}
+macro_rules! column_rows {
+    ($filter:literal) => { concat!(
+r#"
 SELECT quote_ident(c.relname)||'.'||quote_ident(a.attname), jsonb_build_object('type',format_type(a.atttypid,a.atttypmod),
  'type_schema',tn.nspname,'dimensions',a.attndims,'ordinal',a.attnum,'not_null',a.attnotnull,
  'default',pg_get_expr(d.adbin,d.adrelid),'identity',a.attidentity,'generated',a.attgenerated,
@@ -118,8 +106,31 @@ FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid JO
 JOIN pg_catalog.pg_type t ON t.oid=a.atttypid JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace
 LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
 LEFT JOIN pg_catalog.pg_collation co ON co.oid=a.attcollation LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid=co.collnamespace
-WHERE (n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||c.relname=ANY($3))) AND c.relkind NOT IN ('i','I','S') AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum LIMIT 10001
+"#, $filter) };
+}
+
+pub(super) const QUERIES: &[(&str, &str)] = &[
+    (
+        "schema",
+        r#"
+SELECT n.nspname::text, jsonb_build_object('owner',pg_get_userbyid(n.nspowner),
+ 'grants',(SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
+ FROM aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) a)),
+ has_schema_privilege(n.oid,'USAGE'),NULL::text
+FROM pg_catalog.pg_namespace n WHERE n.nspname=$1 OR n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND 'schema:'||n.nspname=ANY($3))
 "#,
+    ),
+    (
+        "relation",
+        relation_rows!(
+            r#"WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||coalesce(xt.relname,c.relname)=ANY($3)) ORDER BY c.relname LIMIT 10001"#
+        ),
+    ),
+    (
+        "column",
+        column_rows!(
+            r#"WHERE (n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||c.relname=ANY($3))) AND c.relkind NOT IN ('i','I','S') AND a.attnum>0 AND NOT a.attisdropped ORDER BY c.relname,a.attnum LIMIT 10001"#
+        ),
     ),
     (
         "constraint",
@@ -335,6 +346,37 @@ WHERE $1::text IS NOT NULL
 "#,
     ),
 ];
+
+/// Single-schema observations without declared extensions. Group ordinary
+/// heaps/attributes by every native input to their definition and coverage,
+/// then inspect one representative *in the same statement snapshot*. Any
+/// relation whose identity can matter (partition/inheritance, extension,
+/// comment, non-heap kind) and any attribute with a default or comment is
+/// its own group. Keep both the native input bound and a bound on lateral
+/// lookups: at 65 shapes the caller uses the regular grouped reader instead.
+pub(super) const RELATION_SHAPES: &str = concat!(
+    r#"WITH inputs AS (SELECT c.relname::text AS name, c.oid, c.relkind,c.relowner,c.relpersistence,c.relrowsecurity,c.relforcerowsecurity,c.relreplident,c.relam,c.reloptions,c.reltablespace,c.relacl,
+ CASE WHEN c.relkind <> 'r' OR c.relispartition OR c.relpartbound IS NOT NULL
+      OR c.oid IN (SELECT inhrelid FROM pg_catalog.pg_inherits UNION ALL SELECT inhparent FROM pg_catalog.pg_inherits)
+      OR c.oid IN (SELECT objid FROM pg_catalog.pg_depend WHERE classid='pg_catalog.pg_class'::regclass AND deptype='e')
+      OR obj_description(c.oid,'pg_class') IS NOT NULL THEN c.oid END AS singleton
+ FROM pg_catalog.pg_class c WHERE c.relnamespace=(SELECT oid FROM pg_catalog.pg_namespace WHERE nspname=$1) LIMIT 10001),
+shapes AS MATERIALIZED (SELECT array_agg(name) AS names,min(oid) AS sample FROM inputs GROUP BY relkind,relowner,relpersistence,relrowsecurity,relforcerowsecurity,relreplident,relam,reloptions,reltablespace,relacl,singleton LIMIT 65)
+SELECT names,v,covered,qual FROM shapes CROSS JOIN LATERAL ("#,
+    relation_rows!("WHERE c.oid=shapes.sample OFFSET 0"),
+    ") q(n,v,covered,qual)"
+);
+
+pub(super) const COLUMN_SHAPES: &str = concat!(
+    r#"WITH inputs AS (SELECT quote_ident(c.relname)||'.'||quote_ident(a.attname) AS name,c.oid,a.atttypid,a.atttypmod,a.attndims,a.attnum,a.attnotnull,a.attidentity,a.attgenerated,a.attcollation,a.attstorage,a.attcompression,a.attacl,
+ CASE WHEN a.atthasdef OR col_description(c.oid,a.attnum) IS NOT NULL THEN c.oid END AS singleton
+ FROM pg_catalog.pg_class c JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid
+ WHERE c.relnamespace=(SELECT oid FROM pg_catalog.pg_namespace WHERE nspname=$1) AND c.relkind NOT IN ('i','I','S') AND a.attnum>0 AND NOT a.attisdropped LIMIT 10001),
+shapes AS MATERIALIZED (SELECT array_agg(name) AS names,min(oid) AS sample,attnum FROM inputs GROUP BY atttypid,atttypmod,attndims,attnum,attnotnull,attidentity,attgenerated,attcollation,attstorage,attcompression,attacl,singleton LIMIT 65)
+SELECT names,v,covered,qual FROM shapes CROSS JOIN LATERAL ("#,
+    column_rows!("WHERE c.oid=shapes.sample AND a.attnum=shapes.attnum OFFSET 0"),
+    ") q(n,v,covered,qual)"
+);
 
 /// The `QUERIES` that take `$4`, the declared extensions.
 pub(super) const WITH_DECLARED_EXTENSIONS: &[&str] = &["relation", "extension"];

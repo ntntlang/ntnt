@@ -246,6 +246,7 @@ jobs:
           cargo test --locked --test db_migration_conformance -- --include-ignored --test-threads=2 --nocapture
           cargo test --locked --lib migrations::postgres::tests::target_transaction_is_really_read_only_even_for_superuser -- --ignored --exact --nocapture
           cargo test --locked --lib migrations::postgres::tests::repeated_table_shapes_inspect_linearly_many_catalog_values -- --ignored --exact --nocapture
+          cargo test --locked --lib migrations::postgres::tests::live_apply_ -- --ignored --nocapture
           cargo test --locked --test db_tls_postgres -- --ignored --test-threads=2 --nocapture
         env:
           RUST_MIN_STACK: 8388608
