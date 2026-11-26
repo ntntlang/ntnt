@@ -610,6 +610,109 @@ fn scratch_requires_matching_engine_settings_empty_scope_and_low_privilege() {
 
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn plan_blocks_concurrent_index_on_partitioned_parent_but_accepts_leaf() {
+    let f = Fixture::new();
+    f.sql("0001_items.sql", "CREATE TABLE app.\"Items\"(id integer) PARTITION BY RANGE(id); CREATE TABLE app.items_a PARTITION OF app.\"Items\" FOR VALUES FROM (0) TO (10); INSERT INTO app.\"Items\" VALUES (1);");
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    let before = f.command("verify")["history"].clone();
+    let file = "0002_index.sql";
+    f.sql(
+        file,
+        "CREATE INDEX CONCURRENTLY items_idx ON \"Items\"(id);",
+    );
+    let r = f.command_args("plan", &["--out", "blocked.json"]);
+    assert_eq!(
+        r["plan"]["classification"], "blocked",
+        "{}",
+        r["diagnostics"]
+    );
+    let d = diagnostic(&r, "DB_REPLAY_UNSUPPORTED").expect("partitioned parent refusal");
+    assert_eq!(d["source"], file);
+    assert!(d["message"].as_str().unwrap().contains("partitioned table"));
+    assert_eq!(
+        f.apply("blocked.json", r["plan_digest"].as_str())["outcome"],
+        "fail"
+    );
+    let after = f.command("verify");
+    assert_eq!(after["outcome"], "pass");
+    assert_eq!(after["history"]["ledger"], before["ledger"]);
+    assert!(f
+        .target()
+        .query_one("SELECT to_regclass('app.items_idx') IS NULL", &[])
+        .unwrap()
+        .get::<_, bool>(0));
+    f.sql(
+        file,
+        "CREATE INDEX CONCURRENTLY items_idx ON app.items_a(id);",
+    );
+    let fixed = f.plan("leaf.json");
+    assert_eq!(
+        f.apply("leaf.json", fixed["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    assert!(f.target().query_one("SELECT indisvalid FROM pg_index WHERE indexrelid='app.items_idx'::regclass AND indrelid='app.items_a'::regclass", &[]).unwrap().get::<_, bool>(0));
+    // A regular parent index is valid, too; it is the author's lock choice,
+    // never an automatic fallback to a stronger lock at deployment.
+    f.sql(
+        "0003_parent.sql",
+        "CREATE INDEX parent_idx ON app.\"Items\"(id);",
+    );
+    let parent = f.plan("parent.json");
+    assert_eq!(
+        f.apply("parent.json", parent["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    assert_eq!(
+        f.command_args("verify", &["--require-no-pending"])["outcome"],
+        "pass"
+    );
+    assert_eq!(
+        f.target()
+            .query_one("SELECT id FROM app.\"Items\"", &[])
+            .unwrap()
+            .get::<_, i32>(0),
+        1
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn plan_names_the_statement_with_an_undefined_column_without_quoting_sql() {
+    let f = Fixture::new();
+    let file = "0001_items.sql";
+    let sql = "CREATE TABLE app.items(id integer); /* µ; */ INSERT INTO app.items(private_canary) VALUES (1);";
+    f.sql(file, sql);
+    let r = f.command("plan");
+    let d = diagnostic(&r, "DB_POSTGRES").unwrap();
+    assert_eq!(d["source"], file);
+    assert!(
+        d["message"]
+            .as_str()
+            .unwrap()
+            .contains("Statement 2: undefined column (SQLSTATE 42703)"),
+        "{d}"
+    );
+    assert!(!r.to_string().contains("private_canary"));
+    assert!(d["next_action"]
+        .as_str()
+        .unwrap()
+        .contains("rerun `ntnt db plan`"));
+    // An internal query position is *not* a position in the migration.
+    f.sql(file, "DO $$ BEGIN EXECUTE 'SELECT private_canary'; END $$;");
+    let internal = f.command("plan");
+    let d = diagnostic(&internal, "DB_POSTGRES").unwrap();
+    assert_eq!(d["message"], "undefined column (SQLSTATE 42703).");
+    assert!(!internal.to_string().contains("private_canary"));
+    f.sql(file, &sql.replace("private_canary", "id"));
+    assert_eq!(f.command("plan")["outcome"], "pass");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn unsupported_pending_routines_never_run_and_do_not_hide_applied_verification() {
     let f = Fixture::new();
     f.seed_first("CREATE TABLE app.t(id INTEGER);");

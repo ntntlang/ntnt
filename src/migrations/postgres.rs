@@ -152,18 +152,43 @@ fn driver_error(e: &tokio_postgres::Error) -> Diagnostic {
         ),
     }
 }
+/// Use only the position in the submitted script, not a routine's internal
+/// query or any server text (which can contain row values).
+fn script_statement(e: &tokio_postgres::Error, script: &str) -> Option<usize> {
+    match e.as_db_error()?.position()? {
+        tokio_postgres::error::ErrorPosition::Original(at) => {
+            super::analysis::statement_at(script, *at as usize)
+        }
+        _ => None,
+    }
+}
+
+fn script_error(e: &tokio_postgres::Error, script: &str, replay: bool) -> Option<Diagnostic> {
+    let code = e.code()?.code();
+    let cause = match code {
+        "42703" => "undefined column",
+        "42P01" => "undefined table",
+        "42601" => "syntax error",
+        _ => return None,
+    };
+    let location =
+        script_statement(e, script).map_or_else(String::new, |n| format!("Statement {n}: "));
+    let mut d = Diagnostic::new(
+        "DB_POSTGRES",
+        &format!("{location}{cause} (SQLSTATE {code})."),
+    );
+    if replay {
+        d.next_action = "Compare the migration with the schema created by its predecessors. If the file is pending, correct it and rerun `ntnt db plan`; if it was applied, first verify the original release files. Scratch replay did not run this SQL on the target.".into();
+    }
+    Some(d)
+}
+
 /// SQLSTATE 55P04: a statement used an enum value that `ALTER TYPE ... ADD
 /// VALUE` added in the same transaction. Names the statement from the
 /// error's position, when PostgreSQL gives one, and the statements of
 /// `script` that add enum values; the server's text is not shown.
 fn new_enum_value(e: &tokio_postgres::Error, script: &str) -> Diagnostic {
-    let statement = e
-        .as_db_error()
-        .and_then(|db| match db.position() {
-            Some(tokio_postgres::error::ErrorPosition::Original(at)) => Some(*at as usize),
-            _ => None,
-        })
-        .and_then(|at| super::analysis::statement_at(script, at));
+    let statement = script_statement(e, script);
     let uses = statement.map_or("A statement".to_owned(), |n| format!("Statement {n}"));
     let added = match super::analysis::enum_value_additions(script).as_slice() {
         [] => String::new(),
@@ -1803,6 +1828,21 @@ forced: r.get(2),
             limit.as_secs()
         ))
         .await?;
+        // A plain index on a partitioned parent succeeds, but the actual
+        // CONCURRENTLY command fails. Check the relation at this replay
+        // step, with the script's search path, before using the substitute.
+        if let Some(index) = &concurrent {
+            let partitioned: bool = self.rows(
+                "SELECT EXISTS (SELECT FROM pg_catalog.pg_partitioned_table WHERE partrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)::pg_catalog.oid)",
+                &[&index.table],
+            ).await?[0].get(0);
+            if partitioned {
+                let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", "PostgreSQL cannot create an index concurrently on a partitioned table. A plain index build on scratch would not test the command the target would run.");
+                d.source = Some(migration.name.clone());
+                d.next_action = "For a concurrent build, index individual leaf partitions. For a single build on the parent, use CREATE INDEX without CONCURRENTLY and review its stronger lock before applying.".into();
+                return Err(d);
+            }
+        }
         // Do not split on semicolons: PostgreSQL receives the captured full script.
         bounded_classified(
             limit + SERVER_LIMIT_MARGIN,
@@ -1812,6 +1852,7 @@ forced: r.get(2),
                     Some(new_enum_value(e, script))
                 } else {
                     extension_privilege(e, &created, &facts, can_create)
+                        .or_else(|| script_error(e, script, self.scratch.get().is_some()))
                 }
             },
         )

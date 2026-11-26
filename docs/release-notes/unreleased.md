@@ -28,6 +28,15 @@ migration may do still apply (#426).
 
 ## PostgreSQL migrations
 
+`ntnt db plan` used to pass a concurrent index build on a partitioned parent
+because scratch built a plain index instead. PostgreSQL then rejected the real
+build during deployment. Planning now blocks that command. Concurrent builds
+on leaf partitions and regular index builds on the parent still work.
+
+Script errors for an undefined column, undefined table, or syntax error keep
+their SQLSTATE and include a statement number when PostgreSQL supplies a usable
+position in the submitted SQL. Server error text is not printed (#424).
+
 `ntnt db plan` now names the migration file and suggests an explicit schema
 name for `CREATE SCHEMA AUTHORIZATION CURRENT_USER`. Without a name, scratch
 and target create differently named schemas, so the migration used to pass

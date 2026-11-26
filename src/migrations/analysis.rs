@@ -35,11 +35,13 @@ pub(crate) struct OutsideScope {
     pub via: Via,
 }
 /// A migration whose whole script is one named `CREATE INDEX CONCURRENTLY` on
-/// a managed table. Replay builds the same index without CONCURRENTLY, inside
-/// its rollback-only transaction; the catalog result is identical.
+/// a managed table. Replay checks that the table supports a concurrent build
+/// before building the equivalent plain index in its transaction.
 #[derive(Clone, Debug)]
 pub(crate) struct ConcurrentIndex {
     pub name: String,
+    /// SQL spelling for PostgreSQL's own relation lookup, including quotes.
+    pub table: String,
     pub replay_sql: String,
 }
 pub(crate) fn concurrent_index(sql: &str, schema: &str) -> Option<ConcurrentIndex> {
@@ -65,6 +67,7 @@ pub(crate) fn concurrent_index(sql: &str, schema: &str) -> Option<ConcurrentInde
     replay.concurrently = false;
     Some(ConcurrentIndex {
         name: folded,
+        table: index.table_name.to_string(),
         replay_sql: Statement::CreateIndex(replay).to_string(),
     })
 }

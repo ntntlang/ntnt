@@ -10,6 +10,10 @@
 
 ### Fixed
 
+- `ntnt db plan` (PostgreSQL) no longer passes `CREATE INDEX CONCURRENTLY` on a
+  partitioned parent. Concurrent builds on leaf partitions remain supported.
+  Undefined columns, undefined tables and syntax errors in migration scripts
+  name the statement when PostgreSQL supplies a usable position (#424).
 - `ntnt db`: when an applied migration is renamed to a different ID, a unique
   checksum match points back to its original filename and sidecar instead of
   suggesting that it be numbered as a new migration (#446).

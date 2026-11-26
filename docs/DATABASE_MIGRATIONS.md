@@ -805,7 +805,13 @@ schema is covered with its members.
 
 A migration whose entire script is one named `CREATE [UNIQUE] INDEX CONCURRENTLY` on a managed table runs outside a transaction (`analysis.non_transactional`). It takes only `SHARE UPDATE EXCLUSIVE` on the table, so reads and writes continue while the index builds. The build waits for transactions already running on the table rather than failing on the 1-second lock timeout. The statement limit (`statement_seconds`, 90 seconds by default) covers the whole build, waits and table scan included; a build that exceeds it fails and its invalid index is dropped. For a large table, raise the limit in [`[databases.<name>.limits]`](#time-limits), then plan and approve again. Comments around the statement are allowed; any other statement, an unnamed index or a table outside the managed schema is rejected as before. Such a migration cannot have `requires` or `ensures` checks, because no transaction surrounds the change. Custom implicit/assignment casts block the build as they block other DDL, and the build uses replay's storage settings (`default_tablespace=''`).
 
-Replay builds the same index without `CONCURRENTLY` inside that migration's replay transaction, so the plan's expected catalog is identical. On the target, `migrate`:
+PostgreSQL does not allow `CREATE INDEX CONCURRENTLY` on a partitioned parent.
+`plan` checks the table on scratch before substituting a plain index build;
+a parent is refused, but a concurrent build on a leaf partition is allowed.
+To index the parent directly, use a regular `CREATE INDEX` and review its
+stronger lock. NTNT never substitutes that stronger lock on the target.
+
+Replay builds the supported index without `CONCURRENTLY` inside that migration's replay transaction, so the plan's expected catalog is identical. On the target, `migrate`:
 
 1. validates the planned prefix, then inserts a ledger row in state `running` for the migration and **commits it before the build starts**;
 2. builds the index outside any transaction, still holding the migrator advisory lock;
