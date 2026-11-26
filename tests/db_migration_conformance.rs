@@ -146,6 +146,9 @@ impl Fixture {
     }
     /// A command's human (non-JSON) output.
     fn human(&self, command: &str, args: &[&str]) -> String {
+        String::from_utf8(self.human_output(command, args).stdout).unwrap()
+    }
+    fn human_output(&self, command: &str, args: &[&str]) -> std::process::Output {
         let template = match self {
             Self::Postgres(f) => f.process(command),
             Self::Sqlite(f) => f.process(command),
@@ -162,12 +165,11 @@ impl Fixture {
                 None => process.env_remove(key),
             };
         }
-        let output = process
+        process
             .current_dir(self.root())
             .args(args)
             .output()
-            .unwrap();
-        String::from_utf8(output.stdout).unwrap()
+            .unwrap()
     }
 }
 /// The diagnostic with `code` in `report`.
@@ -272,6 +274,73 @@ fn prefix_recovery(f: Fixture) {
         f.apply("upgrade.json", plan["plan_digest"].as_str())["assertions"]["executed"],
         0
     );
+}
+/// A deploy skipped its second migration. Verify the applied prefix without
+/// inserting the pending row; require the row's migration only when asked.
+fn verify_requires_no_pending(f: Fixture) {
+    let initial = first(&f);
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql(
+        "0002_seed.sql",
+        &format!("INSERT INTO {}.items(id) VALUES (2);", f.schema()),
+    );
+    let plan = f.plan("seed.json");
+    let strict = ["--require-no-pending"];
+    let verdict = |args: &[&str], success: bool, expected: &str| {
+        let out = f.human_output("verify", args);
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(out.status.success(), success, "{text}");
+        assert_eq!(text.lines().next(), Some(expected));
+    };
+    verdict(&[], true, "Database verify: pass (1 pending)");
+    verdict(&strict, false, "Database verify: fail (1 pending)");
+    let r = f.command("verify", &[strict[0], "--against", "seed.json"]);
+    assert_eq!(r["outcome"], "fail");
+    assert!(code(&r, "DB_MIGRATIONS_PENDING"), "{r}");
+    assert_eq!(r["history"]["pending_count"], 1);
+    assert_eq!(r["drift"]["outcome"], "pass");
+    assert_eq!(r["plan_validation"]["outcome"], "pass");
+    let rows = || f.count(&format!("SELECT count(*) FROM {}.items", f.schema()));
+    let entries = || f.count(&format!("SELECT count(*) FROM {}", f.ledger()));
+    assert_eq!((rows(), entries()), (0, 1));
+
+    assert_eq!(
+        f.apply("seed.json", plan["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    verdict(&strict, true, "Database verify: pass (0 pending)");
+    assert_eq!((rows(), entries()), (1, 2));
+    // Zero pending does not make a drifted target pass.
+    f.execute(&format!(
+        "ALTER TABLE {}.items ADD COLUMN unexpected TEXT",
+        f.schema()
+    ));
+    let r = f.command("verify", &strict);
+    assert_eq!(r["outcome"], "fail");
+    assert!(code(&r, "DB_DRIFT"));
+    assert!(!code(&r, "DB_MIGRATIONS_PENDING"));
+    // Once the applied files no longer match, no count is trustworthy.
+    f.sql("0002_seed.sql", "-- edited");
+    verdict(
+        &strict,
+        false,
+        "Database verify: fail (pending count unknown)",
+    );
+    let r = f.command("verify", &strict);
+    assert!(code(&r, "DB_HISTORY_EDITED"));
+    assert!(!code(&r, "DB_MIGRATIONS_PENDING"));
+}
+#[test]
+fn sqlite_verify_requires_no_pending() {
+    verify_requires_no_pending(Fixture::sqlite());
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn postgres_verify_requires_no_pending() {
+    verify_requires_no_pending(Fixture::pg());
 }
 fn history_and_drift(f: Fixture) {
     let initial = first(&f);

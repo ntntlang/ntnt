@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- `ntnt db verify --require-no-pending` exits nonzero if a release still has
+  unapplied migrations. Ordinary `verify` still checks the applied migrations
+  and now shows the pending count on its verdict line (#432).
+
 ### Fixed
 
 - `ntnt db` (SQLite): migrations can use `IS NOT` in a trigger, `GLOB` in a

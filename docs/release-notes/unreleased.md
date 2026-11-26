@@ -1,5 +1,13 @@
 # Unreleased
 
+## Post-deploy verification
+
+Use `ntnt db verify --target production --require-no-pending` after deployment
+to catch a skipped `migrate` on PostgreSQL or SQLite. With one migration left,
+ordinary `verify` can report `pass (1 pending)`; the same check with the flag
+reports `fail (1 pending)` and exits nonzero. Neither command applies the
+missing migration (#432).
+
 ## SQLite migrations
 
 `ntnt db plan` used to report syntax errors for SQL that SQLite itself

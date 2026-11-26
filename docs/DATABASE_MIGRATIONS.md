@@ -10,12 +10,15 @@ ntnt db plan --target development --json --out review.json
 ntnt db verify --target development --json
 ntnt db verify --target development --against review.json --json
 ntnt db migrate --database app --target development --plan review.json --json
+ntnt db verify --target development --require-no-pending
 ntnt db status --target development --object accounts
 ```
 
 `init` and `new` only write local scaffolding: a manifest section that names secrets, and empty numbered migration files (see [Quick start](#quick-start)). `status` and `verify` inspect history and compare the observed catalog with replay at the **applied prefix**. `plan` additionally replays pending SQL and captures a non-authorizing review artifact. Pending migrations are not drift. `--object` is a case-sensitive substring filter on displayed catalog keys; it never narrows verification, hides incomplete coverage, or changes the plan binding. Without `--json`, the same result is rendered for humans.
 
 `migrate` requires a reviewed execution-capable plan and independent provider-backed approval. It never plans implicitly, auto-baselines, resets, repairs or retries application SQL after an uncertain commit. The existing `ntnt migrate` source-interpolation conversion command is unchanged. Explicit reviewed baseline adoption and recognized PostgreSQL legacy-history import use that same executor; see below. The only non-transactional operation is a lone PostgreSQL `CREATE INDEX CONCURRENTLY` (see [Concurrent index builds](#concurrent-index-builds)); backfill orchestration and query lint are not implemented. PostgreSQL migrations may include transactional DML such as seed rows; the SQLite subset includes bounded native DML for explicit mappings/rebuilds, not a resumable backfill system. Existing application-owned migration code is not invoked.
+
+For a post-deploy check, run `ntnt db verify --target production --require-no-pending` from the release you deployed. If `migrate` was skipped, ordinary `verify` can report `pass (1 pending)` because the already-applied migrations match. With the flag, the same database reports `fail (1 pending)`, exits nonzero, and includes `DB_MIGRATIONS_PENDING` in its JSON diagnostics. Neither form runs pending SQL. If the history cannot be verified, the verdict says `pending count unknown` rather than claiming zero. Having zero pending migrations does not excuse drift or other verification failures.
 
 ## Quick start
 
