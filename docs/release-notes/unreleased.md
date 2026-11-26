@@ -10,6 +10,12 @@ migration may do still apply (#426).
 
 ## PostgreSQL migrations
 
+`ntnt db plan` now names the migration file and suggests an explicit schema
+name for `CREATE SCHEMA AUTHORIZATION CURRENT_USER`. Without a name, scratch
+and target create differently named schemas, so the migration used to pass
+planning but roll back during deployment. `CREATE SCHEMA audit AUTHORIZATION
+CURRENT_USER` works on both (#448).
+
 If another session adds a foreign key from an untracked table into a tracked
 one while a migration is running, `ntnt db migrate` checks again after the
 SQL runs, while PostgreSQL still holds its write locks. A newly visible key

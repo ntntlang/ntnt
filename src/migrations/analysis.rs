@@ -530,6 +530,10 @@ fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
             a.replay_supported = false;
             a.unknowns.push(escape.into());
         }
+        if role_named_schema(&words) {
+            a.replay_supported = false;
+            a.unknowns.push(ROLE_NAMED_SCHEMA.into());
+        }
         // A chunk that kept semicolons is a `BEGIN ATOMIC` body, found by a
         // heuristic. Re-check every piece: none may be transaction or session
         // control, and the body must close with a bare END. Otherwise the
@@ -983,6 +987,27 @@ fn leading(words: &[Option<String>]) -> String {
         parts.join("_")
     }
 }
+pub(super) const ROLE_NAMED_SCHEMA: &str = "ROLE_NAMED_SCHEMA";
+
+/// Check the prefix rather than the AST: PostgreSQL permits schema elements
+/// after the role that sqlparser may not parse. Quoted role names are literals.
+fn role_named_schema(words: &[Option<String>]) -> bool {
+    let w = |i: usize| words.get(i).and_then(Option::as_deref);
+    if (w(0), w(1)) != (Some("CREATE"), Some("SCHEMA")) {
+        return false;
+    }
+    let at = if (w(2), w(3), w(4)) == (Some("IF"), Some("NOT"), Some("EXISTS")) {
+        5
+    } else {
+        2
+    };
+    w(at) == Some("AUTHORIZATION")
+        && matches!(
+            w(at + 1),
+            Some("CURRENT_USER" | "CURRENT_ROLE" | "SESSION_USER")
+        )
+}
+
 /// Top-level statements that would end/split NTNT's migration transaction,
 /// change session identity, or act outside the current database. Text inside
 /// DO/function bodies is opaque here; those run inside the transaction and
@@ -2756,6 +2781,30 @@ mod tests {
             2
         );
     }
+    #[test]
+    fn postgres_refuses_only_schema_names_derived_from_the_connected_role() {
+        for sql in [
+            "CREATE SCHEMA AUTHORIZATION CURRENT_USER",
+            "SELECT 1; create schema if not exists authorization /* owner */ current_role",
+            "CREATE SCHEMA AUTHORIZATION SESSION_USER CREATE TABLE entries (id integer)",
+        ] {
+            let a = analyze(sql, "app");
+            assert!(
+                !a.replay_supported && a.unknowns.iter().any(|u| u == ROLE_NAMED_SCHEMA),
+                "{sql}: {a:?}"
+            );
+        }
+        for sql in [
+            "CREATE SCHEMA audit AUTHORIZATION CURRENT_USER",
+            "CREATE SCHEMA IF NOT EXISTS \"authorization\" AUTHORIZATION SESSION_USER",
+            "CREATE SCHEMA AUTHORIZATION someone",
+            "CREATE SCHEMA AUTHORIZATION \"current_user\"",
+            "SELECT 'CREATE SCHEMA AUTHORIZATION CURRENT_USER'",
+        ] {
+            assert!(analyze(sql, "app").replay_supported, "{sql}");
+        }
+    }
+
     #[test]
     fn the_history_creates_the_schemas_its_create_schema_statements_name() {
         let scripts = [
