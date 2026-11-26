@@ -391,7 +391,7 @@ fn sqlite_target_coverage_diagnostic_names_the_objects() {
         assert!(!passed);
         assert!(
             filtered.contains(&format!(
-                "0 catalog objects matched --object; unverified objects: {}",
+                "Catalog coverage: 0 objects matched --object; unverified objects: {}",
                 r["catalog"]["uncovered"]
             )),
             "{filtered}"

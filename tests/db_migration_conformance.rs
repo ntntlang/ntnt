@@ -389,7 +389,10 @@ fn human_catalog_summary(f: Fixture) {
             if args.is_empty() {
                 assert!(!text.contains("quiet_column"));
                 assert!(
-                    text.contains(&format!("{} catalog objects", objects.len())),
+                    text.contains(&format!(
+                        "Catalog coverage: {} objects observed",
+                        objects.len()
+                    )),
                     "{text}"
                 );
             } else {

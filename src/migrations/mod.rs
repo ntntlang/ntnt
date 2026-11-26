@@ -1287,7 +1287,7 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 "observed"
             };
             println!(
-                "{n} catalog {noun} {scope}; unverified objects: {}",
+                "Catalog coverage: {n} {noun} {scope}; unverified objects: {}",
                 report["catalog"]["uncovered"]
             );
             if options.object.is_none() && n > 0 {
