@@ -78,7 +78,12 @@ migration numbered below one a target already applied is refused for that target
 with `DB_HISTORY_DIVERGENT`, which names it and the ID to renumber it above. An
 applied migration renamed with its ID kept is refused the same way, but named by
 the name it was applied under, with advice to rename it back, with its `.toml`
-sidecar when it has one; an applied migration is never renumbered.
+sidecar when it has one; an applied migration is never renumbered. If the
+rename also changed its ID, NTNT checks the SQL and sidecar bytes under the
+missing filename. For example, if `0025_bee.sql` matches the ledger under
+`0020_b.sql`, the advice is to restore `0020_b.sql`, not to give the file a
+higher number. If several applied names are missing or no single file matches,
+compare with the applied release rather than guessing. NTNT does not rename files.
 
 `new` never changes `ntnt.toml`, but like `init` it opens the file for writing to
 lock it, because NFS grants the lock only through such a handle. A `ntnt.toml` that

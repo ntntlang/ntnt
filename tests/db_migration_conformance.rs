@@ -630,6 +630,29 @@ fn a_renamed_applied_migration_is_restored_with_its_sidecar(f: Fixture) {
     assert_eq!(applied["outcome"], "pass", "{applied}");
     let dir = f.root().join("migrations");
     let rename = |from: &str, to: &str| std::fs::rename(dir.join(from), dir.join(to)).unwrap();
+    // #446: an ID change also changes the filename-bound checksum. This is
+    // still the applied migration, even if it moved past another ledger row.
+    let original = f.command("verify", &["--require-no-pending"]);
+    for stem in ["0025_bee", "0040_bee", "0005_bee"] {
+        let sql = format!("{stem}.sql");
+        let toml = format!("{stem}.toml");
+        rename("0020_b.sql", &sql);
+        rename("0020_b.toml", &toml);
+        let r = f.command("status", &[]);
+        assert_eq!(r["outcome"], "fail");
+        let d = diagnostic(&r, "DB_HISTORY_DIVERGENT");
+        assert_eq!(d["source"], "0020_b.sql", "{d}");
+        let advice = d["next_action"].as_str().unwrap();
+        for file in [sql.as_str(), toml.as_str(), "0020_b.sql", "0020_b.toml"] {
+            assert!(advice.contains(file), "{d}");
+        }
+        assert!(!advice.contains("above"), "{d}");
+        rename(&sql, "0020_b.sql");
+        rename(&toml, "0020_b.toml");
+        let restored = f.command("verify", &["--require-no-pending"]);
+        assert_eq!(restored["outcome"], "pass", "{restored}");
+        assert_eq!(restored["history"], original["history"]);
+    }
     rename("0020_b.sql", "0020_bee.sql");
     rename("0020_b.toml", "0020_bee.toml");
     let r = f.command("status", &[]);

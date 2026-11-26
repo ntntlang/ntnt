@@ -10,6 +10,9 @@
 
 ### Fixed
 
+- `ntnt db`: when an applied migration is renamed to a different ID, a unique
+  checksum match points back to its original filename and sidecar instead of
+  suggesting that it be numbered as a new migration (#446).
 - `ntnt db status`, `plan`, and `verify` show diagnostics and next steps before
   catalog details. Use `--object <text>` for matching entries or `--json` for
   the full report (#432).
