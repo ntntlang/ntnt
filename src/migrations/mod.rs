@@ -489,7 +489,7 @@ pub struct Selection {
     /// Write a report/compact plan to a NEW file (never overwrite existing files).
     #[arg(long)]
     pub out: Option<PathBuf>,
-    /// Restrict displayed catalog objects, not verification or plan identity.
+    /// Show catalog entries whose keys contain this text; never limits verification.
     #[arg(long)]
     pub object: Option<String>,
 }
@@ -1211,9 +1211,8 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
             }
         }
     }
-    let output = serde_json::to_string_pretty(&report)?;
     if options.json {
-        println!("{output}");
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         let outcome = report["outcome"].as_str().unwrap_or("unknown");
         match (command, pending) {
@@ -1260,6 +1259,16 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 );
             }
         }
+        for d in report["diagnostics"].as_array().into_iter().flatten() {
+            println!("{}: {}", d["code"], d["message"]);
+            if !d["source"].is_null() {
+                println!("  Source: {}", d["source"]);
+            }
+            if let Some(objects) = d.get("objects") {
+                println!("  Objects: {objects}");
+            }
+            println!("  Next: {}", d["next_action"]);
+        }
         if let Some(action) = report.get("adoption").and_then(|a| a.get("action")) {
             println!(
                 "Adoption reference: {} through ID {} ({} source files); adoption not executed.",
@@ -1268,14 +1277,21 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 action["count"]
             );
         }
-        if let Some(objects) = report["catalog"]["objects"].as_object() {
+        let objects = report["catalog"]["objects"].as_object();
+        if let Some(objects) = objects {
+            let n = objects.len();
+            let noun = if n == 1 { "object" } else { "objects" };
+            let scope = if options.object.is_some() {
+                "matched --object"
+            } else {
+                "observed"
+            };
             println!(
-                "Catalog coverage: {} object(s) displayed; unverified objects: {}",
-                objects.len(),
+                "{n} catalog {noun} {scope}; unverified objects: {}",
                 report["catalog"]["uncovered"]
             );
-            for (key, value) in objects {
-                println!("  {key:?}: {value}");
+            if options.object.is_none() && n > 0 {
+                println!("Use --object <text> for matching catalog entries or --json for the full report.");
             }
         }
         for change in report["drift"]["differences"]
@@ -1348,15 +1364,10 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 warning["code"], warning["relation"], warning["check"], warning["message"]
             );
         }
-        for d in report["diagnostics"].as_array().into_iter().flatten() {
-            println!("{}: {}", d["code"], d["message"]);
-            if !d["source"].is_null() {
-                println!("  Source: {}", d["source"]);
+        if let Some(objects) = objects.filter(|_| options.object.is_some()) {
+            for (key, value) in objects {
+                println!("  {key:?}: {value}");
             }
-            if let Some(objects) = d.get("objects") {
-                println!("  Objects: {objects}");
-            }
-            println!("  Next: {}", d["next_action"]);
         }
         if let Some(r) = report
             .get("reconciliation")
