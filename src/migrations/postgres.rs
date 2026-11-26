@@ -2263,15 +2263,7 @@ mod tests {
         );
     }
 
-    /// Live apply checks the managed catalog on both sides of every script.
-    /// Count decoded definitions on that path, not elapsed time or replay work.
-    #[test]
-    #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
-    fn live_apply_groups_repeated_definitions_and_observes_changes() {
-        use super::super::{
-            adapter::Adapter,
-            inventory::{CatalogDigests, Fingerprint},
-        };
+    fn live_fixture() -> (crate::interpreter::SecretValue, Endpoint) {
         let url =
             std::env::var("NTNT_DB_TEST_ADMIN").expect("explicit disposable fixture URL required");
         let config: Config = url.parse().unwrap();
@@ -2281,6 +2273,19 @@ mod tests {
             role: config.get_user().unwrap().into(),
         };
         let secret = crate::interpreter::SecretValue::new("FIXTURE", url).unwrap();
+        (secret, endpoint)
+    }
+
+    /// Live apply checks the managed catalog on both sides of every script.
+    /// Count decoded definitions on that path, not elapsed time or replay work.
+    #[test]
+    #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+    fn live_apply_groups_repeated_definitions_and_observes_changes() {
+        use super::super::{
+            adapter::Adapter,
+            inventory::{CatalogDigests, Fingerprint},
+        };
+        let (secret, endpoint) = live_fixture();
         let schema = format!("live_{}", uuid::Uuid::new_v4().simple());
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2347,6 +2352,58 @@ mod tests {
                 );
                 pg.batch(&format!("DROP SCHEMA {schema} CASCADE; COMMIT")).await.unwrap();
             });
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+    async fn live_apply_shape_cutoff_preserves_the_full_fingerprint() {
+        use super::super::inventory::{CatalogDigests, Fingerprint};
+        let (secret, endpoint) = live_fixture();
+        let pg = Postgres::connect(&secret, &endpoint).await.unwrap();
+        let schema = format!("cutoff_{}", uuid::Uuid::new_v4().simple());
+        pg.begin_migration(&schema).await.unwrap();
+        // The materialized view supplies one uncovered relation. Each column comment
+        // and table comment below creates a distinct shape in its respective reader.
+        pg.batch(&format!("CREATE SCHEMA {schema}; CREATE MATERIALIZED VIEW {schema}.v AS SELECT 0 AS id WITH NO DATA"))
+            .await.unwrap();
+        let mut digests = CatalogDigests::default();
+        for i in 1..=65 {
+            pg.batch(&format!("CREATE TABLE {schema}.t{i}(id integer); COMMENT ON TABLE {schema}.t{i} IS 'table {i}'; COMMENT ON COLUMN {schema}.t{i}.id IS 'column {i}'"))
+                .await.unwrap();
+            if i == 1 {
+                pg.batch(&format!(
+                    "ALTER TABLE {schema}.t1 ADD CHECK (id BETWEEN 1 AND 4 AND id <> 2)"
+                ))
+                .await
+                .unwrap();
+            }
+            let shapes = i + 1; // tables plus the view
+            if shapes < 64 {
+                continue;
+            }
+            let full = pg.catalog(&schema, &[], &[], &endpoint.role).await.unwrap();
+            let expected = Fingerprint::of(&full);
+            assert!(expected.stored.is_some());
+            assert!(full.uncovered.iter().any(|key| key == "relation:v"));
+            LIVE_SHAPE_ROWS.with(|n| n.set(0));
+            let (uncovered, fp) = pg
+                .live_fingerprint(&schema, &[], &[], &endpoint.role, &mut digests)
+                .await
+                .unwrap();
+            assert_eq!(
+                (uncovered, fp.stable, fp.stored),
+                (full.uncovered, expected.stable, expected.stored),
+                "{shapes} shapes"
+            );
+            // At 64 both readers use representatives. At 65 both fall back;
+            // at 66 taking the limited sample as complete would lose keys.
+            assert_eq!(
+                LIVE_SHAPE_ROWS.with(|n| n.get()),
+                if shapes == 64 { 2 * shapes } else { 0 },
+                "{shapes} shapes"
+            );
+        }
+        pg.rollback().await.unwrap();
     }
 
     /// Scratch must fingerprint all keys, but not decode and canonicalize an
