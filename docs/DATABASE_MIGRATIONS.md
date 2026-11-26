@@ -875,6 +875,12 @@ schemas, and the plan's input digest binds them. Reports list them in
 None of them can be the manifest's `schema` either: `_ntnt` and `_ntnt_replay`
 are refused with `DB_CONFIG` naming them as NTNT's ledger and replay marker.
 
+When creating a schema for the connected role, give it an explicit name, for
+example `CREATE SCHEMA audit AUTHORIZATION CURRENT_USER`. Without `audit`,
+PostgreSQL names the schema after the role. Scratch and target use different
+roles, so `plan` refuses that top-level statement with `DB_REPLAY_UNSUPPORTED`.
+The same rule applies to `CURRENT_ROLE` and `SESSION_USER`.
+
 ```sql
 -- migrations/0001_initial.sql
 CREATE TABLE app.accounts (id int PRIMARY KEY);

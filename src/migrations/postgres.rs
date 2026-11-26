@@ -1727,6 +1727,14 @@ forced: r.get(2),
         if !analysis.replay_supported {
             let mut d = if analysis.unknowns.iter().any(|u| u == "USER_MAPPING") {
                 user_mapping_refused()
+            } else if analysis
+                .unknowns
+                .iter()
+                .any(|u| u == super::analysis::ROLE_NAMED_SCHEMA)
+            {
+                let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", "This CREATE SCHEMA statement uses the connected role's name as the schema name. Scratch and target use different roles, so the schema names would not match.");
+                d.next_action = "Give the schema an explicit name before AUTHORIZATION, for example: CREATE SCHEMA audit AUTHORIZATION CURRENT_USER;".into();
+                d
             } else {
                 Diagnostic::new("DB_REPLAY_UNSUPPORTED","Migration contains a statement that would end the migration transaction, change session identity or act outside this database; see analysis.unknowns.")
             };

@@ -3816,6 +3816,43 @@ CREATE TABLE via_search_path (id int);",
     }
 }
 
+/// Scratch and target connect as different roles. A schema whose name comes
+/// from that role cannot have the same name on both (#448).
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn role_dependent_schema_name_is_refused_during_planning() {
+    let f = Fixture::new();
+    let file = "0001_audit.sql";
+    f.sql(file, "CREATE SCHEMA AUTHORIZATION CURRENT_USER;");
+    let plan = f.command("plan");
+    let d = plan["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_REPLAY_UNSUPPORTED" && d["source"] == file)
+        .unwrap_or_else(|| {
+            panic!(
+                "plan outcome {}; diagnostics {}",
+                plan["outcome"], plan["diagnostics"]
+            )
+        });
+    assert_ne!(plan["outcome"], "pass");
+    assert!(
+        d["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("CREATE SCHEMA audit AUTHORIZATION CURRENT_USER"),
+        "{d}"
+    );
+
+    f.sql(file, "CREATE SCHEMA audit AUTHORIZATION CURRENT_USER;");
+    let named = f.plan("named.json");
+    let applied = f.apply("named.json", named["plan_digest"].as_str());
+    assert_eq!(applied["progress"][0]["state"], "committed", "{applied}");
+    assert!(f.target().query_one("SELECT pg_get_userbyid(nspowner) = current_user FROM pg_namespace WHERE nspname = 'audit'", &[]).unwrap().get::<_, bool>(0));
+    assert_eq!(f.command("verify")["outcome"], "pass");
+}
+
 /// Histories that create nothing outside the managed scope inspect and plan
 /// exactly as before: no outside_objects in the plan or the report.
 #[test]

@@ -6,6 +6,9 @@
 
 - `ntnt db` (SQLite): migrations can use `IS NOT` in a trigger, `GLOB` in a
   `CHECK`, and `STRICT, WITHOUT ROWID` on the same table (#426).
+- `ntnt db` (PostgreSQL): catch `CREATE SCHEMA AUTHORIZATION CURRENT_USER`
+  during planning and suggest an explicit schema name, instead of discovering
+  the name mismatch during deployment (#448).
 - `ntnt db` (PostgreSQL): recheck incoming foreign keys after the migration SQL
   runs. A newly visible key from an untracked table rolls back the migration
   instead of letting it commit changes outside the approved scope (#447).
