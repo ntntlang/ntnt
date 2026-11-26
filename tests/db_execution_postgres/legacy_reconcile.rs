@@ -11,10 +11,9 @@ fn save(path: &std::path::Path, plan: &mut Value) {
 fn compact_partial_index_reconciles_with_its_pre_native_plan_but_cannot_restart() {
     // Within the parser's token limit as authored, over it when the old
     // planner inserted a space after each comma before classifying the SQL.
-    let values = (1..=1500)
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
+    // Repeat the same value: the token count is what exercises compatibility.
+    // Distinct constants can make the predicate too large for pg_index on PG16.
+    let values = vec!["1"; 1500].join(",");
     let sql = format!("CREATE UNIQUE INDEX CONCURRENTLY t_id ON app.t(id) WHERE id IN ({values});");
     let (f, _) = concurrent_fixture(&sql);
     let path = f.root.path().join("upgrade.json");

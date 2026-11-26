@@ -218,7 +218,7 @@ impl Fixture {
 
     pub fn isolated_plan(&self, path: &str) -> Value {
         let r = self.isolated_command("plan", &["--out", path]);
-        assert_eq!(r["outcome"], "pass", "{:?}", diagnostic_codes(&r));
+        assert_eq!(r["outcome"], "pass", "{}", r["diagnostics"]);
         assert_eq!(r["scratch"]["cleanup"], "external");
         r
     }
