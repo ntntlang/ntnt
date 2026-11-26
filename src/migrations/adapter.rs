@@ -298,10 +298,11 @@ impl Adapter {
         endpoint: &Endpoint,
         schema: &str,
         wait: Duration,
+        isolated: bool,
     ) -> Result<Identity> {
         match (self, target) {
             (Self::Postgres(pg), Identity::Postgres(target)) => pg
-                .prepare_scratch(target, endpoint, schema, wait)
+                .prepare_scratch(target, endpoint, schema, wait, isolated)
                 .await
                 .map(Identity::Postgres),
             (Self::Sqlite(db), Identity::Sqlite(target)) => {

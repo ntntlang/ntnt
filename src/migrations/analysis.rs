@@ -35,12 +35,11 @@ pub(crate) struct OutsideScope {
     pub via: Via,
 }
 /// A migration whose whole script is one named `CREATE INDEX CONCURRENTLY` on
-/// a managed table. Replay builds the same index without CONCURRENTLY, inside
-/// its rollback-only transaction; the catalog result is identical.
+/// a managed table. The name identifies the target's recoverable attempt;
+/// the SQL submitted to PostgreSQL always comes from the captured migration.
 #[derive(Clone, Debug)]
 pub(crate) struct ConcurrentIndex {
     pub name: String,
-    pub replay_sql: String,
 }
 pub(crate) fn concurrent_index(sql: &str, schema: &str) -> Option<ConcurrentIndex> {
     let statements = parse(sql)?;
@@ -61,12 +60,7 @@ pub(crate) fn concurrent_index(sql: &str, schema: &str) -> Option<ConcurrentInde
     } else {
         last.value.to_lowercase()
     };
-    let mut replay = index.clone();
-    replay.concurrently = false;
-    Some(ConcurrentIndex {
-        name: folded,
-        replay_sql: Statement::CreateIndex(replay).to_string(),
-    })
+    Some(ConcurrentIndex { name: folded })
 }
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub(crate) struct PredictedLock {
@@ -318,7 +312,6 @@ fn allowed(statement: &Statement, schema: &str) -> bool {
                 .is_some_and(|n| n.0.len() == 1 && name(n, schema))
                 && name(&i.table_name, schema)
                 && i.using.is_none()
-                && !i.concurrently
                 && index_columns(&i.columns)
                 && i.predicate.is_none()
                 && i.with.is_empty()
@@ -355,17 +348,8 @@ pub(crate) fn analyze_for(engine: &str, sql: &str, schema: &str) -> Analysis {
     if engine == "sqlite" {
         super::sqlite_sql::analyze(&mut a, sql);
     } else {
-        if let Some(index) = concurrent_index(sql, schema) {
-            postgres_script(&mut a, &index.replay_sql, schema);
-            a.non_transactional = true;
-            for lock in &mut a.locks {
-                lock.mode = SHARE_UPDATE_EXCLUSIVE;
-            }
-            a.lock_warnings
-                .retain(|w| w.code != "BLOCKS_WRITES_WHILE_INDEXING");
-        } else {
-            postgres_script(&mut a, sql, schema);
-        }
+        a.non_transactional = concurrent_index(sql, schema).is_some();
+        postgres_script(&mut a, sql, schema);
     }
     a.hazards.sort();
     a.hazards.dedup();
@@ -526,7 +510,9 @@ fn postgres_script(a: &mut Analysis, sql: &str, schema: &str) {
                 _ => None,
             })
             .collect();
-        if let Some(escape) = escapes_transaction(&words) {
+        if let Some(escape) = escapes_transaction(&words)
+            .filter(|e| !a.non_transactional || *e != "NON_TRANSACTIONAL")
+        {
             a.replay_supported = false;
             a.unknowns.push(escape.into());
         }
@@ -3143,12 +3129,7 @@ mod tests {
         assert!(a.lock_warnings.is_empty(), "{a:?}");
         let ci = concurrent_index(sql, "app").unwrap();
         assert_eq!(ci.name, "t_id");
-        assert!(
-            !ci.replay_sql.to_uppercase().contains("CONCURRENTLY"),
-            "{}",
-            ci.replay_sql
-        );
-        assert!(ci.replay_sql.contains("CREATE INDEX"), "{}", ci.replay_sql);
+
         // Anything else stays rejected: other statements, no name, another schema.
         for sql in [
             "CREATE INDEX CONCURRENTLY t_id ON app.t(id); CREATE TABLE app.x(id int);",

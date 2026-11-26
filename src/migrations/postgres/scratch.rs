@@ -475,10 +475,10 @@ const SHARED_STATE: &str = r#"SELECT pg_catalog.jsonb_build_object(
 /// `pg_authid` to compare its content. `pg_database` is compared by content
 /// instead: a GRANT on another database that grants nothing still
 /// rewrites its row.
-const SHARED_WRITES: &str = r#"SELECT c.relname::text FROM pg_catalog.pg_class c WHERE c.relisshared AND c.relkind='r'
- AND c.relname IN ('pg_authid','pg_auth_members','pg_parameter_acl','pg_shseclabel','pg_replication_origin','pg_subscription')
- AND pg_catalog.pg_stat_get_xact_tuples_inserted(c.oid)+pg_catalog.pg_stat_get_xact_tuples_updated(c.oid)+pg_catalog.pg_stat_get_xact_tuples_deleted(c.oid)>0
-ORDER BY 1"#;
+macro_rules! protected_shared_catalogs {
+    () => { " FROM pg_catalog.pg_class c WHERE c.relisshared AND c.relkind='r' AND c.relname IN ('pg_authid','pg_auth_members','pg_parameter_acl','pg_shseclabel','pg_replication_origin','pg_subscription')" };
+}
+const SHARED_WRITES: &str = concat!("SELECT c.relname::text", protected_shared_catalogs!(), " AND pg_catalog.pg_stat_get_xact_tuples_inserted(c.oid)+pg_catalog.pg_stat_get_xact_tuples_updated(c.oid)+pg_catalog.pg_stat_get_xact_tuples_deleted(c.oid)>0 ORDER BY 1");
 
 /// What a scratch session's replay set up, for cleanup.
 #[derive(Default)]
@@ -497,6 +497,10 @@ pub(super) struct Replay {
 }
 
 impl Replay {
+    pub(super) fn mark_external(&self) {
+        // CREATE_MARKER starts with an empty xid8 array. Never add writers.
+        *self.xids.lock().expect("scratch marker XIDs") = "{}".into();
+    }
     pub(super) fn new(tls: Option<super::super::postgres_tls::MakeRustls>) -> Self {
         Self {
             tls,
@@ -765,6 +769,16 @@ fn cleanup_failed(cause: Diagnostic) -> Diagnostic {
 }
 
 impl Postgres {
+    /// Sample across the server's internal commits, which end the per-xact
+    /// counters. Force this backend to flush at the *preceding* commit. The
+    /// isolated instance has no unrelated workload; interference fails closed.
+    pub(super) async fn committed_shared_writes(&self) -> Result<String> {
+        self.batch("SELECT pg_catalog.pg_stat_force_next_flush()")
+            .await?;
+        let sql = concat!("SELECT coalesce(sum(pg_catalog.pg_stat_get_tuples_inserted(c.oid)::numeric + pg_catalog.pg_stat_get_tuples_updated(c.oid) + pg_catalog.pg_stat_get_tuples_deleted(c.oid)),0)::text", protected_shared_catalogs!());
+        Ok(self.rows(sql, &[]).await?[0].get(0))
+    }
+
     /// Take the replay lock, waiting up to `wait` for another replay on
     /// this scratch database, then fail with `DB_SCRATCH_BUSY`. As with the
     /// migrator lock, the statement and client deadlines sit above the wait.
@@ -1038,7 +1052,7 @@ impl Postgres {
             d.source = migration.map(|m| m.name.clone());
             d
         };
-        if self.scratch.get().is_some() {
+        if self.scratch.get().is_some_and(|s| !s.isolated) {
             self.record_xids().await.map_err(attributed)?;
         }
         // RESET ALL after each migration restored synchronous_commit.

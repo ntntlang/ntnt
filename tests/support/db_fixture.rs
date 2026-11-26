@@ -99,6 +99,7 @@ disposable = true
             .env("DB_TARGET", &self.target_url)
             .env("DB_SCRATCH", &self.scratch_url)
             .env_remove("DB_APPROVAL")
+            .env_remove("NTNT_DB_REPLAY_CLUSTER")
             .env("NTNT_SECRETS_PROVIDER", "env")
             .env("NTNT_ENV", "development")
             .current_dir(self.root.path());

@@ -540,6 +540,18 @@ pub(super) async fn migrate(
 ) -> Result<()> {
     validate(inputs, saved)?;
     let action = Adoption::from_plan(inputs, saved)?;
+    // Reconciliation of an existing attempt may still use its original plan;
+    // starting new work must never trust the old plain-index approximation.
+    if saved["plan"]["execution"]["replay"] != "native-isolated-v1"
+        && saved["plan"]["pending"].as_array().is_some_and(|ms| {
+            ms.iter()
+                .any(|m| m["analysis"]["non_transactional"] == true)
+        })
+    {
+        let mut d = Diagnostic::new("DB_PLAN_STALE", "This plan predates native replay of its non-transactional migration. No work was started.");
+        d.next_action = "Generate a fresh plan on a private replay instance, review it and approve its new digest.".into();
+        return Err(d);
+    }
     authorize(inputs, saved, "migrate", rerun)?;
     report["database"] = json!(inputs.database_name);
     report["target"] = json!({"name":inputs.target_name,"schema":inputs.config.schema});

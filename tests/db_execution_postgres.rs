@@ -1,6 +1,10 @@
 //! Real fresh/populated rehearsal uses the production CLI and executor.
 #[path = "support/db_fixture.rs"]
 mod db_fixture;
+#[path = "db_execution_postgres/native_replay.rs"]
+mod native_replay;
+#[path = "support/native_scratch.rs"]
+mod native_scratch;
 use db_fixture::Fixture;
 use serde_json::Value;
 
@@ -2453,7 +2457,7 @@ fn concurrent_fixture(index_sql: &str) -> (Fixture, Value) {
         .batch_execute("INSERT INTO app.t VALUES (1), (2)")
         .unwrap();
     f.sql("0002_index.sql", index_sql);
-    let plan = f.plan("upgrade.json");
+    let plan = f.isolated_plan("upgrade.json");
     assert_eq!(plan["outcome"], "pass", "{plan}");
     assert_eq!(
         plan["plan"]["pending"][0]["analysis"]["non_transactional"], true,
@@ -2499,7 +2503,7 @@ fn concurrent_index_builds_while_writes_continue() {
     assert_eq!(r["progress"][1]["non_transactional"], true, "{r}");
     assert_eq!(index_state(&f, "t_id"), Some(true));
     assert_eq!(ledger_rows(&f), 2);
-    assert_eq!(f.command("verify")["outcome"], "pass");
+    assert_eq!(f.isolated_command("verify", &[])["outcome"], "pass");
 }
 
 #[test]
@@ -2515,7 +2519,7 @@ fn failed_concurrent_build_removes_its_invalid_index() {
     assert_eq!(r["progress"][1]["cleanup"], "dropped_invalid_index", "{r}");
     assert_eq!(index_state(&f, "t_id"), None, "invalid index left behind");
     assert_eq!(ledger_rows(&f), 1, "the failed attempt is removed");
-    assert_eq!(f.command("verify")["outcome"], "pass");
+    assert_eq!(f.isolated_command("verify", &[])["outcome"], "pass");
     // Fix the data and rerun the same reviewed plan.
     f.target()
         .batch_execute("DELETE FROM app.t WHERE ctid = (SELECT max(ctid) FROM app.t WHERE id = 1)")
@@ -2641,7 +2645,10 @@ fn interrupted_build_blocks_later_work_until_reconciled() {
     assert_eq!(index_state(&f, "t_id"), Some(false));
 
     // Inspection, planning and the same plan all refuse to continue.
-    assert!(code(&f.command("status"), "DB_ATTEMPT_UNRESOLVED"));
+    assert!(code(
+        &f.isolated_command("status", &[]),
+        "DB_ATTEMPT_UNRESOLVED"
+    ));
     let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
     assert!(code(&r, "DB_ATTEMPT_UNRESOLVED"), "{r}");
     assert_eq!(
@@ -2650,7 +2657,10 @@ fn interrupted_build_blocks_later_work_until_reconciled() {
         "migrate must not drop it"
     );
     f.sql("0003_more.sql", "CREATE TABLE app.u(id INTEGER);");
-    assert!(code(&f.command("plan"), "DB_ATTEMPT_UNRESOLVED"));
+    assert!(code(
+        &f.isolated_command("plan", &[]),
+        "DB_ATTEMPT_UNRESOLVED"
+    ));
     std::fs::remove_file(f.root.path().join("migrations/0003_more.sql")).unwrap();
 
     // Reconciliation needs the same approval, then rolls the attempt back.
@@ -2667,7 +2677,7 @@ fn interrupted_build_blocks_later_work_until_reconciled() {
     assert_eq!(r["reconciliation"]["observed_index"], "invalid", "{r}");
     assert_eq!(index_state(&f, "t_id"), None);
     assert_eq!(attempt_state(&f), None);
-    assert_eq!(f.command("verify")["outcome"], "pass");
+    assert_eq!(f.isolated_command("verify", &[])["outcome"], "pass");
     let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(index_state(&f, "t_id"), Some(true));
@@ -2696,7 +2706,7 @@ fn interrupted_build_that_finished_reconciles_as_completed() {
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["reconciliation"]["resolution"], "completed", "{r}");
     assert_eq!(attempt_state(&f).as_deref(), Some("applied"));
-    assert_eq!(f.command("verify")["outcome"], "pass");
+    assert_eq!(f.isolated_command("verify", &[])["outcome"], "pass");
     let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["progress"][1]["state"], "already_applied", "{r}");
@@ -2765,7 +2775,10 @@ fn attempt_interrupted_under_0_6_1_reconciles_with_its_plan() {
     assert_eq!(index_state(&f, "t_id"), Some(false));
     // After upgrading, no new plan can be made until the attempt is resolved,
     // so reconcile must accept the plan 0.6.1 saved.
-    assert!(code(&f.command("plan"), "DB_ATTEMPT_UNRESOLVED"));
+    assert!(code(
+        &f.isolated_command("plan", &[]),
+        "DB_ATTEMPT_UNRESOLVED"
+    ));
     let digest = saved_by_0_6_1(&f, "legacy.json");
     let with_legacy_plan = |command: &str| {
         let output = f
@@ -2786,7 +2799,7 @@ fn attempt_interrupted_under_0_6_1_reconciles_with_its_plan() {
     let r = with_legacy_plan("migrate");
     assert!(code(&r, "DB_PLAN_STALE"), "{r}");
     assert_eq!(index_state(&f, "t_id"), None);
-    let fresh = f.plan("fresh.json");
+    let fresh = f.isolated_plan("fresh.json");
     let r = f.apply("fresh.json", fresh["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(index_state(&f, "t_id"), Some(true));
@@ -2882,7 +2895,7 @@ fn concurrent_index_migrations_cannot_have_checks() {
         "[ensures]\nok='SELECT true'\n",
     )
     .unwrap();
-    let r = f.command("plan");
+    let r = f.isolated_command("plan", &[]);
     assert!(code(&r, "DB_REPLAY_UNSUPPORTED"), "{r}");
 }
 
@@ -3052,7 +3065,7 @@ fn statement_limit_bounds_a_concurrent_index_build() {
         "CREATE INDEX CONCURRENTLY t_id ON app.t(id);",
     );
     set_limits(&f, "statement_seconds = 2");
-    let low = f.plan("low.json");
+    let low = f.isolated_plan("low.json");
     // SHARE conflicts with the build's SHARE UPDATE EXCLUSIVE, so the build
     // waits before it creates anything. The lock is held until after the
     // outcome, so only the limit ends the wait; the 90-second default would
@@ -3068,7 +3081,7 @@ fn statement_limit_bounds_a_concurrent_index_build() {
     assert_eq!(index_state(&f, "t_id"), None);
     assert_eq!(ledger_rows(&f), 1, "the failed attempt is removed");
     set_limits(&f, &raised("statement_seconds"));
-    let raised_plan = f.plan("raised.json");
+    let raised_plan = f.isolated_plan("raised.json");
     let child = spawn_plan(&f, "raised.json", &raised_plan);
     let (_, _, query) = lock_waiter(&mut f);
     assert!(query.contains("CREATE INDEX CONCURRENTLY"), "{query}");
@@ -3079,7 +3092,7 @@ fn statement_limit_bounds_a_concurrent_index_build() {
     assert_eq!(r["outcome"], "pass", "{r}");
     assert_eq!(r["progress"][1]["state"], "committed", "{r}");
     assert_eq!(index_state(&f, "t_id"), Some(true));
-    assert_eq!(f.command("verify")["outcome"], "pass");
+    assert_eq!(f.isolated_command("verify", &[])["outcome"], "pass");
 }
 
 #[test]
@@ -3313,7 +3326,7 @@ fn reconcile_compares_the_schemas_the_history_creates() {
         "0002_index.sql",
         "CREATE INDEX CONCURRENTLY t_id ON app.t(id);",
     );
-    let plan = f.plan("upgrade.json");
+    let plan = f.isolated_plan("upgrade.json");
     assert_eq!(
         plan["plan"]["pending"][0]["analysis"]["non_transactional"], true,
         "{plan}"
@@ -3340,7 +3353,7 @@ fn reconcile_compares_the_schemas_the_history_creates() {
     assert_eq!(r["reconciliation"]["resolution"], "not_started", "{r}");
     let r = f.apply("upgrade.json", plan["plan_digest"].as_str());
     assert_eq!(r["outcome"], "pass", "{r}");
-    assert_eq!(f.command("verify")["outcome"], "pass");
+    assert_eq!(f.isolated_command("verify", &[])["outcome"], "pass");
 }
 
 /// Josh's decision on #420 (2026-11-21): statements outside the managed

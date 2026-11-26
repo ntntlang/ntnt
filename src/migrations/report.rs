@@ -1069,6 +1069,27 @@ async fn inspect_observed(
     } else {
         vec![]
     };
+    let count = adoption.as_ref().map_or_else(
+        || {
+            if command == "plan" {
+                inputs.migrations.len()
+            } else {
+                applied
+            }
+        },
+        |a| a.count,
+    );
+    let native_source = inputs
+        .migrations
+        .iter()
+        .take(count)
+        .enumerate()
+        .find_map(|(i, m)| {
+            (inputs.config.engine == "postgresql"
+                && report["source"]["migrations"][i]["analysis"]["non_transactional"] == true)
+                .then_some(&m.name)
+        });
+    let isolated = native_source.is_some();
     if let Some(scratch_config) = &inputs.config.scratch {
         let mut cleanup_failure = None;
         let mut unlock_failure = None;
@@ -1093,19 +1114,20 @@ async fn inspect_observed(
                         &scratch_config.endpoint,
                         &inputs.config.schema,
                         inputs.limits().migrator_wait(),
+                        isolated,
                     )
-                    .await?;
+                    .await
+                    .map_err(|mut d| {
+                        if d.code == "DB_REPLAY_ISOLATION_REQUIRED" {
+                            d.source = native_source.cloned();
+                        }
+                        d
+                    })?;
                 report["scratch"] = json!({"identity":scratch_identity,"disposable":true});
                 if let Some(recovered) = scratch.scratch_recovered() {
                     report["scratch"]["recovered"] = recovered;
                 }
-                let count = if let Some(action) = &adoption {
-                    action.count
-                } else if command == "plan" {
-                    inputs.migrations.len()
-                } else {
-                    applied
-                };
+
                 replay_prefix(
                     &scratch,
                     inputs,
@@ -1130,6 +1152,13 @@ async fn inspect_observed(
             };
             if work.as_ref().is_err_and(|d| d.code == "DB_TIMEOUT") {
                 scratch.cancel_running().await;
+            }
+            if isolated {
+                // Dropping the connection rolls back any uncommitted work and
+                // releases its session locks. No object-level cleanup or claim
+                // that the external owner has already discarded its storage.
+                report["scratch"]["cleanup"] = json!(if report["scratch"]["identity"].is_object() { "external" } else { "not_needed" });
+                return work;
             }
             let (cleanup, unlocked) = scratch.cleanup_scratch().await;
             unlock_failure = unlocked;
@@ -1175,6 +1204,10 @@ async fn inspect_observed(
         if let Some(d) = unlock_failure {
             diagnostic(&mut report, d);
         }
+    } else if let Some(source) = native_source {
+        let mut d = super::postgres::isolation_required();
+        d.source = Some(source.clone());
+        diagnostic(&mut report, d);
     } else {
         diagnostic(&mut report,Diagnostic::new("DB_REFERENCE_UNAVAILABLE","No explicitly disposable matching scratch database/file is configured; expected state is unverified."));
     }
@@ -1286,6 +1319,9 @@ async fn inspect_observed(
             applied
         }..];
         let mut execution = json!({"format":if adoption.is_some() {super::adoption::format(&inputs.config.engine)} else {adapter::execution_format(&inputs.config.engine)},"prefix_fingerprints":fingerprints});
+        if isolated && candidate_outcome == "pass" {
+            execution["replay"] = json!("native-isolated-v1");
+        }
         // The limits migrate will use are part of what is reviewed and approved.
         if let Some(limits) = inputs.plan_limits() {
             execution["limits"] = limits;
@@ -1501,6 +1537,7 @@ mod tests {
                 scratch_endpoint,
                 "main",
                 std::time::Duration::from_secs(1),
+                false,
             )
             .await
             .unwrap();
@@ -1543,6 +1580,7 @@ mod tests {
                     scratch_endpoint,
                     "main",
                     std::time::Duration::from_secs(1),
+                    false,
                 )
                 .await
                 .unwrap();
@@ -1809,6 +1847,7 @@ mod tests {
                             scratch_endpoint,
                             "main",
                             std::time::Duration::from_secs(1),
+                            false,
                         )
                         .await
                         .unwrap();
