@@ -387,5 +387,14 @@ fn sqlite_target_coverage_diagnostic_names_the_objects() {
             stdout.contains("  Objects: [\"table:\\\"generated\\\"\"]\n  Next: "),
             "{stdout}"
         );
+        let (passed, filtered) = human(&f, command, &["--object", "no_such_entry"]);
+        assert!(!passed);
+        assert!(
+            filtered.contains(&format!(
+                "Catalog coverage: 0 objects matched --object; unverified objects: {}",
+                r["catalog"]["uncovered"]
+            )),
+            "{filtered}"
+        );
     }
 }

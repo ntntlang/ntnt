@@ -10,6 +10,9 @@
 
 ### Fixed
 
+- `ntnt db status`, `plan`, and `verify` show diagnostics and next steps before
+  catalog details. Use `--object <text>` for matching entries or `--json` for
+  the full report (#432).
 - `ntnt db` (SQLite): migrations can use `IS NOT` in a trigger, `GLOB` in a
   `CHECK`, and `STRICT, WITHOUT ROWID` on the same table (#426).
 - `ntnt db` (PostgreSQL): catch `CREATE SCHEMA AUTHORIZATION CURRENT_USER`

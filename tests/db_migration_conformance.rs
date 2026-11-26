@@ -342,6 +342,74 @@ fn sqlite_verify_requires_no_pending() {
 fn postgres_verify_requires_no_pending() {
     verify_requires_no_pending(Fixture::pg());
 }
+fn human_catalog_summary(f: Fixture) {
+    f.sql(
+        "0001_items.sql",
+        &format!(
+            "CREATE TABLE {}.items(quiet_column INTEGER, other_column TEXT);",
+            f.schema()
+        ),
+    );
+    let plan = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", plan["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.execute(&format!(
+        "ALTER TABLE {}.items ADD COLUMN outside_plan TEXT",
+        f.schema()
+    ));
+
+    for command in ["status", "plan", "verify"] {
+        let report = f.command(command, &[]);
+        let objects = report["catalog"]["objects"].as_object().unwrap();
+        assert!(objects.keys().any(|k| k.contains("quiet_column")));
+        assert!(objects.keys().any(|k| k.contains("other_column")));
+        let action = &diagnostic(&report, "DB_DRIFT")["next_action"];
+        for args in [&[][..], &["--object", "quiet_column"][..]] {
+            let out = f.human_output(command, args);
+            assert!(!out.status.success());
+            let text = String::from_utf8(out.stdout).unwrap();
+            assert!(
+                text.starts_with(&format!("Database {command}: fail")),
+                "{text}"
+            );
+            assert!(
+                !text.contains("other_column"),
+                "unrequested column printed by {command}"
+            );
+            let remedy = text.find(action.as_str().unwrap()).unwrap();
+            let difference = text
+                .lines()
+                .find(|l| l.starts_with("Drift:") && l.contains("outside_plan"))
+                .unwrap();
+            assert!(
+                text.find("DB_DRIFT").unwrap() < remedy && remedy < text.find(difference).unwrap()
+            );
+            if args.is_empty() {
+                assert!(!text.contains("quiet_column"));
+                assert!(
+                    text.contains(&format!(
+                        "Catalog coverage: {} objects observed",
+                        objects.len()
+                    )),
+                    "{text}"
+                );
+            } else {
+                assert!(text.find(difference).unwrap() < text.find("quiet_column").unwrap());
+            }
+        }
+    }
+}
+#[test]
+fn sqlite_human_catalog_summary() {
+    human_catalog_summary(Fixture::sqlite());
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn postgres_human_catalog_summary() {
+    human_catalog_summary(Fixture::pg());
+}
 fn history_and_drift(f: Fixture) {
     let initial = first(&f);
     let sql = std::fs::read_to_string(f.root().join("migrations/0001_initial.sql")).unwrap();

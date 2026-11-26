@@ -8,6 +8,11 @@ ordinary `verify` can report `pass (1 pending)`; the same check with the flag
 reports `fail (1 pending)` and exits nonzero. Neither command applies the
 missing migration (#432).
 
+`status`, `plan`, and `verify` no longer print every table and column by
+default. The verdict, migration counts, and any diagnostic and next step come
+first. Schema differences and unverified objects are still named. Use
+`--object accounts` to inspect matching entries, or `--json` for the full report.
+
 ## SQLite migrations
 
 `ntnt db plan` used to report syntax errors for SQL that SQLite itself
