@@ -252,6 +252,59 @@ fn renumber_advice(inputs: &CapturedInputs, migration: &Migration, last: u64) ->
         .unwrap_or_default();
     format!("This target has not applied {name}, but it is numbered below {last}, the last ID in the target's ledger, and migrations run in ID order. Rename {what} to an unused ID above {last}{keep}{example}, as for DB_DUPLICATE_ID, only if no target has applied or adopted it yet; never renumber a migration once any target has applied or adopted it.")
 }
+/// A changed ID can move a file away from the first divergent position.
+/// Look only in the unverified suffix, never among files already recorded
+/// under their own names. An adoption checksum is not a file checksum.
+fn changed_id_restore<'a>(
+    history: &'a History,
+    inputs: &CapturedInputs,
+    entry: &HistoryEntry,
+    remaining: &[Migration],
+) -> Option<(&'a str, String)> {
+    use std::collections::HashSet;
+    let present: HashSet<_> = inputs.migrations.iter().map(|m| m.name.as_str()).collect();
+    let mut missing = history.entries.iter().filter(|e| {
+        matches!(e.state.as_str(), "applied" | "imported") && !present.contains(e.name.as_str())
+    });
+    let original = missing.next()?;
+    let name = ledger_name(original)?;
+    let dir = &inputs.config.migrations_dir;
+    // With several missing originals, don't guess which one was moved.
+    if missing.next().is_none() {
+        let recorded: HashSet<_> = history.entries.iter().map(|e| e.name.as_str()).collect();
+        let mut matching = remaining.iter().filter(|m| {
+            !recorded.contains(m.name.as_str())
+                && super::inventory::migration_checksum(
+                    name,
+                    m.sql.as_bytes(),
+                    m.metadata.as_deref(),
+                ) == original.checksum
+        });
+        if let Some(m) = matching.next() {
+            if name != entry.name && m.name != remaining.first()?.name {
+                return None; // Neither side explains the first divergence.
+            }
+            if matching.next().is_none() {
+                let current = &m.name;
+                let sidecar = if m.metadata.is_some() {
+                    format!(
+                        " Rename its sidecar {} back to {} too.",
+                        sidecar_path(dir, current),
+                        sidecar_path(dir, name)
+                    )
+                } else {
+                    String::new()
+                };
+                return Some((name, format!("{dir}/{current} matches the recorded checksum under the missing name {name}. Rename {dir}/{current} back to {dir}/{name}.{sidecar} Do not run this migration again.")));
+            }
+        } else if name != entry.name {
+            // A genuinely new file before an unrelated missing one: keep the
+            // existing advice for the first difference.
+            return None;
+        }
+    }
+    Some((name, format!("Compare with the applied release and restore {dir}/{name} and its original sidecar, if any. These files do not identify a unique rename; do not change the ledger.")))
+}
 /// `DB_HISTORY_DIVERGENT` at ledger position `position`, where the ledger
 /// records `entry` and the captured history has `migration` (#423).
 fn divergent(
@@ -267,6 +320,13 @@ fn divergent(
         recorded(entry), migration.name, migration.id
     );
     let applied = |name: &str| history.entries.iter().any(|e| e.name == name);
+    if entry.id != migration.id.to_string() {
+        if let Some((name, advice)) =
+            changed_id_restore(history, inputs, entry, &inputs.migrations[position - 1..])
+        {
+            return history_refusal("DB_HISTORY_DIVERGENT", name, message, advice);
+        }
+    }
     // The ledger's ID under another name is an applied migration renamed,
     // not one merged in below the last applied ID: renumbering it would
     // make SQL the target already ran pending again.
@@ -2119,6 +2179,46 @@ mod tests {
         // Following the advice: under its applied name the history matches.
         let (_fixed, fixed) = named_inputs(&[A, B, C]);
         assert_eq!(prefix_with_attempt(&history, &fixed).unwrap(), (3, None));
+    }
+
+    /// #446: only the exact SQL and sidecar under the original name match.
+    /// A duplicate copy, changed bytes, or multiple missing originals is
+    /// not enough evidence to recommend moving a particular file.
+    #[test]
+    fn changed_id_restore_requires_one_exact_match() {
+        let (_before, applied) = named_inputs(&[A, B, C]);
+        let history = ledger(&applied, 0, 3);
+        let moved = ("0025_bee.sql", B.1);
+        let (_after, now) = named_inputs(&[A, moved, C]);
+        let d = refusal(&history, &now);
+        assert_eq!(d.source.as_deref(), Some(B.0));
+        assert!(
+            d.next_action
+                .contains("Rename migrations/0025_bee.sql back to migrations/0020_b.sql."),
+            "{d:?}"
+        );
+        assert!(!d.next_action.contains(".toml"));
+        for files in [
+            vec![A, moved, C, ("0040_copy.sql", B.1)],
+            vec![("0005_bee.sql", B.1), A, C, ("0040_copy.sql", B.1)],
+            vec![A, moved, ("0025_bee.toml", ""), C],
+            vec![A, (moved.0, "SELECT 42;"), C],
+            vec![A, moved, ("0035_see.sql", B.1)],
+        ] {
+            let (_after, now) = named_inputs(&files);
+            let d = refusal(&history, &now);
+            assert_eq!(d.code, "DB_HISTORY_DIVERGENT");
+            assert_eq!(d.source.as_deref(), Some(B.0));
+            assert!(
+                d.next_action.contains("restore migrations/0020_b.sql"),
+                "{d:?}"
+            );
+            assert!(
+                !d.next_action.contains(moved.0) && !d.next_action.contains("above"),
+                "{d:?}"
+            );
+            shows_no_sql(&d);
+        }
     }
 
     /// CodeRabbit (report.rs:284): an applied migration renamed with its

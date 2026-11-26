@@ -13,6 +13,11 @@ default. The verdict, migration counts, and any diagnostic and next step come
 first. Schema differences and unverified objects are still named. Use
 `--object accounts` to inspect matching entries, or `--json` for the full report.
 
+If an applied file such as `0020_b.sql` was renamed to `0025_bee.sql`, `ntnt db
+status` can now identify it by checking its contents under the original name.
+Restore the original filename and its `.toml` sidecar if it has one; no SQL
+needs to run again. The database ledger does not change (#446).
+
 ## SQLite migrations
 
 `ntnt db plan` used to report syntax errors for SQL that SQLite itself

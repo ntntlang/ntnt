@@ -427,6 +427,21 @@ impl Migration {
     }
 }
 
+/// V1 binds the filename as well as the exact SQL and optional sidecar bytes.
+pub(super) fn migration_checksum(name: &str, sql: &[u8], metadata: Option<&[u8]>) -> String {
+    digest(&[
+        b"ntnt-migration-v1",
+        name.as_bytes(),
+        sql,
+        if metadata.is_some() {
+            b"sidecar"
+        } else {
+            b"absent"
+        },
+        metadata.unwrap_or_default(),
+    ])
+}
+
 pub(crate) struct CapturedInputs {
     pub config: Database,
     pub database_name: String,
@@ -1277,17 +1292,7 @@ impl CapturedInputs {
                     FIX_REBUILD,
                 ));
             }
-            let checksum = digest(&[
-                b"ntnt-migration-v1",
-                name.as_bytes(),
-                sql_bytes,
-                if metadata.is_some() {
-                    b"sidecar"
-                } else {
-                    b"absent"
-                },
-                metadata.as_deref().unwrap_or_default(),
-            ]);
+            let checksum = migration_checksum(name, sql_bytes, metadata.as_deref());
             migrations.push(Migration {
                 id,
                 name: name.clone(),
