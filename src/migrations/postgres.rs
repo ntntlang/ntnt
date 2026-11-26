@@ -165,19 +165,21 @@ fn script_statement(e: &tokio_postgres::Error, script: &str) -> Option<usize> {
 
 fn script_error(e: &tokio_postgres::Error, script: &str, replay: bool) -> Option<Diagnostic> {
     let code = e.code()?.code();
-    let cause = match code {
-        "42703" => "undefined column",
-        "42P01" => "undefined table",
-        "42601" => "syntax error",
-        _ => return None,
-    };
-    let location =
-        script_statement(e, script).map_or_else(String::new, |n| format!("Statement {n}: "));
-    let mut d = Diagnostic::new(
-        "DB_POSTGRES",
-        &format!("{location}{cause} (SQLSTATE {code})."),
-    );
-    if replay {
+    // A description is optional. A server with a new or unclassified error
+    // code can still identify the failing statement in the submitted SQL.
+    let mut d = driver_error(e);
+    if let Some(cause) = match code {
+        "42703" => Some("undefined column"),
+        "42P01" => Some("undefined table"),
+        "42601" => Some("syntax error"),
+        _ => None,
+    } {
+        d.message = format!("{cause} (SQLSTATE {code}).");
+    }
+    if let Some(n) = script_statement(e, script) {
+        d.message = format!("Statement {n}: {}", d.message);
+    }
+    if replay && d.code == "DB_POSTGRES" {
         d.next_action = "Compare the migration with the schema created by its predecessors. If the file is pending, correct it and rerun `ntnt db plan`; if it was applied, first verify the original release files. Scratch replay did not run this SQL on the target.".into();
     }
     Some(d)

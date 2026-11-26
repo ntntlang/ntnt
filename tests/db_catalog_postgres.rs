@@ -701,6 +701,17 @@ fn plan_names_the_statement_with_an_undefined_column_without_quoting_sql() {
         .as_str()
         .unwrap()
         .contains("rerun `ntnt db plan`"));
+    // Location comes from PostgreSQL, independently of NTNT's dictionary
+    // of error descriptions. A different SQLSTATE still points at step 2.
+    f.sql(file, "SELECT 1; SELECT private_test_missing_fn();");
+    let other = f.command("plan");
+    let d = diagnostic(&other, "DB_POSTGRES").unwrap();
+    let message = d["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Statement 2:") && message.contains("42883"),
+        "{d}"
+    );
+    assert!(!d.to_string().contains("private_test_missing_fn"));
     // An internal query position is *not* a position in the migration.
     f.sql(file, "DO $$ BEGIN EXECUTE 'SELECT private_canary'; END $$;");
     let internal = f.command("plan");
