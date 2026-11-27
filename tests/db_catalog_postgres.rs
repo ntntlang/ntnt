@@ -630,7 +630,16 @@ fn unsupported_pending_routines_never_run_and_do_not_hide_applied_verification()
         let r = f.command("plan");
         assert!(has_code(&r, expected), "{sql}: {}", r["diagnostics"]);
         assert_eq!(r["drift"]["outcome"], "pass");
-        assert_eq!(r["plan"]["candidate"]["outcome"], "unknown");
+        // The DO ran and PostgreSQL raised an exception. The other candidates
+        // were never run, so we have no engine verdict about their SQL.
+        assert_eq!(
+            r["plan"]["candidate"]["outcome"],
+            if expected == "DB_POSTGRES" {
+                "fail"
+            } else {
+                "unknown"
+            }
+        );
         assert_eq!(f.command("verify")["outcome"], "pass");
         assert!(!r.to_string().contains("secret_payload"));
     }
@@ -4302,6 +4311,12 @@ fn a_replay_cut_short_by_its_deadline_is_cleaned_up() {
         d["message"].as_str().unwrap().contains("Scratch replay"),
         "{d}"
     );
+    let advice = d["next_action"].as_str().unwrap();
+    assert!(
+        advice.contains("rerun inspection") && !advice.contains("reconcile"),
+        "{d}"
+    );
+    assert_eq!(r["plan"]["candidate"]["outcome"], "unknown");
     assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
 }

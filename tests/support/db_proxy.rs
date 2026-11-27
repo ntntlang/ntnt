@@ -64,6 +64,7 @@ pub enum Fault {
     BeforeCommit,
     AfterCommit,
     AfterCommitUnavailable,
+    AfterCreateIndex,
     Rollback,
 }
 
@@ -134,8 +135,18 @@ impl Proxy {
                             let mut backend = server.try_clone()?;
                             let mut output = client.try_clone()?;
                             let suppress_backend = suppress.clone();
+                            let fired_backend = fired.clone();
                             let reader = std::thread::spawn(move || {
                                 while let Ok(bytes) = frame(&mut backend) {
+                                    // This scratch plan builds just one index. Match the
+                                    // server's completion, not the query or ReadyForQuery.
+                                    if matches!(fault, Fault::AfterCreateIndex)
+                                        && bytes[0] == b'C'
+                                        && &bytes[5..] == b"CREATE INDEX\0"
+                                        && !fired_backend.swap(true, Ordering::SeqCst)
+                                    {
+                                        break; // never forward the build acknowledgement
+                                    }
                                     if suppress_backend.load(Ordering::SeqCst) {
                                         // A pipelined Close/Sync can still have a pending
                                         // ReadyForQuery. Wait for this COMMIT's own
@@ -160,6 +171,7 @@ impl Proxy {
                                     | Fault::AfterCommit
                                     | Fault::AfterCommitUnavailable => selected,
                                     Fault::Rollback => is_rollback,
+                                    Fault::AfterCreateIndex => false, // backend-driven fault
                                 };
                                 if hit && !fired.swap(true, Ordering::SeqCst) {
                                     if matches!(
@@ -213,6 +225,23 @@ impl Drop for Proxy {
     }
 }
 
+pub(super) fn proxied_scratch_plan(
+    f: &super::Fixture,
+    scratch: &super::native_scratch::NativeScratch,
+    upstream: &std::path::Path,
+    fault: Fault,
+) -> (Proxy, std::process::Command) {
+    let proxy = Proxy::for_host(fault, 1, upstream.to_str().unwrap().into());
+    let mut cmd = scratch.process(f, "plan");
+    let host = proxy.host().replace('\\', "\\\\").replace('\'', "\\'");
+    let name = &f.scratch;
+    cmd.env(
+        "DB_SCRATCH",
+        format!("host='{host}' user={name} dbname={name} sslmode=disable"),
+    );
+    (proxy, cmd)
+}
+
 #[test]
 #[ignore = "requires disposable PostgreSQL and Docker; mandatory CI execution lane"]
 fn isolated_prepare_lost_commit_ack_requires_external_cleanup() {
@@ -233,14 +262,7 @@ fn isolated_prepare_lost_commit_ack_requires_external_cleanup() {
     let scratch = NativeScratch::new(&f);
     let storage = scratch.storage();
     let upstream = storage.2.join("socket");
-    let proxy = Proxy::for_host(Fault::AfterCommit, 1, upstream.to_str().unwrap().into());
-    let mut cmd = scratch.process(&f, "plan");
-    let host = proxy.host().replace('\\', "\\\\").replace('\'', "\\'");
-    let name = &f.scratch;
-    cmd.env(
-        "DB_SCRATCH",
-        format!("host='{host}' user={name} dbname={name} sslmode=disable"),
-    );
+    let (proxy, mut cmd) = proxied_scratch_plan(&f, &scratch, &upstream, Fault::AfterCommit);
     let r = report(&mut cmd);
     assert!(proxy.fired.load(Ordering::SeqCst));
     assert!(super::code(&r, "DB_POSTGRES"));

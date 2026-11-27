@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- PostgreSQL plans distinguish a rejected migration (`fail`) from an interrupted rehearsal (`unknown`). SQL errors identify the statement when PostgreSQL supplies a position in the submitted file, without quoting server details (#424).
 - PostgreSQL plans rehearse concurrent index builds unchanged on a job-owned private instance. A regular build can no longer stand in for a concurrent one; transactional histories need no new setup.
 - `ntnt db`: when an applied migration is renamed to a different ID, a unique
   checksum match points back to its original filename and sidecar instead of

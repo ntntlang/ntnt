@@ -1950,7 +1950,8 @@ fn scratch_holds_only_what_declared_extensions_own() {
 fn untrusted_extensions_fail_with_a_named_privilege_diagnostic() {
     let f = Fixture::new();
     let refusal = |r: &Value| -> Value {
-        assert_eq!(r["outcome"], "unknown", "{r}");
+        assert_eq!(r["plan"]["candidate"]["outcome"], "fail", "{r}");
+        assert_eq!(r["outcome"], "fail", "{r}");
         r["diagnostics"]
             .as_array()
             .unwrap()
