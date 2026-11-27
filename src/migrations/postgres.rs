@@ -152,18 +152,62 @@ fn driver_error(e: &tokio_postgres::Error) -> Diagnostic {
         ),
     }
 }
+/// Never translate the position of an internal query into the submitted file.
+fn script_statement(e: &tokio_postgres::Error, script: &str) -> Option<usize> {
+    match e.as_db_error()?.position()? {
+        tokio_postgres::error::ErrorPosition::Original(at) => {
+            super::analysis::statement_at(script, *at as usize)
+        }
+        _ => None,
+    }
+}
+
+/// Called only at the actual SQL exchange. The deferred-constraint check
+/// can reject the migration too, but its command positions aren't the user's.
+fn migration_error(
+    e: &tokio_postgres::Error,
+    script: Option<&str>,
+    specific: Option<Diagnostic>,
+) -> Option<Diagnostic> {
+    let db = e.as_db_error()?;
+    let code = db.code().code();
+    // Positive evidence only. Cancellation, session loss, resource shortages,
+    // unknown classes etc. do not establish that the candidate was rejected.
+    let rejected =
+        matches!(code.get(..2), Some("0A" | "22" | "23" | "42" | "44" | "P0")) || code == "55P04";
+    let mut d = specific.unwrap_or_else(|| {
+        let mut d = driver_error(e);
+        let reason = match code {
+            "42703" => Some("undefined column"),
+            "42P01" => Some("undefined table"),
+            "42883" => Some("undefined function or operator"),
+            "42601" => Some("syntax error"),
+            "42501" => Some("insufficient privilege"),
+            "23505" => Some("unique constraint violation"),
+            "23503" => Some("foreign key violation"),
+            "23502" => Some("not-null violation"),
+            "23514" => Some("check constraint violation"),
+            "0A000" => Some("feature not supported"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            d.message = format!("{reason} (SQLSTATE {code}).");
+        }
+        if let Some(n) = script.and_then(|sql| script_statement(e, sql)) {
+            d.message = format!("Statement {n}: {}", d.message);
+        }
+        d
+    });
+    d.rejected_migration_sql = rejected;
+    Some(d)
+}
+
 /// SQLSTATE 55P04: a statement used an enum value that `ALTER TYPE ... ADD
 /// VALUE` added in the same transaction. Names the statement from the
 /// error's position, when PostgreSQL gives one, and the statements of
 /// `script` that add enum values; the server's text is not shown.
 fn new_enum_value(e: &tokio_postgres::Error, script: &str) -> Diagnostic {
-    let statement = e
-        .as_db_error()
-        .and_then(|db| match db.position() {
-            Some(tokio_postgres::error::ErrorPosition::Original(at)) => Some(*at as usize),
-            _ => None,
-        })
-        .and_then(|at| super::analysis::statement_at(script, at));
+    let statement = script_statement(e, script);
     let uses = statement.map_or("A statement".to_owned(), |n| format!("Statement {n}"));
     let added = match super::analysis::enum_value_additions(script).as_slice() {
         [] => String::new(),
@@ -917,7 +961,13 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     /// so the result matches the plan's catalog. Settings are restored on
     /// every path, and a build error is reported in preference to a restore
     /// error. `limit` bounds the statement, waits and table scan included.
-    async fn outside_transaction(&self, sql: &str, schema: &str, limit: Duration) -> Result<()> {
+    async fn outside_transaction(
+        &self,
+        sql: &str,
+        schema: &str,
+        limit: Duration,
+        classify: impl FnOnce(&tokio_postgres::Error) -> Option<Diagnostic>,
+    ) -> Result<()> {
         let result = async {
             self.batch(&format!(
                 "SET default_transaction_read_only=off; SET search_path=pg_catalog,{}; SET default_tablespace=''; SET temp_tablespaces=''; SET lock_timeout=0; SET statement_timeout='{}s';",
@@ -925,9 +975,10 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 limit.as_secs()
             ))
             .await?;
-            bounded_for(
+            bounded_classified(
                 limit + SERVER_LIMIT_MARGIN,
                 self.client.batch_execute(sql),
+                classify,
             )
             .await
         }
@@ -954,12 +1005,14 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 d.source = Some(migration.name.clone());
                 d
             })?;
-        self.outside_transaction(&migration.sql, schema, limit)
-            .await
-            .map_err(|mut d| {
-                d.source = Some(migration.name.clone());
-                d
-            })
+        self.outside_transaction(&migration.sql, schema, limit, |e| {
+            migration_error(e, Some(&migration.sql), None)
+        })
+        .await
+        .map_err(|mut d| {
+            d.source = Some(migration.name.clone());
+            d
+        })
     }
     /// Whether a CREATE INDEX of this name is running in any session now.
     pub async fn index_building(&self, schema: &str, name: &str) -> Result<bool> {
@@ -1000,6 +1053,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
             ),
             schema,
             limit,
+            |_| None,
         )
         .await
     }
@@ -1798,12 +1852,8 @@ forced: r.get(2),
             // the target. Start a fresh inspection transaction afterwards.
             self.finish_replay_step(None).await?;
             let before = self.committed_shared_writes().await?;
-            self.build_concurrent_index(migration, schema, extra, limit).await.map_err(|mut d| {
-                if d.code == "DB_POSTGRES" {
-                    d.next_action = "PostgreSQL rejected the authored command on scratch. Check this migration against its predecessors, then rerun the plan. No migration SQL ran on the target.".into();
-                }
-                d
-            })?;
+            self.build_concurrent_index(migration, schema, extra, limit)
+                .await?;
             if self.committed_shared_writes().await? != before {
                 let mut d = Diagnostic::new("DB_REPLAY_UNSUPPORTED", "The command changed a protected shared PostgreSQL catalog on the disposable instance. No migration SQL ran on the target.");
                 d.source = Some(migration.name.clone());
@@ -1863,11 +1913,12 @@ forced: r.get(2),
             limit + SERVER_LIMIT_MARGIN,
             self.client.batch_execute(script),
             |e| {
-                if e.code().map(|c| c.code()) == Some("55P04") {
+                let specific = if e.code().map(|c| c.code()) == Some("55P04") {
                     Some(new_enum_value(e, script))
                 } else {
                     extension_privilege(e, &created, &facts, can_create)
-                }
+                };
+                migration_error(e, Some(script), specific)
             },
         )
         .await
@@ -1878,9 +1929,10 @@ forced: r.get(2),
         // Fire deferred constraint checks now, attributed to this migration,
         // rather than at the commit that follows it (on the target and in
         // scratch replay alike).
-        bounded_for(
+        bounded_classified(
             limit + SERVER_LIMIT_MARGIN,
             self.client.batch_execute("SET CONSTRAINTS ALL IMMEDIATE"),
+            |e| migration_error(e, None, None),
         )
         .await
         .map_err(|mut d| {

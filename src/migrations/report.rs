@@ -1090,6 +1090,7 @@ async fn inspect_observed(
                 .then_some(&m.name)
         });
     let isolated = native_source.is_some();
+    let mut rejected = false;
     if let Some(scratch_config) = &inputs.config.scratch {
         let mut cleanup_failure = None;
         let mut unlock_failure = None;
@@ -1137,6 +1138,20 @@ async fn inspect_observed(
                     &mut replayed,
                 )
                 .await
+                .map_err(|mut d| {
+                    // Only after scratch identity/ownership was verified. Leave
+                    // setup and cleanup diagnostics their own recovery advice.
+                    if inputs.config.engine == "postgresql" && matches!(d.code.as_str(), "DB_POSTGRES" | "DB_TIMEOUT" | "DB_LOCK_CONFLICT") {
+                        d.next_action = if d.rejected_migration_sql {
+                            "PostgreSQL rejected this migration on scratch. Check the migration against its predecessors and rerun the plan. No migration SQL ran on the target."
+                        } else if isolated {
+                            "The rehearsal was inconclusive. Discard the private scratch instance and rerun inspection on a fresh one after checking connectivity, locks and limits. No migration SQL ran on the target."
+                        } else {
+                            "The rehearsal was inconclusive. Check scratch connectivity, locks and limits, then rerun inspection. No migration SQL ran on the target."
+                        }.into();
+                    }
+                    d
+                })
             };
             // The replay deadline leaves cleanup its own time. A replay cut
             // short there, or by a client deadline, has the statement it was
@@ -1199,6 +1214,7 @@ async fn inspect_observed(
                 }
             }
         }
+        rejected = replay.as_ref().is_err_and(|d| d.rejected_migration_sql);
         record_replay(&mut report, replay, cleanup_failure);
         // After cleanup finished, which it does not change.
         if let Some(d) = unlock_failure {
@@ -1303,6 +1319,8 @@ async fn inspect_observed(
     }
     let candidate_outcome = if command != "plan" {
         "not_run"
+    } else if rejected {
+        "fail"
     } else if candidate.as_ref().is_some_and(|c| c.uncovered.is_empty()) {
         "pass"
     } else {
@@ -1344,7 +1362,9 @@ async fn inspect_observed(
         }
         report["plan_digest"] = json!(json_digest(&plan));
         report["plan"] = plan;
-        if candidate_outcome != "pass" && report["outcome"] == "pass" {
+        if rejected {
+            report["outcome"] = json!("fail");
+        } else if candidate_outcome != "pass" && report["outcome"] == "pass" {
             report["outcome"] = json!("unknown");
         }
     }

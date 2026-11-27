@@ -2197,7 +2197,9 @@ pub(crate) fn statement_at(sql: &str, position: usize) -> Option<usize> {
     use sqlparser::tokenizer::Token;
     // The tokenizer reports lines and columns, counted in characters.
     let (mut line, mut column) = (1u64, 1u64);
-    for c in sql.chars().take(position.checked_sub(1)?) {
+    let mut chars = sql.chars();
+    for _ in 0..position.checked_sub(1)? {
+        let c = chars.next()?;
         if c == '\n' {
             line += 1;
             column = 1;
@@ -2205,6 +2207,7 @@ pub(crate) fn statement_at(sql: &str, position: usize) -> Option<usize> {
             column += 1;
         }
     }
+    chars.next()?; // An end-of-input position isn't inside a token.
     statements(sql)?
         .iter()
         .enumerate()
@@ -2212,6 +2215,7 @@ pub(crate) fn statement_at(sql: &str, position: usize) -> Option<usize> {
             tokens.iter().any(|t| {
                 !matches!(t.token, Token::Whitespace(_))
                     && (t.span.start.line, t.span.start.column) <= (line, column)
+                    && (line, column) < (t.span.end.line, t.span.end.column)
             })
         })
         .map(|(index, _)| index + 1)
@@ -2405,6 +2409,8 @@ mod tests {
         assert_eq!(enum_value_additions(sql), [1, 4]);
         let at = |needle: &str| sql.find(needle).unwrap() + 1;
         assert_eq!(statement_at(sql, 1), None);
+        assert_eq!(statement_at(sql, at("; SELECT")), None);
+        assert_eq!(statement_at(sql, sql.chars().count() + 2), None);
         assert_eq!(statement_at(sql, at("ALTER TYPE")), Some(1));
         assert_eq!(statement_at(sql, at("'c'; SELECT")), Some(2));
         assert_eq!(statement_at(sql, at("'c'::app.s")), Some(3));

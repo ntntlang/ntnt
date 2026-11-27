@@ -630,7 +630,16 @@ fn unsupported_pending_routines_never_run_and_do_not_hide_applied_verification()
         let r = f.command("plan");
         assert!(has_code(&r, expected), "{sql}: {}", r["diagnostics"]);
         assert_eq!(r["drift"]["outcome"], "pass");
-        assert_eq!(r["plan"]["candidate"]["outcome"], "unknown");
+        // The DO ran and PostgreSQL raised an exception. The other candidates
+        // were never run, so we have no engine verdict about their SQL.
+        assert_eq!(
+            r["plan"]["candidate"]["outcome"],
+            if expected == "DB_POSTGRES" {
+                "fail"
+            } else {
+                "unknown"
+            }
+        );
         assert_eq!(f.command("verify")["outcome"], "pass");
         assert!(!r.to_string().contains("secret_payload"));
     }

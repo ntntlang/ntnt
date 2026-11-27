@@ -157,7 +157,8 @@ fn partitioned_parent_is_rejected_by_postgres_without_target_or_ledger_changes()
     );
     let before = target_state(&f);
     let rejected = f.isolated_command("plan", &["--out", "parent.json"]);
-    assert_ne!(rejected["outcome"], "pass");
+    assert_eq!(rejected["outcome"], "fail");
+    assert_eq!(rejected["plan"]["candidate"]["outcome"], "fail");
     let diagnostics = rejected["diagnostics"].as_array().unwrap();
     assert!(
         diagnostics
@@ -176,6 +177,43 @@ fn partitioned_parent_is_rejected_by_postgres_without_target_or_ledger_changes()
     assert_eq!(target_state(&f), before);
     assert_eq!(index_state(&f, "parent_idx"), None);
     assert_eq!(ledger_rows(&f), 1);
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn rejected_script_names_only_a_position_in_the_submitted_sql() {
+    let f = baseline();
+    let before = target_state(&f);
+    for (sql, numbered) in [
+        ("SELECT 'é;'; SELECT private_canary FROM app.leaf;", true),
+        (
+            "DO $$ BEGIN EXECUTE 'SELECT private_canary'; END $$;",
+            false,
+        ),
+    ] {
+        f.sql("0002_index.sql", sql);
+        let r = f.command("plan");
+        let d = &r["diagnostics"][0];
+        assert_eq!(d["source"], "0002_index.sql");
+        let message = d["message"].as_str().unwrap();
+        assert!(
+            message.contains("undefined column") && message.contains("42703"),
+            "{d}"
+        );
+        assert_eq!(message.contains("Statement 2:"), numbered, "{d}");
+        if !numbered {
+            assert!(!message.contains("Statement "), "{d}");
+        }
+        assert!(!r.to_string().contains("private_canary"));
+        assert_eq!(r["drift"]["outcome"], "pass");
+        assert_eq!(r["outcome"], "fail");
+        assert_eq!(r["plan"]["candidate"]["outcome"], "fail");
+        assert_eq!(r["plan"]["classification"], "blocked");
+        assert_eq!(target_state(&f), before);
+    }
+    f.sql("0002_index.sql", "SELECT 'é;'; SELECT id FROM app.leaf;");
+    assert_eq!(f.command("plan")["outcome"], "pass");
+    assert_eq!(target_state(&f), before);
 }
 
 #[test]
@@ -201,6 +239,84 @@ fn absent_and_mismatched_bindings_refuse_before_replay() {
             .unwrap()
             .get::<_, bool>(0));
     }
+    assert_eq!(target_state(&f), before);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires disposable PostgreSQL and Docker; mandatory CI execution lane"]
+fn lost_create_index_ack_blocks_plan_without_blaming_the_migration() {
+    use super::db_proxy::{proxied_scratch_plan, Fault};
+    use std::sync::atomic::Ordering;
+
+    let f = baseline();
+    let before = target_state(&f);
+    let scratch = NativeScratch::new(&f);
+    let storage = scratch.storage();
+    let (proxy, mut plan) = proxied_scratch_plan(
+        &f,
+        &scratch,
+        &storage.2.join("socket"),
+        Fault::AfterCreateIndex,
+    );
+    let r = report(plan.args(["--out", "interrupted.json"]));
+    assert!(
+        proxy.fired.load(Ordering::SeqCst),
+        "missing CREATE INDEX completion"
+    );
+    // Independent connection, bypassing the proxy: PostgreSQL actually finished
+    // this build, but the planner did not receive its CommandComplete.
+    assert!(scratch
+        .observer()
+        .query_one(
+            "SELECT indisready AND indisvalid FROM pg_index
+         WHERE indexrelid='app.leaf_idx'::regclass AND indrelid='app.leaf'::regclass",
+            &[],
+        )
+        .unwrap()
+        .get::<_, bool>(0));
+    let cluster = scratch.cluster.clone();
+    drop(proxy);
+    drop(scratch);
+    assert_discarded(storage);
+
+    assert_ne!(r["outcome"], "pass");
+    assert_eq!(r["plan"]["candidate"]["outcome"], "unknown");
+    assert_eq!(r["plan"]["classification"], "blocked");
+    assert_eq!(r["plan"]["authorized"], false);
+    assert_eq!(r["plan"]["executable"], false);
+    assert_eq!(r["scratch"]["cleanup"], "external");
+    assert_eq!(target_state(&f), before);
+    // Even presenting this exact blocked digest cannot authorize a migration.
+    let digest = r["plan_digest"].as_str().unwrap();
+    assert!(code(
+        &f.apply("interrupted.json", Some(digest)),
+        "DB_PLAN_STALE"
+    ));
+    assert_eq!(target_state(&f), before);
+
+    let d = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_POSTGRES")
+        .expect("missing DB_POSTGRES");
+    let action = d["next_action"].as_str().unwrap().to_ascii_lowercase();
+    assert!(
+        (action.contains("rerun") || action.contains("retry")) && action.contains("scratch"),
+        "{action}"
+    );
+    let message = d["message"].as_str().unwrap().to_ascii_lowercase();
+    assert!(
+        !message.contains("postgresql rejected") && !action.contains("postgresql rejected"),
+        "{message}: {action}"
+    );
+
+    let fresh = NativeScratch::new(&f);
+    assert_ne!(fresh.cluster, cluster);
+    let retry = report(&mut fresh.process(&f, "plan"));
+    assert_eq!(retry["outcome"], "pass", "{:?}", diagnostic_codes(&retry));
+    assert_eq!(retry["plan"]["candidate"]["outcome"], "pass");
     assert_eq!(target_state(&f), before);
 }
 

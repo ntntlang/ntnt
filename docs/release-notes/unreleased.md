@@ -1,5 +1,9 @@
 # Unreleased
 
+## PostgreSQL plan failures
+
+A rejected SQL statement on scratch and a lost connection during rehearsal no longer imply the same next step. A confirmed SQL rejection makes the candidate `fail`; an inconclusive rehearsal leaves it `unknown`. Both block approval. For example, an undefined column can now report `Statement 2: undefined column (SQLSTATE 42703)` without exposing the query or data (#424).
+
 ## Post-deploy verification
 
 Use `ntnt db verify --target production --require-no-pending` after deployment

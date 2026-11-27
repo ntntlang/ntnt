@@ -30,9 +30,13 @@ pub struct Diagnostic {
     /// Catalog keys of the objects this diagnostic is about, such as the
     /// uncovered objects of `DB_COVERAGE_INCOMPLETE`, or the names a statement
     /// refused before it ran uses (`DB_OUTSIDE_SCOPE`). Omitted when empty.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub objects: Vec<String>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    pub objects: Box<[String]>,
     pub next_action: String,
+    /// Evidence from executing migration SQL or checking its deferred constraints,
+    /// not a failure of NTNT's setup, observation or transport.
+    #[serde(skip)]
+    pub(super) rejected_migration_sql: bool,
 }
 
 /// What stops a check from running as written (#456), found before any
@@ -415,13 +419,14 @@ impl Diagnostic {
             code: code.into(),
             message: message.into(),
             source: None,
-            objects: Vec::new(),
+            objects: Box::default(),
             next_action: next_action.into(),
+            rejected_migration_sql: false,
         }
     }
     /// Name the catalog objects (their keys) this diagnostic is about.
     pub(crate) fn with_objects(mut self, objects: &[String]) -> Self {
-        self.objects = objects.to_vec();
+        self.objects = objects.into();
         self
     }
 }
@@ -1423,7 +1428,7 @@ mod tests {
         ];
         let d = super::coverage_incomplete("Gaps.", &uncovered, "app", &["pageinspect".into()]);
         assert_eq!(d.code, "DB_COVERAGE_INCOMPLETE");
-        assert_eq!(d.objects, uncovered);
+        assert_eq!(&*d.objects, uncovered.as_slice());
         assert_eq!(
             d.message,
             "Gaps. Extension pg_stat_statements is installed outside the managed scope. If a superuser installed it, declare it in [databases.app] extensions and install it in the scratch database too, at the same version and in the same schema; it is then compared by version and schema. Declared extension pageinspect is installed in _ntnt or a PostgreSQL system schema, where NTNT does not inspect it; install it in another schema, such as public."
