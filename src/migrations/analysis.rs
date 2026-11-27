@@ -451,6 +451,14 @@ const MAX_SCRIPT_TOKENS: usize = 262_144;
 /// only whitespace and comments are dropped. `None` when the script cannot be
 /// tokenized within the token bound.
 fn statements(sql: &str) -> Option<Vec<Vec<sqlparser::tokenizer::TokenWithSpan>>> {
+    split_statements(sql, false)
+}
+/// Diagnostics count a parenthesized action list as one statement. Keep the
+/// existing policy/descriptor splitter unchanged for saved-plan compatibility.
+fn split_statements(
+    sql: &str,
+    diagnostic_ordinals: bool,
+) -> Option<Vec<Vec<sqlparser::tokenizer::TokenWithSpan>>> {
     use sqlparser::tokenizer::{Token, Tokenizer};
     let dialect = PostgreSqlDialect {};
     let tokens = match Tokenizer::new(&dialect, sql).tokenize_with_location() {
@@ -466,8 +474,16 @@ fn statements(sql: &str) -> Option<Vec<Vec<sqlparser::tokenizer::TokenWithSpan>>
     let mut atomic = false;
     let mut case_depth = 0usize;
     let mut last_words: [Option<String>; 2] = [None, None];
+    let mut parentheses = 0usize;
     for t in tokens {
-        if t.token == Token::SemiColon {
+        if diagnostic_ordinals {
+            match t.token {
+                Token::LParen => parentheses += 1,
+                Token::RParen => parentheses = parentheses.saturating_sub(1),
+                _ => (),
+            }
+        }
+        if t.token == Token::SemiColon && parentheses == 0 {
             if atomic && !(case_depth == 0 && last_words[1].as_deref() == Some("END")) {
                 current.push(t);
                 continue;
@@ -1643,7 +1659,11 @@ pub(crate) fn protected_targets(sql: &str) -> Vec<(usize, String)> {
 pub(crate) fn created_extensions(sql: &str) -> Vec<(usize, String, bool)> {
     use sqlparser::tokenizer::Token;
     let mut found = vec![];
-    for (index, tokens) in statements(sql).unwrap_or_default().into_iter().enumerate() {
+    for (index, tokens) in split_statements(sql, true)
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+    {
         let t: Vec<&Token> = tokens
             .iter()
             .map(|t| &t.token)
@@ -2208,7 +2228,7 @@ pub(crate) fn statement_at(sql: &str, position: usize) -> Option<usize> {
         }
     }
     chars.next()?; // An end-of-input position isn't inside a token.
-    statements(sql)?
+    split_statements(sql, true)?
         .iter()
         .enumerate()
         .filter(|(_, tokens)| {
@@ -2226,7 +2246,7 @@ pub(crate) fn statement_at(sql: &str, position: usize) -> Option<usize> {
 /// (`ALTER TYPE ... ADD VALUE`), by number.
 pub(crate) fn enum_value_additions(sql: &str) -> Vec<usize> {
     use sqlparser::tokenizer::Token;
-    statements(sql)
+    split_statements(sql, true)
         .unwrap_or_default()
         .iter()
         .enumerate()

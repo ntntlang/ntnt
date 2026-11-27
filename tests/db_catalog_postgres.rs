@@ -4311,6 +4311,12 @@ fn a_replay_cut_short_by_its_deadline_is_cleaned_up() {
         d["message"].as_str().unwrap().contains("Scratch replay"),
         "{d}"
     );
+    let advice = d["next_action"].as_str().unwrap();
+    assert!(
+        advice.contains("rerun inspection") && !advice.contains("reconcile"),
+        "{d}"
+    );
+    assert_eq!(r["plan"]["candidate"]["outcome"], "unknown");
     assert_eq!(r["scratch"]["cleanup"], "pass", "{r}");
     assert_eq!(scratch_leftovers(&f, &public), Vec::<String>::new());
 }

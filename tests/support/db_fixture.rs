@@ -20,6 +20,9 @@ impl Fixture {
     /// `public` already exists in every new database; other managed schemas are
     /// created by the fixture, as an operator would before the first plan.
     pub fn with_schema(schema: &str) -> Self {
+        Self::with_database_options(schema, "")
+    }
+    pub fn with_database_options(schema: &str, options: &str) -> Self {
         let url = std::env::var("NTNT_DB_TEST_ADMIN")
             .expect("explicit disposable PostgreSQL fixture URL required");
         let mut admin = Client::connect(&url, NoTls).unwrap();
@@ -30,7 +33,7 @@ impl Fixture {
             admin.batch_execute(&format!("CREATE ROLE {name} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD 'ntnt245_fixture_only'")).unwrap();
             admin
                 .batch_execute(&format!(
-                    "CREATE DATABASE {name} OWNER {name} TEMPLATE template0"
+                    "CREATE DATABASE {name} OWNER {name} TEMPLATE template0 {options}"
                 ))
                 .unwrap();
         }

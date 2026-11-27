@@ -134,9 +134,18 @@ fn row_security_denial(e: &tokio_postgres::Error) -> Option<Diagnostic> {
     d.next_action = "As a superuser, give the role that reads the table BYPASSRLS (ALTER ROLE ... BYPASSRLS): the migration role, or the owner of a view without security_invoker that reads it, then plan, review and approve again; or change the check so that it does not read that table. A failed check rolls back its transaction, so nothing from it was committed; progress shows each migration's state. See docs/DATABASE_MIGRATIONS.md, Checks and row-level security.".into();
     Some(d)
 }
+/// The driver keeps unrecognized wire codes verbatim. Neither expose nor
+/// classify that field until it is a complete SQLSTATE.
+fn public_sqlstate(code: &str) -> Option<&str> {
+    (code.len() == 5
+        && code
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()))
+    .then_some(code)
+}
 /// Expose only SQLSTATE, never server error payloads.
 fn driver_error(e: &tokio_postgres::Error) -> Diagnostic {
-    match e.code().map(|c| c.code()) {
+    match e.code().and_then(|c| public_sqlstate(c.code())) {
         // A lock wait that hit lock_timeout, or a deadlock victim. Nothing was
         // committed; the caller may retry the whole migration transaction.
         Some(code @ ("55P03" | "40P01")) => Diagnostic::new(
@@ -170,7 +179,7 @@ fn migration_error(
     specific: Option<Diagnostic>,
 ) -> Option<Diagnostic> {
     let db = e.as_db_error()?;
-    let code = db.code().code();
+    let code = public_sqlstate(db.code().code())?;
     // Positive evidence only. Cancellation, session loss, resource shortages,
     // unknown classes etc. do not establish that the candidate was rejected.
     let rejected =
@@ -206,8 +215,7 @@ fn migration_error(
 /// VALUE` added in the same transaction. Names the statement from the
 /// error's position, when PostgreSQL gives one, and the statements of
 /// `script` that add enum values; the server's text is not shown.
-fn new_enum_value(e: &tokio_postgres::Error, script: &str) -> Diagnostic {
-    let statement = script_statement(e, script);
+fn new_enum_value(script: &str, statement: Option<usize>) -> Diagnostic {
     let uses = statement.map_or("A statement".to_owned(), |n| format!("Statement {n}"));
     let added = match super::analysis::enum_value_additions(script).as_slice() {
         [] => String::new(),
@@ -243,6 +251,9 @@ fn quote(identifier: &str) -> String {
 
 pub(crate) struct Postgres {
     client: Client,
+    /// Only verified UTF-8 uses the tokenizer's character coordinates for
+    /// non-ASCII input. SQL_ASCII counts bytes instead.
+    utf8_positions: bool,
     task: tokio::task::JoinHandle<()>,
     /// sslmode, trust source and the TLS version this client negotiated,
     /// boxed, like `replay` and `extensions`, so that `Adapter`'s variants
@@ -603,13 +614,15 @@ impl Postgres {
         config.options("-c default_transaction_read_only=on -c search_path=pg_catalog -c statement_timeout=5000 -c lock_timeout=2000 -c idle_in_transaction_session_timeout=10000 -c standard_conforming_strings=on -c row_security=off");
         let (connector, mut transport) = transport.connector().await?;
         let cancel_tls = connector.clone();
-        let (client, task) = match connector {
+        let (client, task, utf8_positions) = match connector {
             None => {
                 let (client, connection) = bounded(config.connect(NoTls)).await?;
+                let utf8_positions = connection.parameter("server_encoding") == Some("UTF8")
+                    && connection.parameter("client_encoding") == Some("UTF8");
                 let task = tokio::spawn(async move {
                     let _ = connection.await;
                 });
-                (client, task)
+                (client, task, utf8_positions)
             }
             Some(tls) => {
                 let negotiated = tls.clone();
@@ -622,16 +635,19 @@ impl Postgres {
                         }
                         Err(_) => return Err(deadline_error()),
                     };
+                let utf8_positions = connection.parameter("server_encoding") == Some("UTF8")
+                    && connection.parameter("client_encoding") == Some("UTF8");
                 let task = tokio::spawn(async move {
                     let _ = connection.await;
                 });
                 // What this client negotiated is the transport it controls; a
                 // TLS-terminating proxy does not change it.
                 transport["tls_version"] = json!(negotiated.negotiated_version());
-                (client, task)
+                (client, task, utf8_positions)
             }
         };
         Ok(Self {
+            utf8_positions,
             client,
             task,
             transport: Box::new(transport),
@@ -640,6 +656,9 @@ impl Postgres {
             extensions: Box::default(),
             replay: Box::new(scratch::Replay::new(cancel_tls)),
         })
+    }
+    fn position_script<'a>(&self, script: &'a str) -> Option<&'a str> {
+        (self.utf8_positions || script.is_ascii()).then_some(script)
     }
     /// This session with the declared `extensions` (see `extensions`).
     pub fn with_declared_extensions(mut self, extensions: &[String]) -> Self {
@@ -1006,7 +1025,7 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
                 d
             })?;
         self.outside_transaction(&migration.sql, schema, limit, |e| {
-            migration_error(e, Some(&migration.sql), None)
+            migration_error(e, self.position_script(&migration.sql), None)
         })
         .await
         .map_err(|mut d| {
@@ -1914,11 +1933,15 @@ forced: r.get(2),
             self.client.batch_execute(script),
             |e| {
                 let specific = if e.code().map(|c| c.code()) == Some("55P04") {
-                    Some(new_enum_value(e, script))
+                    Some(new_enum_value(
+                        script,
+                        self.position_script(script)
+                            .and_then(|sql| script_statement(e, sql)),
+                    ))
                 } else {
                     extension_privilege(e, &created, &facts, can_create)
                 };
-                migration_error(e, Some(script), specific)
+                migration_error(e, self.position_script(script), specific)
             },
         )
         .await
@@ -2267,6 +2290,15 @@ fn declared_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn public_sqlstate_accepts_only_the_complete_ascii_code() {
+        for value in ["", "42", "427030", "42é0", "42abc", "42 03"] {
+            assert_eq!(public_sqlstate(value), None);
+        }
+        for value in ["42703", "P0001", "ZZ999"] {
+            assert_eq!(public_sqlstate(value), Some(value));
+        }
+    }
     #[test]
     fn grants_ignore_catalog_oid_order_but_preserve_privileges() {
         let mut a = json!({"grants":[{"grantee":"a","grantor":"a","privilege":"SELECT"},{"grantee":"PUBLIC","grantor":"a","privilege":"SELECT"}]});

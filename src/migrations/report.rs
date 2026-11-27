@@ -16,6 +16,13 @@ fn replay_outcome(work: Result<()>, cleanup: Result<()>) -> (Result<()>, Option<
         (Err(cause), Err(cleanup)) => (Err(cause), Some(cleanup)),
     }
 }
+fn inconclusive_rehearsal(verified_private_scratch: bool) -> &'static str {
+    if verified_private_scratch {
+        "The rehearsal was inconclusive. Discard the private scratch instance and rerun inspection on a fresh one after checking connectivity, locks and limits. No migration SQL ran on the target."
+    } else {
+        "The rehearsal was inconclusive. Check scratch connectivity, locks and limits, then rerun inspection. No migration SQL ran on the target."
+    }
+}
 /// Add a scratch replay's failures to `report`: the replay's own error first,
 /// then a cleanup that also failed.
 fn record_replay(report: &mut Value, replay: Result<()>, cleanup_failure: Option<Diagnostic>) {
@@ -1144,10 +1151,8 @@ async fn inspect_observed(
                     if inputs.config.engine == "postgresql" && matches!(d.code.as_str(), "DB_POSTGRES" | "DB_TIMEOUT" | "DB_LOCK_CONFLICT") {
                         d.next_action = if d.rejected_migration_sql {
                             "PostgreSQL rejected this migration on scratch. Check the migration against its predecessors and rerun the plan. No migration SQL ran on the target."
-                        } else if isolated {
-                            "The rehearsal was inconclusive. Discard the private scratch instance and rerun inspection on a fresh one after checking connectivity, locks and limits. No migration SQL ran on the target."
                         } else {
-                            "The rehearsal was inconclusive. Check scratch connectivity, locks and limits, then rerun inspection. No migration SQL ran on the target."
+                            inconclusive_rehearsal(isolated)
                         }.into();
                     }
                     d
@@ -1158,10 +1163,9 @@ async fn inspect_observed(
             // running cancelled, so that cleanup can run.
             let work = match replay_until {
                 Some(until) => tokio::time::timeout_at(until, work).await.unwrap_or_else(|_| {
-                    Err(Diagnostic::new(
-                        "DB_TIMEOUT",
-                        "Scratch replay did not finish within the inspection deadline, so NTNT cancelled it; scratch.cleanup says whether cleanup then removed what it had committed.",
-                    ))
+                    let mut d = Diagnostic::new("DB_TIMEOUT", "Scratch replay did not finish within the inspection deadline, so NTNT cancelled it; see scratch.cleanup for the cleanup status.");
+                    d.next_action = inconclusive_rehearsal(isolated && scratch.external_cleanup_required()).into();
+                    Err(d)
                 }),
                 None => work.await,
             };

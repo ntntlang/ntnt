@@ -186,6 +186,7 @@ fn rejected_script_names_only_a_position_in_the_submitted_sql() {
     let before = target_state(&f);
     for (sql, numbered) in [
         ("SELECT 'é;'; SELECT private_canary FROM app.leaf;", true),
+        ("CREATE RULE log_insert AS ON INSERT TO app.leaf DO ALSO (SELECT 1; SELECT 2); SELECT private_canary;", true),
         (
             "DO $$ BEGIN EXECUTE 'SELECT private_canary'; END $$;",
             false,
@@ -214,6 +215,31 @@ fn rejected_script_names_only_a_position_in_the_submitted_sql() {
     f.sql("0002_index.sql", "SELECT 'é;'; SELECT id FROM app.leaf;");
     assert_eq!(f.command("plan")["outcome"], "pass");
     assert_eq!(target_state(&f), before);
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI execution lane"]
+fn sql_ascii_positions_do_not_blame_another_statement() {
+    let f = Fixture::with_database_options(
+        "app",
+        "ENCODING 'SQL_ASCII' LOCALE_PROVIDER libc LOCALE 'C'",
+    );
+    for (script, numbered) in [
+        ("SELECT 'ééééé'; SELECT x; SELECT 1;", false),
+        ("SELECT 'a'; SELECT x; SELECT 1;", true),
+    ] {
+        f.sql("0001_query.sql", script);
+        let r = f.command("plan");
+        assert_eq!(r["plan"]["candidate"]["outcome"], "fail", "{r}");
+        let d = &r["diagnostics"][0];
+        assert_eq!(d["source"], "0001_query.sql");
+        let message = d["message"].as_str().unwrap();
+        assert!(message.contains("undefined column"), "{d}");
+        assert_eq!(message.contains("Statement "), numbered, "{d}");
+        if numbered {
+            assert!(message.contains("Statement 2:"), "{d}");
+        }
+    }
 }
 
 #[test]
