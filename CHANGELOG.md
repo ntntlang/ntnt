@@ -11,6 +11,7 @@
 ### Fixed
 
 - Existing databases can be adopted at a matching release checkpoint even if a historical migration briefly left an unsupported catalog shape. Comment-only history entries retain their checksum and position, and PostgreSQL compares heap-backed materialized views instead of treating them as uncovered.
+- SQLite `sqlite_rebuild` can create and populate new related tables in the same migration while preserving pre-existing table counts and checking foreign keys before commit.
 - SQLite hot-journal diagnostics now point to a recovery procedure when the approved migration plan is lost (#459).
 - PostgreSQL `reconcile` can resolve an interrupted 0.6.3 index build, including histories spanning multiple schemas. Legacy plans with ambiguous catalog scope replay only already-applied migrations on disposable scratch; they cannot start new builds (#440).
 - SQLite plans reject clock-dependent date expressions in indexes and constraints before they can break the first application write (#441).

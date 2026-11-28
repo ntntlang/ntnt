@@ -1777,8 +1777,8 @@ role are restored afterwards. `DB_REPLAY_UNSUPPORTED` from a `DO` block that
 changes a password (even one rolled back), memberships or another database means:
 move that statement out of the migration history.
 On PostgreSQL, `plan.check_warnings` lists pending checks that `migrate` will
-refuse, several per check if need be: `CHECK_OPERATOR_MISMATCH` and
-`CHECK_VIEW_WRITES` (`DB_CHECK_UNSUPPORTED`), and, since checks read with
+refuse, several per check if need be: `CHECK_OPERATOR_MISMATCH`,
+`CHECK_VIEW_WRITES` and `CHECK_MATERIALIZED_VIEW_LOCK` (`DB_CHECK_UNSUPPORTED`), and, since checks read with
 `row_security=off`, `CHECK_ROW_SECURITY` for one that would read a
 `FORCE ROW LEVEL SECURITY` table as a migration role without `BYPASSRLS`
 (`DB_CHECK_ROW_SECURITY`). Migrations can create only trusted extensions; an

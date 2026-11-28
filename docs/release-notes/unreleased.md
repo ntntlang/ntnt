@@ -2,7 +2,7 @@
 
 ## Adopting existing migration histories
 
-`plan --adopt-through` compares the release you are taking over, not temporary schemas repaired before that point. Intentional comment-only files retain their place in history. PostgreSQL now compares materialized views without refreshing or reading them. Follow the [runner handoff](../DATABASE_MIGRATIONS.md#taking-over-from-another-migration-runner) to keep an old ledger without inventing applied entries. Pending SQL still needs its own approved plan.
+`plan --adopt-through` compares the release you are taking over, not temporary schemas repaired before that point. Intentional comment-only files retain their place in history. PostgreSQL now compares materialized views without refreshing or reading them. Follow the [runner handoff](../DATABASE_MIGRATIONS.md#taking-over-from-another-migration-runner) to keep an old ledger without inventing applied entries. Pending SQL still needs its own approved plan. On SQLite the existing `sqlite_rebuild` sidecar now supports rebuilding a table and adding a related table in the same migration, without giving up row-count or foreign-key checks.
 
 ## PostgreSQL plan failures
 
