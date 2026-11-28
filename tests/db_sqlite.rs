@@ -77,7 +77,7 @@ fn sqlite_populated_rebuild_preserves_rows_dependencies_and_foreign_keys() {
         "pass"
     );
     f.target().execute_batch("INSERT INTO accounts VALUES(1,'ALICE','old'),(2,'BOB','old'); INSERT INTO children VALUES(10,1),(11,2)").unwrap();
-    f.sql("0002_rebuild.sql",&format!("CREATE TABLE replacement(id INTEGER PRIMARY KEY,email TEXT NOT NULL); INSERT INTO replacement SELECT id,lower(email) FROM accounts; DROP VIEW account_emails; DROP TABLE accounts; ALTER TABLE replacement RENAME TO accounts; {DEPENDENCIES}"));
+    f.sql("0002_rebuild.sql",&format!("CREATE TABLE account_legacy(account_id INTEGER PRIMARY KEY REFERENCES accounts(id), old_email TEXT); INSERT INTO account_legacy SELECT id,email FROM accounts; CREATE TABLE replacement(id INTEGER PRIMARY KEY,email TEXT NOT NULL); INSERT INTO replacement SELECT id,lower(email) FROM accounts; DROP VIEW account_emails; DROP TABLE accounts; ALTER TABLE replacement RENAME TO accounts; {DEPENDENCIES}"));
     f.sql(
         "0002_rebuild.toml",
         r#"sqlite_rebuild = "accounts"
@@ -101,6 +101,16 @@ retained_rows = "SELECT count(*) = 2 FROM main.accounts"
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(values, vec![(1, "alice".into()), (2, "bob".into())]);
+    // The new table was populated before the old parent was dropped. Its
+    // foreign keys and payload must survive the rebuild along with the old children.
+    let archived = c
+        .prepare("SELECT a.id, l.old_email FROM account_legacy l JOIN accounts a ON a.id=l.account_id ORDER BY a.id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(archived, [(1, "ALICE".into()), (2, "BOB".into())]);
     let children: Vec<(i64, i64)> = c
         .prepare("SELECT id,account_id FROM children ORDER BY id")
         .unwrap()
