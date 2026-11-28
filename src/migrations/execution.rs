@@ -3,7 +3,7 @@
 use super::adapter::{self, Access, Adapter, Identity};
 use super::adoption::{self, Adoption};
 use super::inventory::{json_digest, CapturedInputs, CatalogDigests, Fingerprint};
-use super::model::History;
+use super::model::{Catalog, History};
 use super::plan_state;
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
@@ -53,6 +53,15 @@ pub(super) fn validate_named(
     saved: &Value,
     files: plan_state::Files,
 ) -> Result<usize> {
+    validate_descriptor(inputs, saved, files, false)
+}
+
+fn validate_descriptor(
+    inputs: &CapturedInputs,
+    saved: &Value,
+    files: plan_state::Files,
+    settle_attempt: bool,
+) -> Result<usize> {
     plan_state::intact(saved)?;
     plan_state::selection(inputs, saved, files)?;
     plan_state::policy(inputs, saved, files)?;
@@ -69,28 +78,48 @@ pub(super) fn validate_named(
     let fingerprints = plan["execution"]["prefix_fingerprints"]
         .as_array()
         .ok_or_else(stale)?;
-    let pending: Vec<_> = inputs
-        .migrations
-        .iter()
-        .skip(if action.is_some() {
+    let pre_native = plan["execution"].get("replay").is_none();
+    let pending = |pre_scope: bool| {
+        let start = if action.is_some() {
             inputs.migrations.len()
         } else {
             base
-        })
-        .map(|m| {
-            let mut s = m.summary();
-            // A pre-native descriptor can identify a running attempt, but
-            // is not replay evidence for starting a new concurrent build.
-            s["analysis"] = json!(super::analysis::analyze_descriptor(
-                &inputs.config.engine,
-                &m.sql,
-                &inputs.config.schema,
-                &inputs.history_schemas,
-                plan["execution"].get("replay").is_none()
-            ));
-            s
-        })
-        .collect();
+        };
+        Value::Array(
+            inputs
+                .migrations
+                .iter()
+                .skip(start)
+                .map(|m| {
+                    let mut descriptor = m.summary();
+                    descriptor["analysis"] = json!(if pre_scope {
+                        super::analysis::pre_scope_descriptor(&m.sql, &inputs.config.schema)
+                    } else {
+                        super::analysis::analyze_descriptor(
+                            &inputs.config.engine,
+                            &m.sql,
+                            &inputs.config.schema,
+                            &inputs.history_schemas,
+                            pre_native,
+                        )
+                    });
+                    descriptor
+                })
+                .collect(),
+        )
+    };
+    // Compare the *whole* historical descriptor. Never trust an artifact's
+    // version claim or mix and match its old and current migration summaries.
+    let pre_scope_eligible = settle_attempt
+        && inputs.config.engine == "postgresql"
+        && action.is_none()
+        && pre_native
+        && b["canonicalization_version"] == 1
+        && plan["execution"].get("outside_objects").is_none()
+        && plan["pending"].as_array().is_some_and(|ms| {
+            ms.iter()
+                .any(|m| m["analysis"]["non_transactional"] == true)
+        });
     if saved["format_version"] != 1
         || saved["outcome"] != "pass"
         || saved["plan_digest"] != json_digest(plan)
@@ -132,7 +161,8 @@ pub(super) fn validate_named(
         || b["managed_schema"] != inputs.config.schema
         || !limits_match(inputs, plan)
         || outside_objects(saved).is_err()
-        || plan["pending"] != json!(pending)
+        || (plan["pending"] != pending(false)
+            && !(pre_scope_eligible && plan["pending"] == pending(true)))
         || inputs.migrations.iter().take(end).any(|m| {
             !super::analysis::analyze_for(&inputs.config.engine, &m.sql, &inputs.config.schema)
                 .replay_supported
@@ -878,6 +908,11 @@ async fn build_concurrent(
         // failed); a valid or unknown index keeps the attempt for reconcile.
         let cleanup = async {
             let mut dropped = false;
+            let planned = &saved["plan"]["execution"]["prefix_fingerprints"];
+            if planned[applied] == planned[applied + 1] {
+                // An IF NOT EXISTS no-op did not own an index to clean up.
+                return Ok(None);
+            }
             if db.index_validity(schema, &index.name).await? == Some(false) {
                 db.drop_invalid_index(schema, &index.name, limit).await?;
                 dropped = true;
@@ -906,12 +941,20 @@ async fn build_concurrent(
         return Err(d);
     }
     progress["phase"] = json!("record");
-    let (position, catalog) = locked_attempt(db, inputs, saved).await?;
+    let base = validate(inputs, saved)?;
+    let position = locked_attempt(db, inputs, saved, base).await?;
+    let catalog = db
+        .catalog(
+            schema,
+            &inputs.history_schemas,
+            &outside_objects(saved)?,
+            &inputs.endpoint.role,
+        )
+        .await?;
     if position != applied + 1 {
         // `history` takes covered counts, not ledger positions: the plan
         // was made with `base` covered, and the ledger now covers the
         // migrations before the attempt.
-        let base = validate(inputs, saved)?;
         return Err(plan_state::history(
             inputs,
             base,
@@ -933,13 +976,32 @@ async fn build_concurrent(
 
 /// Open a migration transaction and require history to end in exactly one
 /// `running` attempt for the next captured migration, within this plan.
-/// Returns its 1-based position and the observed catalog.
+/// Returns its 1-based position; the caller reads the required catalog scope.
 async fn locked_attempt(
     db: &Adapter,
     inputs: &CapturedInputs,
     saved: &Value,
-) -> Result<(usize, super::model::Catalog)> {
-    let base = validate(inputs, saved)?;
+    base: usize,
+) -> Result<usize> {
+    let (_, history) = attempt_snapshot(db, inputs, saved).await?;
+    let (applied, attempt) = super::report::prefix_with_attempt(&history, inputs)?;
+    let position = attempt.ok_or_else(|| {
+        Diagnostic::new(
+            "DB_RECONCILE_MISMATCH",
+            "The running attempt disappeared while it was being resolved; nothing was changed.",
+        )
+    })?;
+    if applied < base || applied + 1 != position {
+        return Err(plan_state::history(inputs, base, applied));
+    }
+    Ok(position)
+}
+
+async fn attempt_snapshot(
+    db: &Adapter,
+    inputs: &CapturedInputs,
+    saved: &Value,
+) -> Result<(Identity, History)> {
     db.begin_migration(&inputs.config.schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
     // Reconcile accepts a 0.6.1 binding here too. Migrate gets here only after
@@ -955,39 +1017,109 @@ async fn locked_attempt(
     let history = db
         .writable_history(&inputs.database_name, &inputs.config.schema)
         .await?;
-    let (applied, attempt) = super::report::prefix_with_attempt(&history, inputs)?;
-    let position = attempt.ok_or_else(|| {
-        Diagnostic::new(
-            "DB_RECONCILE_MISMATCH",
-            "The running attempt disappeared while it was being resolved; nothing was changed.",
-        )
-    })?;
-    if applied < base || applied + 1 != position {
-        return Err(plan_state::history(inputs, base, applied));
+    Ok((identity, history))
+}
+
+async fn own_attempt(
+    inputs: &CapturedInputs,
+    saved: &Value,
+) -> Result<(Adapter, Identity, History)> {
+    let db = connect(inputs, saved).await?;
+    db.own_migrations(inputs.limits().migrator_wait()).await?;
+    let (identity, history) = attempt_snapshot(&db, inputs, saved).await?;
+    Ok((db, identity, history))
+}
+
+/// These artifacts did not positively bind the extent of the inspected
+/// catalog. Current concurrent-index plans always attest native replay.
+fn ambiguous_legacy_scope(inputs: &CapturedInputs, saved: &Value) -> bool {
+    let plan = &saved["plan"];
+    inputs.config.engine == "postgresql"
+        && plan["execution"].get("replay").is_none()
+        && plan["execution"].get("outside_objects").is_none()
+        && plan["binding"]["canonicalization_version"] == 1
+}
+
+struct LegacyReference {
+    prefix: Catalog,
+    outside: Vec<String>,
+    primary_only: bool,
+}
+
+impl LegacyReference {
+    /// Today's complete catalog must match replay of the applied prefix.
+    /// Ignore only the two entries for the index this step added. The exact
+    /// historical approval is checked separately, including its definition.
+    fn matches(&self, live: &Catalog, index: &str, validity: Option<bool>) -> bool {
+        if !live.uncovered.is_empty() || !self.prefix.uncovered.is_empty() {
+            return false;
+        }
+        let index_key = format!("index:{index}");
+        if validity.is_some() && !self.prefix.objects.contains_key(&index_key) {
+            let relation = format!("relation:{index}");
+            return !self.prefix.objects.contains_key(&relation)
+                && live.objects.contains_key(&relation)
+                && live.objects.contains_key(&index_key)
+                && live.objects.len() == self.prefix.objects.len() + 2
+                && self
+                    .prefix
+                    .objects
+                    .iter()
+                    .all(|(k, v)| live.objects.get(k) == Some(v));
+        }
+        validity != Some(false) && live.objects == self.prefix.objects
     }
-    let catalog = db
+}
+
+/// Supplement a legacy approval, never replace it: first match the *full*
+/// current scope to the independently replayed prefix, then return the view
+/// whose before/after fingerprint must match the original plan.
+async fn recovery_catalog(
+    db: &Adapter,
+    inputs: &CapturedInputs,
+    outside: &[String],
+    reference: Option<&LegacyReference>,
+    index: &str,
+    validity: Option<bool>,
+) -> Result<Option<Catalog>> {
+    let schema = &inputs.config.schema;
+    let role = &inputs.endpoint.role;
+    let full = db
         .catalog(
-            &inputs.config.schema,
+            schema,
             &inputs.history_schemas,
-            &outside_objects(saved)?,
-            &inputs.endpoint.role,
+            reference.map_or(outside, |r| &r.outside),
+            role,
         )
         .await?;
-    Ok((position, catalog))
+    if !full.uncovered.is_empty() {
+        return Ok(None);
+    }
+    if let Some(r) = reference {
+        if !r.matches(&full, index, validity) {
+            return Ok(None);
+        }
+        if r.primary_only {
+            let original = db.catalog(schema, &[], &[], role).await?;
+            return Ok(original.uncovered.is_empty().then_some(original));
+        }
+    }
+    Ok(Some(full))
 }
 
 /// `ntnt db reconcile`: resolve a `running` attempt left by an interrupted
-/// non-transactional migration. It never runs migration SQL. It records the
+/// non-transactional migration. It never runs migration SQL on the target. It records the
 /// attempt only if the planned index exists and is valid, rolls it back
 /// (dropping an invalid index) only if the database is exactly the plan's
 /// state before or after it, and otherwise changes nothing.
 pub(super) async fn reconcile_attempt(
     inputs: &CapturedInputs,
     saved: &Value,
+    files: plan_state::Files<'_>,
     rerun: &str,
     report: &mut Value,
 ) -> Result<()> {
-    validate(inputs, saved)?;
+    let base = validate_descriptor(inputs, saved, files, true)?;
     if Adoption::from_plan(inputs, saved)?.is_some() {
         return Err(Diagnostic::new(
             "DB_CONFIG",
@@ -999,30 +1131,22 @@ pub(super) async fn reconcile_attempt(
     report["target"] = json!({"name":inputs.target_name,"schema":inputs.config.schema});
     report["plan_digest"] = saved["plan_digest"].clone();
     report_limits(inputs, report);
-    work_deadline(
-        reconcile_owned(inputs, saved, report),
-        inputs.limits().work_deadline(),
-    )
-    .await
+    let budget = inputs.limits().work_deadline();
+    let until = tokio::time::Instant::now() + budget;
+    work_deadline(reconcile_owned(inputs, saved, base, until, report), budget).await
 }
 
-async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
+async fn reconcile_owned(
+    inputs: &CapturedInputs,
+    saved: &Value,
+    base: usize,
+    until: tokio::time::Instant,
+    report: &mut Value,
+) -> Result<()> {
     let schema = &inputs.config.schema;
     let fingerprints = &saved["plan"]["execution"]["prefix_fingerprints"];
-    let db = connect(inputs, saved).await?;
-    db.own_migrations(inputs.limits().migrator_wait()).await?;
-    db.begin_migration(schema).await?;
-    let identity = db.identity(&inputs.endpoint).await?;
-    let planned = &saved["plan"]["binding"]["target"];
-    if !reconcile_target_matches(&json!(&identity), planned) {
-        return Err(plan_state::target(
-            planned,
-            &json!(&identity),
-            &inputs.config.engine,
-        ));
-    }
-    report["target"]["identity"] = json!(identity);
-    let history = db.writable_history(&inputs.database_name, schema).await?;
+    let (mut db, identity, history) = own_attempt(inputs, saved).await?;
+    report["target"]["identity"] = json!(&identity);
     let (applied, attempt) = super::report::prefix_with_attempt(&history, inputs)?;
     if attempt.is_none() {
         db.rollback().await?;
@@ -1041,7 +1165,30 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
     };
     let source = inputs.migrations[applied].name.clone();
     let index = pending_concurrent_index(inputs, applied).ok_or_else(|| mismatch(&source))?;
-    locked_attempt_scope(applied, inputs, saved)?;
+    if applied < base {
+        return Err(plan_state::history(inputs, base, applied));
+    }
+    let reference = if ambiguous_legacy_scope(inputs, saved) {
+        // No target session, locks or transaction survive scratch replay.
+        db.rollback().await?;
+        drop(db);
+        let (prefix, outside) =
+            super::report::legacy_recovery_prefix(inputs, &identity, applied, until, report)
+                .await?;
+        let (again, identity_again, history_again) = own_attempt(inputs, saved).await?;
+        if json!(identity_again) != json!(identity) || history_again != history {
+            return Err(Diagnostic::new("DB_TARGET_CHANGED", "Target identity or migration history changed during recovery inspection; the attempt was not resolved."));
+        }
+        db = again;
+        let primary_only = !Fingerprint::of(&prefix).matches(&fingerprints[applied]);
+        Some(LegacyReference {
+            prefix,
+            outside,
+            primary_only,
+        })
+    } else {
+        None
+    };
     if db.index_building(schema, &index.name).await? {
         let mut d = Diagnostic::new(
             "DB_ATTEMPT_ACTIVE",
@@ -1050,25 +1197,38 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
         d.source = Some(index.name.clone());
         return Err(d);
     }
-    let mut catalog = db
-        .catalog(
-            schema,
-            &inputs.history_schemas,
-            &outside_objects(saved)?,
-            &inputs.endpoint.role,
-        )
-        .await?;
-    if !catalog.uncovered.is_empty() {
-        return Err(mismatch(&index.name));
-    }
+    let outside = outside_objects(saved)?;
     let validity = db.index_validity(schema, &index.name).await?;
     report["reconciliation"] = json!({
         "source": source,
         "observed_index": match validity { Some(true) => "valid", Some(false) => "invalid", None => "absent" },
     });
+    let catalog = recovery_catalog(
+        &db,
+        inputs,
+        &outside,
+        reference.as_ref(),
+        &index.name,
+        validity,
+    )
+    .await?
+    .ok_or_else(|| mismatch(&index.name))?;
     let resolution = match validity {
         Some(true) => {
-            if !Fingerprint::of(&catalog).matches(&fingerprints[applied + 1]) {
+            let before = &fingerprints[applied];
+            let after = &fingerprints[applied + 1];
+            if !Fingerprint::of(&catalog).matches(after)
+                || reference.as_ref().is_some_and(|r| {
+                    if r.prefix
+                        .objects
+                        .contains_key(&format!("index:{}", index.name))
+                    {
+                        before != after
+                    } else {
+                        !index_addition_matches(catalog, &index.name, before, after)
+                    }
+                })
+            {
                 return Err(mismatch(&index.name));
             }
             db.resolve_attempt(applied + 1, true).await?;
@@ -1080,18 +1240,12 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
             // Treated as finished, the invalid index must make the catalog
             // exactly the planned one; only then is it ours to drop. Its
             // stored value too, when that differs (#460).
-            let key = format!("index:{}", index.name);
-            for object in catalog
-                .objects
-                .get_mut(&key)
-                .into_iter()
-                .chain(catalog.stored.get_mut(&key))
-            {
-                for flag in ["valid", "ready", "live"] {
-                    object[flag] = json!(true);
-                }
-            }
-            if !Fingerprint::of(&catalog).matches(&fingerprints[applied + 1]) {
+            if !index_addition_matches(
+                catalog,
+                &index.name,
+                &fingerprints[applied],
+                &fingerprints[applied + 1],
+            ) {
                 return Err(mismatch(&index.name));
             }
             db.rollback().await?;
@@ -1100,8 +1254,13 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
                 .await?;
             report["reconciliation"]["dropped_invalid_index"] = json!(true);
             report["reconciliation"]["outcome"] = json!("fail");
-            let (position, after) = locked_attempt(&db, inputs, saved).await?;
-            if position != applied + 1 || !Fingerprint::of(&after).matches(&fingerprints[applied]) {
+            let position = locked_attempt(&db, inputs, saved, base).await?;
+            let after =
+                recovery_catalog(&db, inputs, &outside, reference.as_ref(), &index.name, None)
+                    .await?;
+            if position != applied + 1
+                || !after.is_some_and(|c| Fingerprint::of(&c).matches(&fingerprints[applied]))
+            {
                 let mut d = Diagnostic::new(
                     "DB_RECONCILE_INCOMPLETE",
                     "The invalid index was dropped, but the database then differed from the plan's state before this migration; the attempt was kept.",
@@ -1133,6 +1292,41 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
     Ok(())
 }
 
+fn index_addition_matches(
+    mut catalog: super::model::Catalog,
+    name: &str,
+    before: &Value,
+    after: &Value,
+) -> bool {
+    let key = format!("index:{name}");
+    for object in catalog
+        .objects
+        .get_mut(&key)
+        .into_iter()
+        .chain(catalog.stored.get_mut(&key))
+    {
+        for flag in ["valid", "ready", "live"] {
+            object[flag] = json!(true);
+        }
+    }
+    if !Fingerprint::of(&catalog).matches(after) {
+        return false;
+    }
+    // An index is both a pg_index object and a relation. Test the proposed
+    // removal in memory; IF NOT EXISTS may have planned no addition at all.
+    omit_index(&mut catalog, name) && Fingerprint::of(&catalog).matches(before)
+}
+
+fn omit_index(catalog: &mut Catalog, name: &str) -> bool {
+    for key in [format!("index:{name}"), format!("relation:{name}")] {
+        if catalog.objects.remove(&key).is_none() {
+            return false;
+        }
+        catalog.stored.remove(&key);
+    }
+    true
+}
+
 /// Mark a reconciliation write whose outcome is not yet acknowledged. A lost
 /// commit or interrupted DROP then reports `unknown`, not `fail`.
 fn pending_write(report: &mut Value, write: &str) {
@@ -1140,18 +1334,38 @@ fn pending_write(report: &mut Value, write: &str) {
     report["reconciliation"]["outcome"] = json!("unknown");
 }
 
-/// The attempt must lie inside the plan's pending range.
-fn locked_attempt_scope(applied: usize, inputs: &CapturedInputs, saved: &Value) -> Result<()> {
-    let base = validate(inputs, saved)?;
-    if applied < base {
-        return Err(plan_state::history(inputs, base, applied));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_invalid_index_belongs_to_the_build_only_if_the_plan_added_it() {
+        let mut before = super::super::model::Catalog::default();
+        before
+            .objects
+            .insert("relation:t".into(), json!({"kind":"r"}));
+        let mut completed = before.clone();
+        completed
+            .objects
+            .insert("relation:t_id".into(), json!({"kind":"i"}));
+        completed.objects.insert(
+            "index:t_id".into(),
+            json!({"valid":true,"ready":true,"live":true}),
+        );
+        let mut interrupted = completed.clone();
+        interrupted.objects.get_mut("index:t_id").unwrap()["valid"] = json!(false);
+        let digest = |c: &super::super::model::Catalog| json!(Fingerprint::of(c).stable);
+        let end = digest(&completed);
+        assert!(index_addition_matches(
+            interrupted.clone(),
+            "t_id",
+            &digest(&before),
+            &end
+        ));
+        // IF NOT EXISTS found the index already present: same approved state
+        // on either side of the step. Its later invalidity is not ours to undo.
+        assert!(!index_addition_matches(interrupted, "t_id", &end, &end));
+    }
 
     /// Captured inputs for a one-target PostgreSQL manifest plus `extra` TOML.
     fn captured(extra: &str) -> (tempfile::TempDir, CapturedInputs) {

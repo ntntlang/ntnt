@@ -833,14 +833,18 @@ If `migrate` stops between steps 1 and 3 (killed, disconnected, timed out), the 
 ntnt db reconcile --database app --target production --plan review.json --json
 ```
 
-`reconcile` takes the migrator advisory lock, so it waits for (and then refuses to run alongside) a `migrate` that still holds it. It never runs migration SQL. It reports the index it observed (`reconciliation.observed_index`) and one resolution:
+`reconcile` takes the migrator advisory lock, so it waits for (and then refuses to run alongside) a `migrate` that still holds it. It never runs migration SQL on the target. It reports the index it observed (`reconciliation.observed_index`) and one resolution:
 
 - `completed`: the index exists, is valid, and the catalog is exactly the plan's state after the migration. The row becomes `applied`.
-- `rolled_back`: the index is invalid, and, treated as finished, it would make the catalog exactly the planned state. It is dropped, the catalog is rechecked against the state before the migration, and the row is deleted.
+- `rolled_back`: the index is invalid. Treating it as finished must reproduce the approved state after the migration, and removing just that index from the observed catalog must reproduce the approved state before it. Only then is the index dropped. The live catalog is checked again before the row is deleted. A build that planned to keep an existing index (`IF NOT EXISTS`) cannot authorize its removal.
 - `not_started`: no index of that name exists and the catalog is exactly the state before the migration. The row is deleted.
 - `none`: there was no attempt to resolve.
 
-Anything else fails with `DB_RECONCILE_MISMATCH` (for example, an index of the planned name with another definition) and changes nothing. `DB_ATTEMPT_ACTIVE` means a session is still building that index; wait for it or cancel that backend, then reconcile again. After `rolled_back` or `not_started`, rerun `migrate` with the same plan.
+Anything else fails with `DB_RECONCILE_MISMATCH` (for example, an index of the planned name with another definition) and changes nothing. `DB_ATTEMPT_ACTIVE` means a session is still building that index; wait for it or cancel that backend, then reconcile again. After `rolled_back` or `not_started`, rerun `migrate` with the same plan only if it has native replay evidence. For a pre-native plan, make a fresh plan, review it, and approve its new digest before starting another build.
+
+**Upgrading with a running PostgreSQL build.** Use the original saved plan, inputs and matching approval. An old plan can omit warnings about later statements; reconciling does not run those statements. Some old plans (including 0.6.3) also do not say which schemas or objects they fingerprinted. For those plans alone, `reconcile` needs the configured disposable scratch database. It replays **only the already-applied prefix**, not the interrupted index build or any later SQL. Ordinary prefixes can use the usual reusable scratch; if the prefix itself includes an earlier concurrent build, use private scratch as for planning. Current concurrent-index plans remain target-only during recovery.
+
+After replay, `reconcile` reacquires the target lock and checks identity, ledger, the full catalog reconstructed on scratch, and the original approved fingerprints. A missing schema is drift, not proof that the old plan had nothing to inspect. If scratch is unavailable, restore scratch access and retry with the same plan; if the evidence disagrees, preserve the attempt and investigate. Do not edit the plan, delete a ledger row or switch binaries to bypass a refusal.
 
 An index of the planned name that exists without a `running` row is not treated as progress: `migrate` reports a stale plan, because nothing records that this migration built it.
 

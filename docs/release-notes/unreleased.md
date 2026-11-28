@@ -34,6 +34,8 @@ migration may do still apply (#426).
 
 ## PostgreSQL migrations
 
+If an index build was interrupted under 0.6.3, `reconcile` can now use its approved plan even if later migrations lack the outside-scope warnings introduced in 0.6.4. It never runs those later migrations. When the plan did not record its catalog scope, recovery uses disposable scratch to replay only the already-applied migrations and checks that reference in addition to the original fingerprints. If either check fails, the attempt stays unresolved. See [Database migrations](../DATABASE_MIGRATIONS.md#concurrent-index-builds). A fresh plan is still required to start another concurrent build (#440).
+
 For `CREATE INDEX CONCURRENTLY`, `plan` now runs the command PostgreSQL will run on the target. Supply a fresh matching instance on the inspection runner; a database on the deployment cluster is not sufficient. See [Concurrent index builds](../DATABASE_MIGRATIONS.md#concurrent-index-builds) for the Linux dev/CI recipe. Transactional histories and deployment approval are unchanged.
 
 `ntnt db plan` now names the migration file and suggests an explicit schema
