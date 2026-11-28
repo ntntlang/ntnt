@@ -77,6 +77,8 @@ pub(super) enum CheckHazard {
         view: String,
         function: String,
     },
+    /// PostgreSQL cannot SHARE-lock a materialization, even through a view.
+    MaterializedRead { key: String, view: String },
 }
 
 impl CheckHazard {
@@ -84,13 +86,14 @@ impl CheckHazard {
         match self {
             Self::Operator { key, .. }
             | Self::Computed { key, .. }
-            | Self::ViewWrites { key, .. } => key,
+            | Self::ViewWrites { key, .. }
+            | Self::MaterializedRead { key, .. } => key,
         }
     }
     fn relation(&self) -> &str {
         match self {
             Self::Operator { relation, .. } | Self::Computed { relation, .. } => relation,
-            Self::ViewWrites { view, .. } => view,
+            Self::ViewWrites { view, .. } | Self::MaterializedRead { view, .. } => view,
         }
     }
     /// What the check does, after its name.
@@ -136,6 +139,9 @@ impl CheckHazard {
             Self::ViewWrites { view, function, .. } => format!(
                 "reads view {view}, which calls {function}, a builtin that writes or takes locks; checks must not change anything"
             ),
+            Self::MaterializedRead { view, .. } => format!(
+                "reaches materialized view {view}, on which PostgreSQL cannot take the required SHARE lock"
+            ),
         }
     }
     /// How to write the check so that it can run.
@@ -144,6 +150,7 @@ impl CheckHazard {
             Self::Operator { .. } => "Do the comparison in a view that a migration creates (a view keeps the operator chosen when it is created) and check the view, for example SELECT NOT EXISTS (SELECT 1 FROM app.admin_accounts); or use count(*) or IS NULL forms, which compare no value.",
             Self::Computed { .. } => "Do the computation and the comparison in a view that a migration creates (a view keeps the operators chosen when it is created) and check the view, for example SELECT NOT EXISTS (SELECT 1 FROM app.admin_accounts).",
             Self::ViewWrites { .. } => "Read the view's underlying tables in the check instead.",
+            Self::MaterializedRead { .. } => "Check an ordinary table or a view whose source tables can be SHARE locked instead.",
         }
     }
 }
@@ -280,6 +287,7 @@ pub(super) fn check_warning(
                     "CHECK_OPERATOR_MISMATCH"
                 }
                 CheckHazard::ViewWrites { .. } => "CHECK_VIEW_WRITES",
+                CheckHazard::MaterializedRead { .. } => "CHECK_MATERIALIZED_VIEW_LOCK",
             },
             hazard.relation(),
             format!(

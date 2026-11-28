@@ -113,11 +113,14 @@ pub(super) fn intact(saved: &Value) -> Result<(), Diagnostic> {
     };
     let consistent = plan["authorized"] == false
         && plan["executable"] == false
-        && fingerprints.is_some_and(|list| !list.is_empty() && list.iter().all(hex64))
+        // An adopted prefix may omit fingerprints strictly before its
+        // checkpoint. Everything from the first fingerprint through the
+        // candidate, including the reference, must be actual evidence.
+        && fingerprints.is_some_and(|list| list.iter().skip_while(|v| v.is_null()).all(hex64))
         && fingerprints.and_then(|list| list.last()) == Some(&plan["candidate"]["fingerprint"])
         && base.is_some_and(|n| usize::try_from(n).is_ok())
         && at(reference)
-            .is_some_and(|f| *f == b["expected_base_digest"] && *f == b["base_catalog_digest"])
+            .is_some_and(|f| hex64(f) && *f == b["expected_base_digest"] && *f == b["base_catalog_digest"])
         && b["format_version"] == 1
         && canonicalization_known(b)
         && hex64(&b["base_history_digest"]);
@@ -316,7 +319,11 @@ fn applied_ledger(inputs: &CapturedInputs, count: usize) -> History {
 /// The ledger of a target that adopted the first `adopted` captured
 /// migrations and then applied the rest of the first `through` with
 /// `ntnt db migrate`.
-fn adopted_ledger(inputs: &CapturedInputs, adopted: usize, through: usize) -> Option<History> {
+pub(super) fn adopted_ledger(
+    inputs: &CapturedInputs,
+    adopted: usize,
+    through: usize,
+) -> Option<History> {
     let mut history = ledger_of(inputs, inputs.migrations.get(adopted..through)?);
     for entry in &mut history.entries {
         entry.position += adopted as i64;

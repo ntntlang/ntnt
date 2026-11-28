@@ -45,6 +45,39 @@ macro_rules! declared_owned {
 }
 pub(super) use declared_owned;
 
+// Native dependencies of a materialization's refresh query or index expression.
+// Compare stable object identities (not OIDs). Admit a non-builtin reference
+// only by a catalog class/key we inspect, including individual outside objects.
+// An array follows its element, a row type or a table constraint its relation.
+macro_rules! matview_deps {
+    ($source:literal) => { concat!(r#"
+LEFT JOIN LATERAL (
+ SELECT jsonb_agg(jsonb_build_array(d.deptype,id.type,id.identity) ORDER BY id.type COLLATE "C",id.identity COLLATE "C",d.deptype) AS dependencies,
+   bool_and(((id.schema='pg_catalog' AND d.refobjid<16384)
+     OR (d.refclassid='pg_catalog.pg_extension'::regclass AND d.deptype IN ('e','x'))
+     OR dn.nspname=ANY($2) OR (quote_ident(dn.nspname)||CASE
+       WHEN rc.oid IS NOT NULL THEN '.relation:'||rc.relname
+       WHEN rt.oid IS NOT NULL THEN '.type:'||rt.typname
+       WHEN p.oid IS NOT NULL THEN '.routine:'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')'
+       WHEN op.oid IS NOT NULL THEN '.other:operator.'||op.oprname||'('||CASE WHEN op.oprleft=0 THEN 'NONE' ELSE format_type(op.oprleft,NULL) END||','||CASE WHEN op.oprright=0 THEN 'NONE' ELSE format_type(op.oprright,NULL) END||')'
+       WHEN oc.oid IS NOT NULL THEN '.other:operator_class.'||quote_ident(oc.opcname)||' USING '||quote_ident(om.amname)
+       WHEN co.oid IS NOT NULL THEN '.other:collation.'||co.collname END)=ANY($3::text[])) IS TRUE) AS covered
+ FROM ("#, $source, r#") d
+ CROSS JOIN LATERAL pg_catalog.pg_identify_object(d.refclassid,d.refobjid,d.refobjsubid) id
+ LEFT JOIN pg_catalog.pg_type ty ON d.refclassid='pg_catalog.pg_type'::regclass AND ty.oid=d.refobjid
+ LEFT JOIN pg_catalog.pg_type rt ON rt.oid=CASE WHEN ty.typelem<>0 AND ty.typlen=-1 THEN ty.typelem ELSE ty.oid END
+ LEFT JOIN pg_catalog.pg_constraint k ON d.refclassid='pg_catalog.pg_constraint'::regclass AND k.oid=d.refobjid
+ LEFT JOIN pg_catalog.pg_class rc ON rc.oid=CASE WHEN d.refclassid='pg_catalog.pg_class'::regclass THEN d.refobjid ELSE coalesce(nullif(rt.typrelid,0),k.conrelid) END
+ LEFT JOIN pg_catalog.pg_proc p ON d.refclassid='pg_catalog.pg_proc'::regclass AND p.oid=d.refobjid
+ LEFT JOIN pg_catalog.pg_operator op ON d.refclassid='pg_catalog.pg_operator'::regclass AND op.oid=d.refobjid
+ LEFT JOIN pg_catalog.pg_opclass oc ON d.refclassid='pg_catalog.pg_opclass'::regclass AND oc.oid=d.refobjid
+ LEFT JOIN pg_catalog.pg_am om ON om.oid=oc.opcmethod
+ LEFT JOIN pg_catalog.pg_collation co ON d.refclassid='pg_catalog.pg_collation'::regclass AND co.oid=d.refobjid
+ LEFT JOIN pg_catalog.pg_namespace dn ON dn.oid=coalesce(rc.relnamespace,rt.typnamespace,p.pronamespace,op.oprnamespace,oc.opcnamespace,co.collnamespace)
+) mv ON true
+"#) };
+}
+
 // One definition/coverage projection for both full reads and a group's
 // representative. Only the restriction on the base relation/attribute differs.
 macro_rules! relation_rows {
@@ -66,7 +99,7 @@ SELECT c.relname::text, jsonb_build_object('kind',c.relkind,'owner',CASE WHEN c.
  ||CASE WHEN c.relkind='c' THEN (SELECT jsonb_build_object('grants',CASE WHEN c.oid IN (SELECT objid FROM owned_rel) THEN NULL ELSE (SELECT jsonb_agg(jsonb_build_object('grantor',pg_get_userbyid(a.grantor),'grantee',CASE WHEN a.grantee=0 THEN jsonb_build_object('public',true) ELSE to_jsonb(pg_get_userbyid(a.grantee)) END,'privilege',a.privilege_type,'grantable',a.is_grantable) ORDER BY a.grantor,a.grantee,a.privilege_type)
  FROM aclexplode(coalesce(ct.typacl,acldefault('T',ct.typowner))) a) END,
  'comment',obj_description(ct.oid,'pg_type')) FROM pg_catalog.pg_type ct WHERE ct.oid=c.reltype) ELSE '{}'::jsonb END,
- ((c.relkind='r' AND am.amname='heap') OR (c.relkind IN ('i','I') AND am.oid<16384) OR c.relkind IN ('p','v','S','c'))
+ ((c.relkind IN ('r','m') AND am.amname='heap') OR (c.relkind IN ('i','I') AND am.oid<16384) OR c.relkind IN ('p','v','S','c'))
  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h JOIN pg_catalog.pg_class ch ON ch.oid=h.inhrelid JOIN pg_catalog.pg_class pa ON pa.oid=h.inhparent
    WHERE (h.inhrelid=c.oid OR h.inhparent=c.oid) AND (NOT ch.relispartition OR ch.relnamespace<>c.relnamespace OR pa.relnamespace<>c.relnamespace))
  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend xd JOIN pg_catalog.pg_extension xe ON xe.oid=xd.refobjid WHERE xd.classid='pg_catalog.pg_class'::regclass AND xd.objid=c.oid AND xd.deptype='e' AND xe.extname<>ALL($4)),
@@ -155,33 +188,41 @@ WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)
     ),
     (
         "index",
-        r#"
+        concat!(r#"
 SELECT c.relname::text,jsonb_build_object('table',i.indrelid::regclass::text,'definition',pg_get_indexdef(i.indexrelid,0,false),'valid',i.indisvalid,
  'ready',i.indisready,'live',i.indislive,'unique',i.indisunique,'primary',i.indisprimary,'exclusion',i.indisexclusion,
- 'immediate',i.indimmediate,'clustered',i.indisclustered,'replica_identity',i.indisreplident,'nulls_not_distinct',i.indnullsnotdistinct),
- am.oid<16384 AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend dep JOIN pg_catalog.pg_proc p ON p.oid=dep.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace WHERE dep.classid='pg_catalog.pg_class'::regclass AND dep.objid=i.indexrelid AND dep.refclassid='pg_catalog.pg_proc'::regclass AND pn.nspname<>'pg_catalog' AND pn.nspname<>ALL($2)
+ 'immediate',i.indimmediate,'clustered',i.indisclustered,'replica_identity',i.indisreplident,'nulls_not_distinct',i.indnullsnotdistinct)
+ ||CASE WHEN t.relkind='m' THEN jsonb_build_object('dependencies',mv.dependencies) ELSE '{}'::jsonb END,
+ coalesce(mv.covered,true) AND am.oid<16384 AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend dep JOIN pg_catalog.pg_proc p ON p.oid=dep.refobjid JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace WHERE dep.classid='pg_catalog.pg_class'::regclass AND dep.objid=i.indexrelid AND dep.refclassid='pg_catalog.pg_proc'::regclass AND pn.nspname<>'pg_catalog' AND pn.nspname<>ALL($2)
  AND (cardinality($3::text[])=0 OR quote_ident(pn.nspname)||'.routine:'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')'<>ALL($3)))
  AND NOT EXISTS(SELECT 1 FROM unnest(i.indclass) x JOIN pg_catalog.pg_opclass o ON o.oid=x JOIN pg_catalog.pg_namespace onsp ON onsp.oid=o.opcnamespace JOIN pg_catalog.pg_am oam ON oam.oid=o.opcmethod
  WHERE onsp.nspname<>'pg_catalog' AND onsp.nspname<>ALL($2) AND (cardinality($3::text[])=0 OR quote_ident(onsp.nspname)||'.other:operator_class.'||quote_ident(o.opcname)||' USING '||quote_ident(oam.amname)<>ALL($3))),
  CASE WHEN n.nspname<>$1 THEN quote_ident(n.nspname) END
 FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid=i.indexrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
 JOIN pg_catalog.pg_class t ON t.oid=i.indrelid
-JOIN pg_catalog.pg_am am ON am.oid=c.relam WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||t.relname=ANY($3)) ORDER BY c.relname LIMIT 10001
-"#,
+JOIN pg_catalog.pg_am am ON am.oid=c.relam
+"#, matview_deps!("SELECT d.* FROM pg_catalog.pg_depend d WHERE t.relkind='m' AND d.classid='pg_catalog.pg_class'::regclass AND d.objid=i.indexrelid"),
+r#"WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||t.relname=ANY($3)) ORDER BY c.relname LIMIT 10001
+"#),
     ),
     (
         "view",
-        r#"
-SELECT c.relname::text,jsonb_build_object('kind',c.relkind,'definition',pg_get_viewdef(c.oid,false)),
- c.relkind='v' AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_depend dep ON dep.classid='pg_catalog.pg_rewrite'::regclass AND dep.objid=r.oid
+        concat!(r#"
+SELECT c.relname::text,jsonb_build_object('kind',c.relkind,'definition',pg_get_viewdef(c.oid,false))
+ ||CASE WHEN c.relkind='m' THEN jsonb_build_object('populated',c.relispopulated,'dependencies',mv.dependencies,
+   'depends_on_extensions',(SELECT jsonb_agg(e.extname ORDER BY e.extname COLLATE "C") FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
+     WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=c.oid AND d.refclassid='pg_catalog.pg_extension'::regclass AND d.deptype='x')) ELSE '{}'::jsonb END,
+ CASE WHEN c.relkind='m' THEN coalesce(mv.covered,false) ELSE NOT EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_depend dep ON dep.classid='pg_catalog.pg_rewrite'::regclass AND dep.objid=r.oid
    LEFT JOIN pg_catalog.pg_proc p ON dep.refclassid='pg_catalog.pg_proc'::regclass AND p.oid=dep.refobjid
    LEFT JOIN pg_catalog.pg_class rc ON dep.refclassid='pg_catalog.pg_class'::regclass AND rc.oid=dep.refobjid
    JOIN pg_catalog.pg_namespace dn ON dn.oid=coalesce(p.pronamespace,rc.relnamespace)
    WHERE r.ev_class=c.oid AND dn.nspname<>'pg_catalog' AND dn.nspname<>ALL($2)
-   AND (cardinality($3::text[])=0 OR coalesce(quote_ident(dn.nspname)||'.routine:'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',quote_ident(dn.nspname)||'.relation:'||rc.relname)<>ALL($3))),
+   AND (cardinality($3::text[])=0 OR coalesce(quote_ident(dn.nspname)||'.routine:'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')',quote_ident(dn.nspname)||'.relation:'||rc.relname)<>ALL($3))) END,
  CASE WHEN n.nspname<>$1 THEN quote_ident(n.nspname) END
-FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE (n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||c.relname=ANY($3))) AND c.relkind IN ('v','m') ORDER BY c.relname LIMIT 10001
-"#,
+FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+"#, matview_deps!("SELECT d.* FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::regclass AND d.objid=r.oid WHERE c.relkind='m' AND r.ev_class=c.oid AND r.rulename='_RETURN'"),
+r#"WHERE (n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspname)||'.relation:'||c.relname=ANY($3))) AND c.relkind IN ('v','m') ORDER BY c.relname LIMIT 10001
+"#),
     ),
     (
         "sequence",

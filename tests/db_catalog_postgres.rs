@@ -483,6 +483,109 @@ fn failed_concurrent_index_is_inventoried_as_invalid() {
 
 #[test]
 #[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn materialized_view_catalog_compares_definition_storage_authority_and_indexes() {
+    let f = Fixture::new();
+    let ddl = "CREATE TABLE app.source(id integer); INSERT INTO app.source VALUES (1);\n               CREATE MATERIALIZED VIEW app.summary WITH (fillfactor=80) AS\n                 SELECT id FROM app.source WHERE id > 0;\n               CREATE UNIQUE INDEX summary_id ON app.summary(id);";
+    f.sql("0001_summary.sql", ddl);
+    let plan = f.command_args("plan", &["--out", "plan.json"]);
+    assert_eq!(plan["outcome"], "pass", "{}", plan["diagnostics"]);
+    let applied = f.apply("plan.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{}", applied["diagnostics"]);
+    let clean = f.command("verify");
+    assert_eq!(clean["outcome"], "pass", "{}", clean["diagnostics"]);
+    let objects = &clean["catalog"]["objects"];
+    assert_eq!(objects["relation:summary"]["kind"], "m");
+    assert_eq!(objects["relation:summary"]["owner"]["managed_role"], true);
+    assert!(objects["view:summary"]["definition"]["sha256"].is_string());
+    assert_eq!(objects["column:summary.id"]["type"], "integer");
+    assert_eq!(objects["index:summary_id"]["unique"], true);
+    let mut target = f.target();
+    // Catalog equality is not a comparison of cached rows or freshness.
+    target
+        .batch_execute("INSERT INTO app.source VALUES (2); REFRESH MATERIALIZED VIEW app.summary")
+        .unwrap();
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    let mut before = clean;
+    for (change, key) in [
+        ("REFRESH MATERIALIZED VIEW app.summary WITH NO DATA", "view:summary"),
+        ("ALTER MATERIALIZED VIEW app.summary SET (fillfactor=90)", "relation:summary"),
+        ("GRANT SELECT ON app.summary TO PUBLIC", "relation:summary"),
+        ("DROP INDEX app.summary_id", "index:summary_id"),
+        ("DROP MATERIALIZED VIEW app.summary; CREATE MATERIALIZED VIEW app.summary AS SELECT id FROM app.source WHERE id < 0 WITH NO DATA", "view:summary"),
+    ] {
+        target.batch_execute(change).unwrap();
+        let after = f.command("verify");
+        assert_eq!(after["drift"]["outcome"], "fail", "{change}: {}", after["diagnostics"]);
+        assert_ne!(before["catalog"]["objects"][key], after["catalog"]["objects"][key], "{change}: {key}");
+        before = after;
+    }
+    let mut admin = admin_config().dbname(&f.target).connect(NoTls).unwrap();
+    admin
+        .batch_execute("ALTER MATERIALIZED VIEW app.summary OWNER TO postgres")
+        .unwrap();
+    let after = f.command("verify");
+    assert_eq!(after["drift"]["outcome"], "fail");
+    assert_eq!(
+        after["catalog"]["objects"]["relation:summary"]["owner"],
+        "postgres"
+    );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn materialized_view_dependencies_are_compared_only_within_coverage() {
+    let f = Fixture::new();
+    // A relation the history creates in public and its columns are in scope.
+    f.seed_first("CREATE TABLE public.input (n integer PRIMARY KEY); CREATE MATERIALIZED VIEW app.summary AS SELECT n FROM public.input;");
+    assert_eq!(f.command("verify")["outcome"], "pass");
+    let mut target = f.target();
+    // DEPENDS ON EXTENSION changes what a DROP EXTENSION will drop, not the SELECT.
+    target
+        .batch_execute("ALTER MATERIALIZED VIEW app.summary DEPENDS ON EXTENSION plpgsql")
+        .unwrap();
+    let changed = f.command("verify");
+    assert_eq!(
+        changed["drift"]["outcome"], "fail",
+        "{}",
+        changed["diagnostics"]
+    );
+    assert!(changed["drift"]["differences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["object"] == "view:summary"));
+    target.batch_execute("CREATE SCHEMA outside; CREATE DOMAIN outside.amount AS integer; CREATE FUNCTION outside.same(integer,integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1 = $2'; CREATE OPERATOR outside.=== (FUNCTION=outside.same,LEFTARG=integer,RIGHTARG=integer); CREATE TABLE outside.input(n integer)").unwrap();
+    // A partial index records its predicate's operator, not its implementation function.
+    target
+        .batch_execute(
+            "CREATE INDEX summary_part ON app.summary(n) WHERE n OPERATOR(outside.===) 1",
+        )
+        .unwrap();
+    let index = f.command("verify");
+    assert!(names(&index["catalog"]["uncovered"]).contains(&"index:summary_part"));
+    for select in [
+        "SELECT n FROM outside.input",
+        "SELECT n FROM public.input WHERE outside.same(n, 1)",
+        "SELECT n FROM public.input WHERE n OPERATOR(outside.===) 1",
+        "SELECT n FROM public.input WHERE n::outside.amount > 1",
+    ] {
+        target.batch_execute(&format!("DROP MATERIALIZED VIEW app.summary; CREATE MATERIALIZED VIEW app.summary AS {select} WITH NO DATA")).unwrap();
+        let r = f.command("verify");
+        assert_eq!(
+            r["drift"]["outcome"], "unknown",
+            "{select}: {}",
+            r["diagnostics"]
+        );
+        assert!(
+            names(&r["catalog"]["uncovered"]).contains(&"view:summary"),
+            "{select}: {}",
+            r["catalog"]["uncovered"]
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
 fn catalog_detects_disabled_foreign_key_enforcement() {
     let f = Fixture::new();
     f.seed_first("CREATE TABLE app.parents (id INTEGER PRIMARY KEY); CREATE TABLE app.children (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES app.parents(id));");
@@ -679,7 +782,7 @@ fn partial_catalog_coverage_and_nonempty_unadopted_scope_are_not_passes() {
     f.target().batch_execute("DROP TABLE app.legacy").unwrap();
     f.seed_first("CREATE TABLE app.t(id INTEGER);");
     f.target()
-        .batch_execute("CREATE MATERIALIZED VIEW app.slow AS SELECT 1 AS sleeper")
+        .batch_execute("CREATE TABLE public.untracked(id int); CREATE MATERIALIZED VIEW app.slow AS SELECT id FROM public.untracked")
         .unwrap();
     let r = f.command("verify");
     assert_eq!(r["drift"]["outcome"], "unknown");
@@ -1030,7 +1133,7 @@ fn uncovered_objects_and_grants_in_a_created_schema_are_reported() {
         .unwrap();
     assert_eq!(f.command("verify")["outcome"], "pass");
     f.target()
-        .batch_execute("CREATE MATERIALIZED VIEW audit.summary AS SELECT 1 AS n")
+        .batch_execute("CREATE TABLE public.untracked(n int); CREATE MATERIALIZED VIEW audit.summary AS SELECT n FROM public.untracked")
         .unwrap();
     let r = f.command("verify");
     assert_eq!(r["drift"]["outcome"], "unknown", "{r}");
@@ -1876,6 +1979,38 @@ fn assert_check_refused(setup: &str, check: &str, named: &[&str]) {
     assert_eq!(r["progress"][1]["state"], "failed", "{r}");
     assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0, "{r}");
     assert!(!ran, "app.valid ran: {r}");
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn materialized_view_refresh_expressions_are_not_check_reads() {
+    let setup = "CREATE MATERIALIZED VIEW app.cached AS SELECT 'a@b'::app.email AS email WITH NO DATA;\n                 CREATE VIEW app.cached_view AS SELECT * FROM app.cached;";
+    // A materialization's refresh query must not run during inspection or a
+    // check against another table. The sequence also catches a rolled-back call.
+    let (r, ran) = migrate_checks(
+        setup,
+        &[("empty", "SELECT NOT EXISTS (SELECT 1 FROM app.marker)")],
+    );
+    assert_eq!(r["outcome"], "pass", "{}", r["diagnostics"]);
+    assert_eq!(r["assertions"]["executed"], 1);
+    assert!(!ran);
+    // PostgreSQL does not take SHARE on the materialization, even when
+    // LOCK TABLE succeeds on a wrapping view. Never silently weaken the lock.
+    for table in ["cached", "cached_view"] {
+        let (r, ran) = migrate_checks(
+            setup,
+            &[(
+                "empty",
+                &format!("SELECT NOT EXISTS (SELECT 1 FROM app.{table})"),
+            )],
+        );
+        let d = diagnostic(&r, "DB_CHECK_UNSUPPORTED")
+            .unwrap_or_else(|| panic!("{}", r["diagnostics"]));
+        assert!(d["message"].as_str().unwrap().contains("SHARE"), "{d}");
+        assert_eq!(r["assertions"]["executed"].as_u64().unwrap_or(0), 0);
+        assert_eq!(r["progress"][1]["state"], "failed");
+        assert!(!ran);
+    }
 }
 
 /// #456 review: comparing a column with a literal converts the literal to

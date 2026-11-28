@@ -14,6 +14,10 @@ use std::path::{Path, PathBuf};
 /// A scaffolded database keeps its migrations in this directory beside the manifest.
 const MIGRATIONS_DIR: &str = "migrations";
 
+/// A generated prompt is not an intentional, comment-only migration.
+pub(super) const MIGRATION_PROMPT: &str =
+    "-- Write the SQL below. Once this migration has been applied anywhere,";
+
 fn conflict(message: &str) -> Diagnostic {
     Diagnostic::new("DB_INIT_CONFLICT", message)
 }
@@ -808,7 +812,7 @@ fn create_migration_with(
     let source = format!("{id:0width$}_{}.sql", args.name);
     let header = format!(
         "-- {source}: database \"{database}\" ({engine}).\n\
-         -- Write the SQL below. Once this migration has been applied anywhere,\n\
+         {MIGRATION_PROMPT}\n\
          -- never edit or renumber it; add a new migration instead.\n",
         engine = config.engine
     );

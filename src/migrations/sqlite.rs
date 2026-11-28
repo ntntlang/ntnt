@@ -2364,7 +2364,7 @@ impl Sqlite {
                     "SQLite execution requires an owned write transaction.",
                 ));
             }
-            if super::analysis::is_empty(&migration.sql, "sqlite") {
+            if super::analysis::unwritten_migration(&migration.sql, "sqlite") {
                 return Err(super::empty_migration());
             }
             // sqlite3_prepare treats a NUL as the end of SQL, not a separator.

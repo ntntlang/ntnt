@@ -87,7 +87,7 @@ pub(crate) struct LockWarning {
 /// Whether `sql` holds no statement at all: only whitespace, comments and
 /// semicolons, such as the header `ntnt db new` writes (#428). Input that does
 /// not tokenize is not empty; the other checks report it.
-pub(crate) fn is_empty(sql: &str, engine: &str) -> bool {
+fn is_empty(sql: &str, engine: &str) -> bool {
     use sqlparser::tokenizer::{Token, Tokenizer};
     if engine == "sqlite" {
         return super::sqlite_sql::statements(sql).next().is_none();
@@ -98,6 +98,58 @@ pub(crate) fn is_empty(sql: &str, engine: &str) -> bool {
             .iter()
             .all(|token| matches!(token, Token::Whitespace(_) | Token::SemiColon | Token::EOF))
     })
+}
+
+/// Keep the empty-file guard except for positively identified authored no-ops.
+pub(super) fn unwritten_migration(sql: &str, engine: &str) -> bool {
+    !comment_only(sql, engine) && is_empty(sql, engine)
+}
+
+/// Positive proof of an authored no-op, independent of SQL parser errors and
+/// token limits. Stop at the first non-comment token (including `;`); quoted
+/// strings, identifiers, and SQL following a comment are never discarded.
+/// Replay and execution still submit the original script to the engine.
+fn comment_only(sql: &str, engine: &str) -> bool {
+    let pg = engine == "postgresql";
+    let mut bytes = sql.as_bytes();
+    let mut saw_comment = false;
+    while let Some((&first, rest)) = bytes.split_first() {
+        if first.is_ascii_whitespace() || (pg && first == 0x0b) {
+            bytes = rest;
+        } else if !pg && bytes.starts_with(b"\xef\xbb\xbf") {
+            bytes = &bytes[3..]; // SQLite treats a BOM at a token boundary as space.
+        } else if bytes.starts_with(b"--") {
+            let end = bytes
+                .iter()
+                .position(|&b| b == b'\n' || (pg && b == b'\r'))
+                .unwrap_or(bytes.len());
+            if bytes[..end].trim_ascii_end() == super::scaffold::MIGRATION_PROMPT.as_bytes() {
+                return false;
+            }
+            saw_comment = true;
+            bytes = &bytes[end..];
+        } else if bytes.starts_with(b"/*") {
+            let mut depth = 1;
+            bytes = &bytes[2..];
+            while depth > 0 {
+                if let Some(rest) = bytes.strip_prefix(b"*/") {
+                    depth -= 1;
+                    bytes = rest;
+                } else if pg && bytes.starts_with(b"/*") {
+                    depth += 1;
+                    bytes = &bytes[2..];
+                } else if let Some((_, rest)) = bytes.split_first() {
+                    bytes = rest;
+                } else {
+                    return false; // Even where accepted at EOF, not a complete block comment.
+                }
+            }
+            saw_comment = true;
+        } else {
+            return false;
+        }
+    }
+    saw_comment && !sql.contains('\0')
 }
 
 /// The most tokens, whitespace and comments included, that the parser reads
@@ -351,6 +403,10 @@ fn analyze_script(engine: &str, sql: &str, schema: &str, pre_native: bool) -> An
         non_transactional: false,
         outside_scope: vec![],
     };
+    if comment_only(sql, engine) {
+        a.operations.push("no_op".into());
+        return a;
+    }
     if engine == "sqlite" {
         super::sqlite_sql::analyze(&mut a, sql);
     } else {
@@ -3178,7 +3234,7 @@ mod tests {
         assert!(statements(&"x ".repeat(MAX_SCRIPT_TOKENS)).is_none());
         let split = statements("CREATE FUNCTION app.f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END; SELECT ';'; ;").unwrap();
         assert_eq!(split.len(), 2);
-        let empty = analyze("-- nothing", "app");
+        let empty = analyze(" ; ", "app");
         assert!(!empty.replay_supported);
         assert_eq!(empty.unknowns, ["SQL_PARSE_EMPTY_OR_LIMIT"]);
     }
@@ -3204,6 +3260,27 @@ mod tests {
             assert!(!analyze(sql, "app").replay_supported, "{sql}");
         }
         assert!(!analyze("CREATE INDEX t_id ON app.t(id)", "app").non_transactional);
+    }
+
+    #[test]
+    fn comment_only_requires_native_trivia_and_at_least_one_complete_comment() {
+        for (sql, pg, sqlite) in [
+            (" -- a;", true, true),
+            ("/* α */\r\n-- β", true, true),
+            ("\u{feff}-- note", false, true),
+            ("\x0b-- note", true, false),
+            ("\u{a0}-- note", false, false),
+            ("/*", false, false),
+            ("/* ok */\n/* incomplete", false, false),
+            ("\"--\"", false, false),
+            ("$tag$--$tag$", false, false),
+            ("/*\0*/", false, false),
+            ("-- note\n;", false, false),
+            ("", false, false),
+        ] {
+            assert_eq!(comment_only(sql, "postgresql"), pg, "{sql:?}");
+            assert_eq!(comment_only(sql, "sqlite"), sqlite, "{sql:?}");
+        }
     }
 
     #[test]

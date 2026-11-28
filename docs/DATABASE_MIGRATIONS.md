@@ -623,7 +623,7 @@ Each migration runs with normal row-level security; deferred constraints are che
 
 ### How replay commits and cleans up scratch
 
-Replay owns a dedicated physical connection, not a pool handle. Since 0.6.5 it **commits each migration on scratch**, as `migrate` commits each one on the target: every transactional migration runs in a `READ COMMITTED` transaction with the target's settings (the same `SET LOCAL`s; only `synchronous_commit` is off on scratch), is inspected, and commits. A history therefore replays exactly as the target runs it. A value `ALTER TYPE ... ADD VALUE` adds in one migration can be used by the next one on every supported major, PostgreSQL 16 included, and a migration that adds a value and uses it fails at plan, on 17 and 18 too, with the `DB_ENUM_VALUE_UNCOMMITTED` (SQLSTATE 55P04) that `migrate` would hit on the target. (0.6.4 and earlier replayed the whole history in one rollback-only transaction, where PostgreSQL 16 rejected the first case and 17 and 18 accepted the second.) The authorized per-migration executor reuses that exact captured-SQL primitive.
+Replay owns a dedicated physical connection, not a pool handle. Since 0.6.5 it **commits each migration on scratch**, as `migrate` commits each one on the target: every transactional migration runs in a `READ COMMITTED` transaction with the target's settings (the same `SET LOCAL`s; only `synchronous_commit` is off on scratch), and commits. Catalogs are inspected at each execution boundary; already-adopted history is inspected at its checkpoint. A history therefore replays exactly as the target runs it. A value `ALTER TYPE ... ADD VALUE` adds in one migration can be used by the next one on every supported major, PostgreSQL 16 included, and a migration that adds a value and uses it fails at plan, on 17 and 18 too, with the `DB_ENUM_VALUE_UNCOMMITTED` (SQLSTATE 55P04) that `migrate` would hit on the target. (0.6.4 and earlier replayed the whole history in one rollback-only transaction, where PostgreSQL 16 rejected the first case and 17 and 18 accepted the second.) The authorized per-migration executor reuses that exact captured-SQL primitive.
 
 On **reusable scratch**, NTNT cleans up afterwards and only drops what it can prove it created:
 
@@ -639,6 +639,8 @@ On **reusable scratch**, NTNT cleans up afterwards and only drops what it can pr
 The scratch requirements above are unchanged except for the three marked 0.6.5. NTNT never creates, resets or drops the scratch database itself. Catalog derivation deliberately skips transition contracts: an empty replay cannot establish data-dependent production assertions. Fresh/populated native rehearsal tests invoke the same `migrate` executor on disposable fixtures with representative rows; they are not a second application-level runner or a claim about production data.
 
 ### What PostgreSQL replay runs
+
+On either engine, an authored comment-only migration is a checksummed no-op: its position is retained and retry skips it like any other committed entry. Empty files and the untouched `ntnt db new` scaffold are still unfinished work and cannot be applied.
 
 PostgreSQL migrations are complete SQL scripts. Scratch replay and authorized execution both send each captured script, unchanged, in its own transaction, which commits (above). That includes `DO` blocks, functions, triggers, policies, grants, seed `INSERT`s, `SET CONSTRAINTS` and other transactional SQL a real application history contains. PostgreSQL itself determines the resulting catalog.
 
@@ -864,9 +866,11 @@ Quoted identifier components are unambiguously quoted in composite object keys. 
 
 Plain views, sequences, SQL and PL/pgSQL functions/procedures (full definition, owner and grants), user triggers, RLS policies, declarative partitions in their parent's schema, expression/partial indexes on built-in access methods, `EXCLUDE` constraints, enums (their labels, in order), domains (base type, `NOT NULL`, default, collation and constraints; a domain whose default or constraints call a routine, or use an operator, outside `pg_catalog` and the managed scope that inspection does not compare, an extension's outside the scope included, stays uncovered), composite types (their attributes, as columns, and the type's privileges), operators whose function is covered, and extensions installed in the managed scope (by version) are compared like tables: an out-of-band change is reported as drift on the named object, such as `ALTER TYPE ... ADD VALUE` on `type:order_status`. Columns, domains and arrays of these types are covered. An operator's key carries its argument types, as a routine's does (`other:operator.===(integer,integer)`), and an operator class's or family's its access method (`other:operator_class.citext_ops USING btree`).
 
+Heap-backed materialized views are compared by definition, dependencies, owner and grants, columns, indexes, and whether PostgreSQL has populated them. Inspection neither reads their rows nor refreshes them; matching schemas do not prove matching cached data. For named data checks, use the underlying lockable tables, not the materialized view.
+
 An extension's version covers its members: the types, functions, aggregates, operators, operator classes and families, and casts it installs. Their owner and grants are the installer's and are not compared. Indexes, columns and constraints that use them are covered, so `CREATE EXTENSION pg_trgm WITH SCHEMA app` with a `gin_trgm_ops` index, or a `citext` column, plans and migrates, and an out-of-band `ALTER EXTENSION ... UPDATE` is drift on `extension:<name>`.
 
-Materialized views, functions in other languages, aggregates and base or range types other than an extension's, non-partition inheritance or partitions in a different schema from their parent, foreign tables, custom collations/access methods, operator classes and families other than an extension's (only a superuser can create one), extensions in other schemas, event triggers, security labels, other namespace objects and references to routines outside `pg_catalog` and the managed scope expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. Comparison is by definition, not behavior: NTNT does not analyze what a function body or policy expression does. This is not dependency closure, security-policy verification or replication/publication configuration auditing.
+Functions in other languages, aggregates and base or range types other than an extension's, non-partition inheritance or partitions in a different schema from their parent, foreign tables, custom collations/access methods, operator classes and families other than an extension's (only a superuser can create one), extensions in other schemas, event triggers, security labels, other namespace objects and references to routines outside `pg_catalog` and the managed scope expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. Comparison is by definition, not behavior: NTNT does not analyze what a function body or policy expression does. This is not dependency closure, security-policy verification or replication/publication configuration auditing.
 
 Engine-deparsed SQL, defaults, expressions, comments, enum labels and storage option payloads are represented by **definition hashes**, not printed literals: schema definitions can themselves contain credentials. Object names, structural fields, owner/grant facts and object-level differences remain visible. This avoids echoing connection credentials, SQL error payloads or live row samples. It is not an SQL dump; review source SQL separately through appropriately authorized tooling.
 
@@ -919,7 +923,7 @@ CREATE TABLE audit.log (id int PRIMARY KEY, account int REFERENCES app.accounts 
 Objects in `audit` get the same inspection and coverage rules as the managed
 schema's: an out-of-band `DROP TABLE audit.log` or `GRANT SELECT ON audit.log TO
 PUBLIC` is drift on `audit.relation:log`, and an unsupported object there, such as
-a materialized view, makes the result `unknown`. Catalog keys in those schemas
+a foreign table, makes the result `unknown`. Catalog keys in those schemas
 start with the schema name (quoted where PostgreSQL would quote it):
 `audit.relation:log`, `audit.column:log.account`, `audit.index:log_pkey`. A schema
 itself is `schema:audit`. Keys in the managed schema stay unqualified
@@ -1070,7 +1074,7 @@ history/baseline yourself and review it; the tool does not dump the live target 
 then declare that target to be its own reference. The whole selected prefix must
 replay within the adapter's supported grammar in the same isolated scratch used
 for ordinary planning. Only that prefix is replayed; future pending SQL is not
-included in this adoption action. No old migration SQL executes on the target.
+included in this adoption action. An unsupported temporary schema that an old migration repaired before the checkpoint need not be representable at each intermediate position. The checkpoint itself must be fully covered and match the live schema, and the named data checks must pass. No old migration SQL executes on the target. Every pending migration still has its own checked execution boundary.
 
 A refusal (`DB_ADOPTION_INPUT`) says which requirement failed, with advice for it:
 no `[databases.<name>.adoption_checks]` declared; an `--adopt-through` ID that is
@@ -1437,7 +1441,7 @@ Plans bind:
 - native cluster/database or file identity, engine and settings, and adapter-specific role/authority facts;
 - managed scope, observed base history/catalog, applied prefix and replayed expected base;
 - adapter/canonicalization version, exact pending migration identities and candidate fingerprint;
-- explicit `execution.format = "postgresql-transactional-v1"` or `"sqlite-transactional-v1"` and ordered engine-specific catalog fingerprints for every migration prefix, including the empty prefix. Old/incomplete artifacts cannot authorize execution;
+- explicit `execution.format = "postgresql-transactional-v1"` or `"sqlite-transactional-v1"` and ordered engine-specific catalog fingerprints at every executable position. Before a reviewed baseline checkpoint, non-executable positions may be `null`; the checkpoint and every later position have a fingerprint. Old/incomplete artifacts cannot authorize execution;
 - the [time limits](#time-limits) `migrate` will use (`execution.limits`): PostgreSQL's effective limits, and SQLite's `statement_seconds` when the manifest declares a limits table.
 
 `plan_digest` hashes that descriptor. Observation time and display filters are not authority inputs. `--against` checks the saved descriptor's digest, pending descriptors and fresh source/target/base binding. It neither executes nor approves the plan.
