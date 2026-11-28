@@ -209,7 +209,8 @@ r#"WHERE n.nspname=ANY($2) OR (cardinality($3::text[])>0 AND quote_ident(n.nspna
         "view",
         concat!(r#"
 SELECT c.relname::text,jsonb_build_object('kind',c.relkind,'definition',pg_get_viewdef(c.oid,false))
- ||CASE WHEN c.relkind='m' THEN jsonb_build_object('populated',c.relispopulated,'dependencies',mv.dependencies,
+ -- REFRESH changes relispopulated without changing the view's schema.
+ ||CASE WHEN c.relkind='m' THEN jsonb_build_object('dependencies',mv.dependencies,
    'depends_on_extensions',(SELECT jsonb_agg(e.extname ORDER BY e.extname COLLATE "C") FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid
      WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=c.oid AND d.refclassid='pg_catalog.pg_extension'::regclass AND d.deptype='x')) ELSE '{}'::jsonb END,
  CASE WHEN c.relkind='m' THEN coalesce(mv.covered,false) ELSE NOT EXISTS(SELECT 1 FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_depend dep ON dep.classid='pg_catalog.pg_rewrite'::regclass AND dep.objid=r.oid

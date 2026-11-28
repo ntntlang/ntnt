@@ -30,6 +30,43 @@ fn plan_stops_at(migrations: &[(&str, &str)], source: &str, objects: Value) {
     assert_eq!(d["objects"], objects, "{r}");
 }
 
+/// At a multi-file adoption checkpoint, replay knows the child is uncovered,
+/// but hasn't inspected the state before the unrelated last file.
+#[test]
+fn uncovered_checkpoint_names_the_boundary_not_the_last_file() {
+    use std::io::Write;
+
+    let f = Fixture::new();
+    let child = "CREATE TABLE child(owner INTEGER REFERENCES parent(id));";
+    let other = "CREATE TABLE other(id INTEGER PRIMARY KEY);";
+    let parent = "CREATE TABLE parent(id INTEGER PRIMARY KEY);";
+    f.sql("0010_child.sql", child);
+    f.sql("0020_other.sql", other);
+    f.sql("0030_parent.sql", parent);
+    // The target is covered; this refusal must come from scratch replay.
+    f.target()
+        .execute_batch(&format!("{child}{other}{parent}"))
+        .unwrap();
+    writeln!(std::fs::OpenOptions::new().append(true).open(f.root.path().join("ntnt.toml")).unwrap(),
+        "\n[databases.app.adoption_checks]\nno_orphans='SELECT NOT EXISTS (SELECT 1 FROM main.child WHERE owner IS NULL)'").unwrap();
+
+    let r = f.command("plan", &["--adopt-through", "20"]);
+    assert_eq!(r["plan"]["classification"], "blocked", "{r}");
+    assert_eq!(r["catalog"]["uncovered"], json!([]), "{r}");
+    let d = r["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "DB_COVERAGE_INCOMPLETE")
+        .unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(d["objects"], json!([r#"table:"child""#]), "{d}");
+    assert!(d["source"].is_null(), "{d}");
+    assert!(
+        d["message"].as_str().unwrap().contains("checkpoint 20"),
+        "{d}"
+    );
+}
+
 /// A trigger body names the table it writes; dropping that table breaks
 /// the programs of the triggering table, which itself did not change.
 #[test]

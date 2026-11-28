@@ -505,9 +505,12 @@ fn materialized_view_catalog_compares_definition_storage_authority_and_indexes()
         .batch_execute("INSERT INTO app.source VALUES (2); REFRESH MATERIALIZED VIEW app.summary")
         .unwrap();
     assert_eq!(f.command("verify")["outcome"], "pass");
+    target
+        .batch_execute("REFRESH MATERIALIZED VIEW app.summary WITH NO DATA")
+        .unwrap();
+    assert_eq!(f.command("verify")["outcome"], "pass");
     let mut before = clean;
     for (change, key) in [
-        ("REFRESH MATERIALIZED VIEW app.summary WITH NO DATA", "view:summary"),
         ("ALTER MATERIALIZED VIEW app.summary SET (fillfactor=90)", "relation:summary"),
         ("GRANT SELECT ON app.summary TO PUBLIC", "relation:summary"),
         ("DROP INDEX app.summary_id", "index:summary_id"),
@@ -529,6 +532,40 @@ fn materialized_view_catalog_compares_definition_storage_authority_and_indexes()
         after["catalog"]["objects"]["relation:summary"]["owner"],
         "postgres"
     );
+}
+
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI db catalog lane"]
+fn materialized_view_first_refresh_preserves_verification_and_approval() {
+    let f = Fixture::new();
+    f.sql(
+        "0001_summary.sql",
+        "CREATE MATERIALIZED VIEW app.summary AS SELECT 1 AS id WITH NO DATA;",
+    );
+    migrate_and_verify(&f);
+    f.sql("0002_refresh.sql", "REFRESH MATERIALIZED VIEW app.summary;");
+    let saved = f.plan("refresh.json");
+    f.target()
+        .batch_execute("REFRESH MATERIALIZED VIEW app.summary")
+        .unwrap();
+    let verified = f.command("verify");
+    let next = f.command("plan");
+    assert_eq!(
+        verified["outcome"], "pass",
+        "verify: {}; next plan: {}",
+        verified["drift"], next["plan"]["classification"]
+    );
+    assert_eq!(next["plan"]["classification"], "requires_review");
+    assert_eq!(next["plan_digest"], saved["plan_digest"]);
+    let against = f.command_args("verify", &["--against", "refresh.json"]);
+    assert_eq!(
+        against["plan_validation"]["outcome"], "pass",
+        "{}",
+        against["diagnostics"]
+    );
+    let applied = f.apply("refresh.json", saved["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{}", applied["diagnostics"]);
+    assert_eq!(f.command("verify")["outcome"], "pass");
 }
 
 #[test]

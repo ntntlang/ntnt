@@ -829,11 +829,21 @@ async fn replay_prefix(
             continue;
         }
         let keep = index == reference || (plan && index == count);
-        // Two objects sharing a catalog key exist only in the replayed
-        // catalog too: name the migration that made them.
+        // With multiple files before the first inspection, only the
+        // checkpoint is known. A single file or later step is attributable.
+        let multi_file_checkpoint = index == checkpoint && checkpoint > 1;
         let attribute = |mut d: Diagnostic| {
-            if d.code == "DB_CATALOG_AMBIGUOUS" {
-                d.source = migration.map(|m| m.name.clone());
+            if matches!(
+                d.code.as_str(),
+                "DB_CATALOG_AMBIGUOUS" | "DB_COVERAGE_INCOMPLETE"
+            ) {
+                if let Some(m) = migration {
+                    if multi_file_checkpoint {
+                        d.message = format!("At adoption checkpoint {}: {}", m.id, d.message);
+                    } else {
+                        d.source = Some(m.name.clone());
+                    }
+                }
             }
             d
         };
@@ -866,17 +876,17 @@ async fn replay_prefix(
                 None,
             )
         };
-        if let (Some(migration), false) = (migration, uncovered.is_empty()) {
-            // The target's catalog.uncovered cannot name these:
-            // they exist only in the replayed intermediate catalog.
-            let mut d = super::coverage_incomplete(
-                "Intermediate catalog exceeds execution coverage.",
+        if migration.is_some() && !uncovered.is_empty() {
+            return Err(attribute(super::coverage_incomplete(
+                if multi_file_checkpoint {
+                    "Catalog exceeds execution coverage."
+                } else {
+                    "Intermediate catalog exceeds execution coverage."
+                },
                 &uncovered,
                 &inputs.database_name,
                 inputs.config.declared_extensions(),
-            );
-            d.source = Some(migration.name.clone());
-            return Err(d);
+            )));
         }
         // The checks migrate runs at this state, examined before it commits
         // (#456); like the state, they count once it has.
