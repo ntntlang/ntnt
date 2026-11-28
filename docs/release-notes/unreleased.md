@@ -24,6 +24,8 @@ needs to run again. The database ledger does not change (#446).
 
 ## SQLite migrations
 
+If a crash leaves a hot rollback journal and the saved plan was lost, `DB_SQLITE_RECOVERY_REQUIRED` now points to [SQLite lost-plan recovery](../DATABASE_MIGRATIONS.md#sqlite-lost-plan-recovery). It restores a readable target without running pending SQL. Inspection stays read-only; applying any remaining work still needs a reviewed, approved plan (#459).
+
 `ntnt db plan` no longer approves a date expression in an index or constraint just because replay found no rows. The refusal names the migration, statement and date function; timestamp defaults and triggers are unchanged. An already-recorded index can be replaced in a new migration (#441).
 
 `ntnt db plan` used to report syntax errors for SQL that SQLite itself
