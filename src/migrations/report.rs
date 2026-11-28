@@ -777,6 +777,11 @@ async fn replay_prefix(
         let migration = index.checked_sub(1).map(|i| &inputs.migrations[i]);
         scratch.begin_replay_step().await?;
         if let Some(migration) = migration {
+            // A recorded or explicitly adopted prefix is evidence to reproduce,
+            // not new target DDL. Keep the path to a forward repair open.
+            if index > reference && inputs.config.engine == "sqlite" {
+                super::sqlite_sql::dates::validate(migration)?;
+            }
             // Configured limits size work on the target's data. Replay
             // runs on an empty database and keeps the default limit. A
             // PostgreSQL scratch also refuses a migration that acts on _ntnt

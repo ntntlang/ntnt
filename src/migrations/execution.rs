@@ -612,6 +612,10 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
     let db = connect(inputs, saved).await?;
     db.own_migrations(inputs.limits().migrator_wait()).await?;
     let mut digests = CatalogDigests::default();
+    // Old plans may predate SQLite's schema date guard. Inspect the entire
+    // still-pending suffix *before* its first write, not the plan's original
+    // base: a matching committed prefix may itself need a forward repair.
+    let mut dates_checked_from = inputs.migrations.len();
     let mut lock_retries = 0u32;
     loop {
         let assertions_before = report["assertions"].clone();
@@ -644,6 +648,15 @@ async fn apply_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value)
             }
         } else {
             mark_prefix(report, applied, &history);
+            if inputs.config.engine == "sqlite" && applied < dates_checked_from {
+                for m in &inputs.migrations[applied..dates_checked_from] {
+                    if let Err(d) = super::sqlite_sql::dates::validate(m) {
+                        db.rollback().await?;
+                        return Err(d);
+                    }
+                }
+                dates_checked_from = applied;
+            }
             if applied == inputs.migrations.len() {
                 db.rollback().await?;
                 report["outcome"] = json!("pass");

@@ -1106,7 +1106,14 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                     // An unreadable --against file is reported as such (#422).
                     let saved = prior.as_ref().map_err(Clone::clone)?;
                     stale_against = execution::validate_named(&inputs, saved, files)
-                        .and_then(|_| execution::validate_replay_evidence(saved))
+                        .and_then(|base| {
+                            // --against compares the original base binding, unlike
+                            // migrate which may resume at a later locked prefix.
+                            if inputs.config.engine == "sqlite" && saved["plan"].get("action").is_none() {
+                                for m in &inputs.migrations[base..] { sqlite_sql::dates::validate(m)?; }
+                            }
+                            execution::validate_replay_evidence(saved)
+                        })
                         .err();
                     if stale_against.is_none() && saved["plan"].get("action").is_some() {
                         // Reuse the pure descriptor validator, never approval or
