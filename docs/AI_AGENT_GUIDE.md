@@ -1802,7 +1802,7 @@ counts do not prove mappings or deployed-client compatibility. Existing database
 can be explicitly adopted with `plan --adopt-through <id>`, named manifest
 `adoption_checks`, then independently approved `migrate --plan`. This records an
 observed source-prefix checkpoint, not old SQL execution; unknown or unsafe legacy
-history is never repaired. Existing application-owned runners and the `ntnt migrate` source
+history is never repaired. If you cannot reproduce the old runner's historical SQL, [use a reviewed release baseline](DATABASE_MIGRATIONS.md#taking-over-from-another-migration-runner) built from an independent install of that release. Keep one writer after handoff. Existing application-owned runners and the `ntnt migrate` source
 interpolation command are unchanged. See [Database Migrations](DATABASE_MIGRATIONS.md)
 for the precise authority, file/transport, contract and recovery boundaries before
 configuring a deployment.

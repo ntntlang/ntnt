@@ -1120,19 +1120,26 @@ transaction. SQL errors, false checks, drift, wrong targets, unknown ledgers and
 failed cleanup cannot become a successful adoption. An adoption plan never also
 applies pending migrations; plan those separately afterward.
 
-For SQLite, adoption compares each object's stored `CREATE` text exactly. SQLite keeps a statement as it was written, so the adopted migrations must create every table, index, view and trigger with the text the file holds, formatting and quoting included; `DB_DRIFT` shows only redacted hashes of the definitions that differ. Write baseline migrations from the database's own `sqlite_master.sql` text, for example the output of `SELECT sql || ';' FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY rowid`, which leaves out SQLite's own tables such as `sqlite_sequence`, rather than from a schema dump that reformats it.
+For SQLite, adoption compares each object's stored `CREATE` text exactly. SQLite keeps a statement as it was written, so the adopted migrations must create every table, index, view and trigger with the text the file holds, formatting and quoting included; `DB_DRIFT` shows only redacted hashes of the definitions that differ. Write baseline migrations from the expected release database's `sqlite_master.sql` text, for example the output of `SELECT sql || ';' FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY rowid`, which leaves out SQLite's own tables such as `sqlite_sequence`, rather than from a schema dump that reformats it.
+
+### Taking over from another migration runner
+
+Use the old application's last release as the reference, not the database you are trying to verify. If you have its forward SQL, keep the file contents and order. If historical upgrades were implemented in application code or depended on a runner-specific session, build a **separate disposable database** with the pinned old release and its native runner. Use the expected schema from that release to author and review a baseline SQL file. For example, use `0017_release_baseline.sql`, followed by `0018_next_change.sql`. Keep the original release and its history in version control. Do not replace an existing NTNT ledger's history with a new baseline.
+
+Run `plan --adopt-through 17` against the existing installation, review the checkpoint and approve its digest. `migrate --plan` compares the expected schema and checks the declared application data conditions before recording the checkpoint; it does **not** execute `0017_release_baseline.sql` on the target. Generate a fresh plan for `0018_next_change.sql`. With a one-file baseline, NTNT reports one adopted source file ending at ID 17, not 17 migrations that NTNT ran.
+
+Stop the previous migration **writer** before handoff. If the application still needs to read its old ledger, include the ledger's real schema in the independently reviewed baseline and use a named `adoption_checks` query for the expected release marker. Its rows stay in place; NTNT neither trusts that table as its own ledger nor writes new entries to it. If the application unconditionally migrates on startup, first arrange a supported way for it to start without running those migrations. Do not fabricate newer version rows to keep it quiet. If the ledger is not needed, the archival alternative below is also supported.
 
 ### Retiring an application's previous migration ledger
 
 An application that ran its own migrations usually recorded them in a ledger table
 of its own in the managed schema, such as `public.schema_migrations` (PostgreSQL)
-or `main.schema_migrations` (SQLite). No migration creates that table, so
+or `main.schema_migrations` (SQLite). If the reviewed baseline does not include that table,
 `plan --adopt-through <last-id>` refuses the adoption with `DB_DRIFT`: the target
 holds an object the history does not create, and such an object is never adopted.
 The refusal's `next_action` names each table the history does not create and, in
 case one is the old ledger, the steps below for the engine. `ntnt db` never moves
-or drops the table itself. Retire the ledger by hand, outside `ntnt db`, then plan
-the adoption again:
+or drops the table itself. If you want to archive it rather than [keep it in the reviewed baseline](#taking-over-from-another-migration-runner), retire the ledger outside `ntnt db`, then plan the adoption again:
 
 1. Stop the old migration runner, and remove it from deploy scripts, so it cannot
    recreate the table or apply a file that `ntnt db` now applies. This is the
