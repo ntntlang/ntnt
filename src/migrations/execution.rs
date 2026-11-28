@@ -78,6 +78,20 @@ fn validate_descriptor(
     let fingerprints = plan["execution"]["prefix_fingerprints"]
         .as_array()
         .ok_or_else(stale)?;
+    // intact() validated a contiguous run of digests after any leading
+    // nulls. Missing positions are legal only for a baseline, never as
+    // evidence to execute or resume a migration. Older dense plans work too.
+    let checkpoint = fingerprints.iter().take_while(|v| v.is_null()).count();
+    if checkpoint != 0 {
+        let matches = match &action {
+            Some(a) => a.kind == "adopt_baseline" && a.count == checkpoint,
+            None => plan_state::adopted_ledger(inputs, checkpoint, base)
+                .is_some_and(|history| json_digest(&history) == b["base_history_digest"]),
+        };
+        if !matches {
+            return Err(stale());
+        }
+    }
     let pre_native = plan["execution"].get("replay").is_none();
     let pending = |pre_scope: bool| {
         let start = if action.is_some() {
@@ -136,13 +150,6 @@ fn validate_descriptor(
         || base > inputs.migrations.len()
         || action.as_ref().is_some_and(|a| base != a.base_count())
         || fingerprints.len() != end + 1
-        || fingerprints.iter().any(|v| {
-            !v.as_str().is_some_and(|s| {
-                s.len() == 64
-                    && s.bytes()
-                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-            })
-        })
         || plan["candidate"]["fingerprint"] != fingerprints[end]
         || b["expected_base_digest"] != fingerprints[reference]
         || b["base_catalog_digest"] != fingerprints[reference]
@@ -1532,6 +1539,35 @@ role = "owner"
             d.message,
             "0001_initial.sql was added to migrations/ after the plan was made."
         );
+    }
+
+    #[test]
+    fn missing_fingerprints_are_bound_to_the_recorded_checkpoint() {
+        let (project, _) = captured("");
+        for i in 1..=3 {
+            std::fs::write(
+                project.path().join(format!("migrations/000{i}_table.sql")),
+                format!("CREATE TABLE app.t{i}(id integer);"),
+            )
+            .unwrap();
+        }
+        let inputs = CapturedInputs::load(&project.path().join("ntnt.toml"), "test", None).unwrap();
+        let mut plan = descriptor(&inputs);
+        plan["binding"]["applied_count"] = json!(3);
+        let history = plan_state::adopted_ledger(&inputs, 2, 3).unwrap();
+        plan["binding"]["base_history_digest"] = json!(json_digest(&history));
+        let f = &"a".repeat(64);
+        for (fingerprints, valid) in [
+            (json!([f, f, f, f]), true), // existing dense saved plan
+            (json!([null, null, f, f]), true),
+            (json!([null, f, f, f]), false), // another checkpoint
+            (json!([null, null, null, f]), false), // missing the checkpoint itself
+            (json!([null, f, null, f]), false), // hole after the first digest
+            (json!([null, null, f, null]), false), // missing the candidate
+        ] {
+            plan["execution"]["prefix_fingerprints"] = fingerprints;
+            assert_eq!(validate(&inputs, &saved(&plan)).is_ok(), valid, "{plan}");
+        }
     }
 
     #[test]

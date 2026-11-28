@@ -1777,8 +1777,8 @@ role are restored afterwards. `DB_REPLAY_UNSUPPORTED` from a `DO` block that
 changes a password (even one rolled back), memberships or another database means:
 move that statement out of the migration history.
 On PostgreSQL, `plan.check_warnings` lists pending checks that `migrate` will
-refuse, several per check if need be: `CHECK_OPERATOR_MISMATCH` and
-`CHECK_VIEW_WRITES` (`DB_CHECK_UNSUPPORTED`), and, since checks read with
+refuse, several per check if need be: `CHECK_OPERATOR_MISMATCH`,
+`CHECK_VIEW_WRITES` and `CHECK_MATERIALIZED_VIEW_LOCK` (`DB_CHECK_UNSUPPORTED`), and, since checks read with
 `row_security=off`, `CHECK_ROW_SECURITY` for one that would read a
 `FORCE ROW LEVEL SECURITY` table as a migration role without `BYPASSRLS`
 (`DB_CHECK_ROW_SECURITY`). Migrations can create only trusted extensions; an
@@ -1802,7 +1802,7 @@ counts do not prove mappings or deployed-client compatibility. Existing database
 can be explicitly adopted with `plan --adopt-through <id>`, named manifest
 `adoption_checks`, then independently approved `migrate --plan`. This records an
 observed source-prefix checkpoint, not old SQL execution; unknown or unsafe legacy
-history is never repaired. Existing application-owned runners and the `ntnt migrate` source
+history is never repaired. If you cannot reproduce the old runner's historical SQL, [use a reviewed release baseline](DATABASE_MIGRATIONS.md#taking-over-from-another-migration-runner) built from an independent install of that release. Keep one writer after handoff. Existing application-owned runners and the `ntnt migrate` source
 interpolation command are unchanged. See [Database Migrations](DATABASE_MIGRATIONS.md)
 for the precise authority, file/transport, contract and recovery boundaries before
 configuring a deployment.

@@ -1834,14 +1834,9 @@ impl RebuildGuard {
             rows = true;
             objects.push(format!("table:{}", quote(name)));
         }
-        for name in counts
-            .keys()
-            .filter(|name| !self.counts.contains_key(*name))
-        {
-            broken.push(format!("table `{name}` is new"));
-            rows = true;
-            objects.push(format!("table:{}", quote(name)));
-        }
+        // A rebuild can move old column values into a new related table.
+        // Its schema is bound by the approved replay and its FKs are checked
+        // before commit; row-count preservation applies to pre-existing tables.
         for (key, value) in &self.required {
             match catalog.objects.get(key) {
                 None => broken.push(format!("{} is missing", subject(key))),
@@ -1952,7 +1947,7 @@ impl RebuildGuard {
         message.push_str(" Row values suppressed.");
         let mut advice = Vec::new();
         if rows {
-            advice.push(format!("Copy every row of `{table}` into its replacement, keep every other table and its rows, and leave no new table behind; make other data changes in a separate migration without the sidecar."));
+            advice.push(format!("Copy every row of `{table}` into its replacement and keep every other existing table and its row count. The rebuild may create and populate new tables."));
         }
         if tables {
             advice.push(format!("Leave the other tables as they were. SQLite rewrites the foreign keys of other tables that reference a table it renames, so create the replacement under a new name and rename it to `{table}` after dropping the old table, never rename the old table first; change other tables in a separate migration without the sidecar."));
@@ -2364,7 +2359,7 @@ impl Sqlite {
                     "SQLite execution requires an owned write transaction.",
                 ));
             }
-            if super::analysis::is_empty(&migration.sql, "sqlite") {
+            if super::analysis::unwritten_migration(&migration.sql, "sqlite") {
                 return Err(super::empty_migration());
             }
             // sqlite3_prepare treats a NUL as the end of SQL, not a separator.

@@ -668,8 +668,9 @@ fn compare(observed: &Catalog, expected: &Catalog) -> Value {
 #[derive(Default)]
 struct Replayed {
     /// Fingerprint of the catalog before the first and after each replayed
-    /// migration; only plans record them.
-    fingerprints: Vec<String>,
+    /// migration; only plans record them. Positions before an adopted
+    /// checkpoint are not execution boundaries and have no fingerprint.
+    fingerprints: Vec<Option<String>>,
     /// The catalog after `reference` migrations.
     expected: Option<Catalog>,
     /// For plans, the catalog after the last replayed migration.
@@ -751,11 +752,21 @@ fn check_probes<'a>(
     probes
 }
 
-/// Replay the first `count` migrations on a prepared scratch, inspecting the
-/// catalog before the first and after each one: an object outside coverage
-/// that exists only between two migrations is reported against the migration
-/// that made it. Each state is inspected once and fingerprinted only for a
-/// plan; the catalog itself is kept only at `reference` and, for a plan, at
+/// The states this inspection needs. Only a requested or validated baseline
+/// checkpoint can move the first catalog inspection past the empty state.
+#[derive(Clone, Copy)]
+struct ReplaySteps {
+    count: usize,
+    reference: usize,
+    checkpoint: usize,
+    plan: bool,
+}
+
+/// Execute the first `count` migrations on a prepared scratch. Inspect the
+/// checkpoint and each state thereafter: outside a baseline, even transient
+/// uncovered objects are reported against the migration that made them. Each
+/// such state is inspected once and fingerprinted only for a plan; the
+/// catalog itself is kept only at `reference` and, for a plan, at
 /// the end. Each state's inspection includes the objects the history has
 /// created outside the managed scope by then, as replay finds them. On
 /// PostgreSQL each migration runs, is inspected and commits in its own
@@ -764,7 +775,12 @@ async fn replay_prefix(
     scratch: &Adapter,
     inputs: &CapturedInputs,
     role: &str,
-    (count, reference, plan): (usize, usize, bool),
+    ReplaySteps {
+        count,
+        reference,
+        checkpoint,
+        plan,
+    }: ReplaySteps,
     probes: &[CheckProbe<'_>],
     replayed: &mut Replayed,
 ) -> Result<()> {
@@ -802,12 +818,32 @@ async fn replay_prefix(
             vec![]
         };
         replayed.outside.extend(outside.iter().cloned());
+        if index < checkpoint {
+            // These files must still run on independent scratch, with the
+            // usual execution, scope and commit guards. No target migration
+            // or check will ever execute at one of these internal positions.
+            scratch.finish_replay_step(migration).await?;
+            if plan {
+                replayed.fingerprints.push(None);
+            }
+            continue;
+        }
         let keep = index == reference || (plan && index == count);
-        // Two objects sharing a catalog key exist only in the replayed
-        // catalog too: name the migration that made them.
+        // With multiple files before the first inspection, only the
+        // checkpoint is known. A single file or later step is attributable.
+        let multi_file_checkpoint = index == checkpoint && checkpoint > 1;
         let attribute = |mut d: Diagnostic| {
-            if d.code == "DB_CATALOG_AMBIGUOUS" {
-                d.source = migration.map(|m| m.name.clone());
+            if matches!(
+                d.code.as_str(),
+                "DB_CATALOG_AMBIGUOUS" | "DB_COVERAGE_INCOMPLETE"
+            ) {
+                if let Some(m) = migration {
+                    if multi_file_checkpoint {
+                        d.message = format!("At adoption checkpoint {}: {}", m.id, d.message);
+                    } else {
+                        d.source = Some(m.name.clone());
+                    }
+                }
             }
             d
         };
@@ -840,17 +876,17 @@ async fn replay_prefix(
                 None,
             )
         };
-        if let (Some(migration), false) = (migration, uncovered.is_empty()) {
-            // The target's catalog.uncovered cannot name these:
-            // they exist only in the replayed intermediate catalog.
-            let mut d = super::coverage_incomplete(
-                "Intermediate catalog exceeds execution coverage.",
+        if migration.is_some() && !uncovered.is_empty() {
+            return Err(attribute(super::coverage_incomplete(
+                if multi_file_checkpoint {
+                    "Catalog exceeds execution coverage."
+                } else {
+                    "Intermediate catalog exceeds execution coverage."
+                },
                 &uncovered,
                 &inputs.database_name,
                 inputs.config.declared_extensions(),
-            );
-            d.source = Some(migration.name.clone());
-            return Err(d);
+            )));
         }
         // The checks migrate runs at this state, examined before it commits
         // (#456); like the state, they count once it has.
@@ -878,7 +914,9 @@ async fn replay_prefix(
         }
         scratch.finish_replay_step(migration).await?;
         replayed.check_warnings.extend(check_warnings);
-        replayed.fingerprints.extend(fingerprint);
+        if plan {
+            replayed.fingerprints.push(fingerprint);
+        }
         if index == reference {
             replayed.expected = catalog.clone();
         }
@@ -893,7 +931,7 @@ async fn replay_prefix(
 /// One replay on disposable scratch. Inspection may keep partial results for a report;
 /// recovery consumes them only if work, cleanup and unlock all succeeded.
 struct ScratchReplay<'a> {
-    steps: (usize, usize, bool), // (count, reference, plan), as in replay_prefix
+    steps: ReplaySteps,
     probes: &'a [CheckProbe<'a>],
     native_source: Option<&'a str>,
     replay_until: Option<tokio::time::Instant>,
@@ -1089,7 +1127,12 @@ pub(super) async fn legacy_recovery_prefix(
         inputs,
         identity,
         ScratchReplay {
-            steps: (applied, applied, false),
+            steps: ReplaySteps {
+                count: applied,
+                reference: applied,
+                checkpoint: 0,
+                plan: false,
+            },
             probes: &[],
             native_source,
             replay_until: Some(replay_until),
@@ -1339,7 +1382,17 @@ async fn inspect_observed(
         inputs,
         &identity,
         ScratchReplay {
-            steps: (count, reference, command == "plan"),
+            steps: ReplaySteps {
+                count,
+                reference,
+                // A recognized v1 import is not a baseline checkpoint. Its
+                // recorded executions still get the ordinary per-step replay.
+                checkpoint: adoption
+                    .as_ref()
+                    .filter(|a| a.kind == "adopt_baseline")
+                    .map_or_else(|| history.adopted_count(), |a| a.count),
+                plan: command == "plan",
+            },
             probes: &probes,
             native_source,
             replay_until,
@@ -1785,7 +1838,13 @@ mod tests {
         current_thread().block_on(async {
             let (identity, scratch) = prepared_scratch(&project).await;
             let mut replayed = Replayed::default();
-            replay_prefix(&scratch, inputs, "", (n, n, true), &[], &mut replayed)
+            let steps = ReplaySteps {
+                count: n,
+                reference: n,
+                checkpoint: 0,
+                plan: true,
+            };
+            replay_prefix(&scratch, inputs, "", steps, &[], &mut replayed)
                 .await
                 .unwrap();
             assert_eq!(replayed.fingerprints.len(), n + 1);
@@ -1808,9 +1867,19 @@ mod tests {
                 .await
                 .unwrap();
             let mut replayed = Replayed::default();
-            replay_prefix(&scratch, inputs, "", (n, n, false), &[], &mut replayed)
-                .await
-                .unwrap();
+            replay_prefix(
+                &scratch,
+                inputs,
+                "",
+                ReplaySteps {
+                    plan: false,
+                    ..steps
+                },
+                &[],
+                &mut replayed,
+            )
+            .await
+            .unwrap();
             assert!(replayed.fingerprints.is_empty() && replayed.candidate.is_none());
             assert!(replayed.expected.is_some());
             scratch.rollback().await.unwrap();

@@ -396,17 +396,18 @@ const CHECK_CONVERSION_CALLS: &str = r#"WITH RECURSIVE reach(rel) AS (
   SELECT d.refobjid FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='v'
   JOIN pg_catalog.pg_rewrite r ON r.ev_class=v.oid
   JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_class'::pg_catalog.regclass),
+-- A materialization's _RETURN query runs on refresh, not on a SELECT.
+read_rules AS (SELECT r.* FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_class c ON c.oid=r.ev_class
+  WHERE r.ev_class IN (SELECT rel FROM reach) AND c.relkind<>'m'),
 walk(rel, col, top, typ, runs) AS (
   (SELECT a.attrelid, a.attname::text, a.atttypid, a.atttypid, false FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
     WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind IN ('r','p','v') AND a.attnum>0 AND NOT a.attisdropped
    UNION ALL
-   SELECT r.ev_class, NULL, d.refobjid, d.refobjid, true FROM pg_catalog.pg_rewrite r
+   SELECT r.ev_class, NULL, d.refobjid, d.refobjid, true FROM read_rules r
     JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_type'::pg_catalog.regclass
-    WHERE r.ev_class IN (SELECT rel FROM reach)
    UNION ALL
-   SELECT r.ev_class, NULL, m[1]::oid, m[1]::oid, true FROM pg_catalog.pg_rewrite r
-    CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':typid (\d+)', 'g') m
-    WHERE r.ev_class IN (SELECT rel FROM reach))
+   SELECT r.ev_class, NULL, m[1]::oid, m[1]::oid, true FROM read_rules r
+    CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':typid (\d+)', 'g') m)
   UNION
   SELECT w.rel, w.col, w.top, x.typ, w.runs OR x.below FROM walk w JOIN pg_catalog.pg_type t ON t.oid=w.typ
   CROSS JOIN LATERAL (
@@ -421,9 +422,8 @@ walk(rel, col, top, typ, runs) AS (
 -- Operators a view's rules or a domain's constraints use, with the
 -- negators and commutators the planner may put in their place.
 used(kind, owner, root, op) AS (
-  (SELECT 'v', r.ev_class, d.refobjid, d.refobjid FROM pg_catalog.pg_rewrite r
+  (SELECT 'v', r.ev_class, d.refobjid, d.refobjid FROM read_rules r
     JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_rewrite'::pg_catalog.regclass AND d.objid=r.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
-    WHERE r.ev_class IN (SELECT rel FROM reach)
    UNION ALL
    SELECT 'd', k.contypid, d.refobjid, d.refobjid FROM pg_catalog.pg_constraint k
     JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_operator'::pg_catalog.regclass
@@ -467,8 +467,8 @@ found(rel, what) AS (
   SELECT u.owner, 'uses operator '||u.root::pg_catalog.regoperator::text||CASE WHEN u.op<>u.root THEN ', which the planner may replace with '||u.op::pg_catalog.regoperator::text ELSE '' END
     ||', whose function is '||y.txt FROM used u JOIN pg_catalog.pg_operator o ON o.oid=u.op JOIN why y ON y.fn=o.oprcode WHERE u.kind='v'
   UNION ALL
-  SELECT r.ev_class, 'calls '||y.txt FROM pg_catalog.pg_rewrite r CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':(?:funcid|opfuncid) (\d+)', 'g') m
-   JOIN dynamic d ON d.fn=m[1]::oid JOIN why y ON y.fn=d.fn WHERE r.ev_class IN (SELECT rel FROM reach))
+  SELECT r.ev_class, 'calls '||y.txt FROM read_rules r CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':(?:funcid|opfuncid) (\d+)', 'g') m
+   JOIN dynamic d ON d.fn=m[1]::oid JOIN why y ON y.fn=d.fn)
 SELECT DISTINCT CASE WHEN rn.nspname=$1 THEN '' ELSE pg_catalog.quote_ident(rn.nspname)||'.' END||'relation:'||rc.relname,
   CASE WHEN rc.relkind='v' THEN 'view ' ELSE 'table ' END||pg_catalog.quote_ident(rn.nspname)||'.'||pg_catalog.quote_ident(rc.relname)||' '||f.what
 FROM found f JOIN pg_catalog.pg_class rc ON rc.oid=f.rel JOIN pg_catalog.pg_namespace rn ON rn.oid=rc.relnamespace
@@ -544,8 +544,9 @@ ORDER BY o.oid LIMIT 1"#;
 /// or pg_notify, which it marks only parallel restricted. pg_depend never
 /// records a builtin (pinned) function, so calls are read from the rules'
 /// stored expressions. $3 is the managed schema. One row per view and
-/// function: the view's catalog key, its name and the function.
-const CHECK_VIEW_WRITES: &str = r#"WITH RECURSIVE reach(rel) AS (
+/// function: the view's catalog key, its name and the function. A reached
+/// materialization has no function here: its contents cannot be SHARE locked.
+const CHECK_VIEW_READS: &str = r#"WITH RECURSIVE reach(rel) AS (
   SELECT c.oid FROM ROWS FROM (pg_catalog.unnest($1::text[]), pg_catalog.unnest($2::text[])) t(nsp, rel)
   JOIN pg_catalog.pg_namespace n ON n.nspname=t.nsp JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid AND c.relname=t.rel
   UNION
@@ -560,6 +561,10 @@ CROSS JOIN LATERAL pg_catalog.regexp_matches(r.ev_action::text, ':(?:funcid|opfu
 JOIN pg_catalog.pg_proc p ON p.oid=m[1]::oid
 WHERE p.pronamespace='pg_catalog'::pg_catalog.regnamespace
   AND (p.proparallel='u' OR p.proname ~ '^pg_(try_)?advisory_' OR p.proname='pg_notify')
+UNION ALL
+SELECT CASE WHEN n.nspname=$3 THEN '' ELSE pg_catalog.quote_ident(n.nspname)||'.' END||'relation:'||v.relname,
+  pg_catalog.quote_ident(n.nspname)||'.'||pg_catalog.quote_ident(v.relname), NULL::text
+FROM reach JOIN pg_catalog.pg_class v ON v.oid=reach.rel AND v.relkind='m' JOIN pg_catalog.pg_namespace n ON n.oid=v.relnamespace
 ORDER BY 1, 3 LIMIT 20"#;
 
 impl Postgres {
@@ -957,12 +962,12 @@ SELECT jsonb_build_object('database_owner',(SELECT pg_get_userbyid(datdba) FROM 
     /// writes made directly to a partition also wait.
     pub async fn lock_for_checks(&self, tables: &[(String, String)]) -> Result<()> {
         for (schema, table) in tables {
-            self.batch(&format!(
-                "LOCK TABLE {}.{} IN SHARE MODE",
-                quote(schema),
-                quote(table)
-            ))
-            .await?;
+            let relation = format!("{}.{}", quote(schema), quote(table));
+            let sql = format!("LOCK TABLE {relation} IN SHARE MODE");
+            bounded_classified(IO_TIMEOUT, self.client.batch_execute(&sql), |e| {
+                (e.code()?.code() == "42809").then(|| Diagnostic::new("DB_CHECK_UNSUPPORTED",
+                    &format!("PostgreSQL cannot take the required SHARE lock on {relation}. Check an ordinary table or lockable view instead.")))
+            }).await?;
         }
         Ok(())
     }
@@ -1566,8 +1571,9 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
               WHERE rt.oid=CASE WHEN t.typelem<>0 AND t.typlen=-1 THEN t.typelem ELSE t.oid END),'')<>ALL($4::text[])))
           AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_cast k WHERE k.oid>=16384 AND k.castcontext IN ('i','a') AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid=d.refobjid JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
             WHERE d.classid='pg_catalog.pg_cast'::pg_catalog.regclass AND d.objid=k.oid AND d.refclassid='pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype='e' AND (en.nspname=ANY($2) OR e.extname=ANY($3::text[]))))
-          -- A composite type (relkind c) holds no rows to read.
-          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind NOT IN ('r','p','i','I','S','v','c'))
+          -- A composite type holds no rows. A materialization is catalogued
+          -- but checks cannot read it, directly or through a view (lock_for_checks, CHECK_VIEW_READS).
+          AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_class c WHERE c.oid IN (SELECT rel FROM reach) AND c.relkind NOT IN ('r','p','i','I','S','v','m','c'))
           -- A check may read a view, and through it what the view reads.
           -- Views may only use builtin non-volatile functions, so reading one
           -- cannot write or take advisory locks.
@@ -1623,7 +1629,8 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
     /// pg_catalog operator either way, so those stay allowed.
     ///
     /// A check also must not read a view, directly or through other views,
-    /// that calls a builtin that writes or takes locks (`CHECK_VIEW_WRITES`).
+    /// that calls a builtin that writes or takes locks, or reaches a
+    /// materialization PostgreSQL does not SHARE-lock (`CHECK_VIEW_READS`).
     pub async fn check_hazards(&self, schema: &str, sql: &str) -> Result<Vec<super::CheckHazard>> {
         let (schemas, tables): (Vec<String>, Vec<String>) =
             super::analysis::check_tables(sql, schema)
@@ -1700,13 +1707,18 @@ FROM pg_catalog.pg_roles r,pg_catalog.pg_database d WHERE r.rolname=current_user
             }
         }
         for row in self
-            .rows(CHECK_VIEW_WRITES, &[&schemas, &tables, &schema])
+            .rows(CHECK_VIEW_READS, &[&schemas, &tables, &schema])
             .await?
         {
-            found.push(super::CheckHazard::ViewWrites {
-                key: row.get(0),
-                view: row.get(1),
-                function: row.get(2),
+            let key = row.get(0);
+            let view = row.get(1);
+            found.push(match row.get(2) {
+                Some(function) => super::CheckHazard::ViewWrites {
+                    key,
+                    view,
+                    function,
+                },
+                None => super::CheckHazard::MaterializedRead { key, view },
             });
         }
         Ok(found)
@@ -1824,7 +1836,7 @@ forced: r.get(2),
             return Err(d);
         }
         let script = migration.sql.as_str();
-        if super::analysis::is_empty(&migration.sql, "postgresql") {
+        if super::analysis::unwritten_migration(script, "postgresql") {
             let mut d = super::empty_migration();
             d.source = Some(migration.name.clone());
             return Err(d);
@@ -2021,6 +2033,7 @@ fn protect_definitions(value: &mut Value) {
             if matches!(
                 key.as_str(),
                 "definition"
+                    | "dependencies"
                     | "default"
                     | "labels"
                     | "using"
@@ -2119,7 +2132,7 @@ impl RelationalAdapter for Postgres {
     fn capabilities(version: i32) -> Value {
         json!({"adapter":"postgresql-catalog-v1", "canonicalization_version":2,"server_version_num":version,
             "operations": {"catalog_inspection":"supported_subset", "transactional_script_replay":"per_migration_commits_on_scratch", "target_ddl":"exact_plan_transactional_scripts", "sql_contracts":"closed_builtin_select_subset", "concurrent_indexes":"lone_named_create_index_concurrently", "baseline_adoption":"reviewed_prefix_checkpoint"},
-            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "enums_domains_composite_types_operators_exclusion_constraints":"definition_fingerprints", "managed_schema_extensions":"version_covers_members", "range_and_base_types_external_dependencies_non_sql_routines":"unknown"},
+            "inspection": {"tables_columns_constraints_indexes":"definition_fingerprints_and_validity", "schema_relation_column_routine_grants":"canonical_role_names", "views_sequences_routines_triggers_policies_partitions":"definition_fingerprints", "materialized_views":"heap_definition_and_dependencies", "enums_domains_composite_types_operators_exclusion_constraints":"definition_fingerprints", "managed_schema_extensions":"version_covers_members", "range_and_base_types_external_dependencies_non_sql_routines":"unknown"},
             "guarantees": {"inspection_transaction":"repeatable_read_read_only", "execution_transaction":"read_committed_after_native_locks", "replay":"complete_transactional_scripts_in_empty_disposable_database", "atomic_target_ddl_checks_ledger":true}})
     }
     async fn catalog(
@@ -2513,9 +2526,9 @@ mod tests {
         let pg = Postgres::connect(&secret, &endpoint).await.unwrap();
         let schema = format!("cutoff_{}", uuid::Uuid::new_v4().simple());
         pg.begin_migration(&schema).await.unwrap();
-        // The materialized view supplies one uncovered relation. Each column comment
+        // Cross-schema inheritance supplies one uncovered relation. Each column comment
         // and table comment below creates a distinct shape in its respective reader.
-        pg.batch(&format!("CREATE SCHEMA {schema}; CREATE MATERIALIZED VIEW {schema}.v AS SELECT 0 AS id WITH NO DATA"))
+        pg.batch(&format!("CREATE SCHEMA {schema}; CREATE SCHEMA {schema}_ext; CREATE TABLE {schema}_ext.parent(id integer); CREATE TABLE {schema}.v () INHERITS ({schema}_ext.parent)"))
             .await.unwrap();
         let mut digests = CatalogDigests::default();
         for i in 1..=65 {
@@ -2528,7 +2541,7 @@ mod tests {
                 .await
                 .unwrap();
             }
-            let shapes = i + 1; // tables plus the view
+            let shapes = i + 1; // tables plus the inheriting child
             if shapes < 64 {
                 continue;
             }

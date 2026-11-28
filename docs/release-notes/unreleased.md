@@ -1,5 +1,9 @@
 # Unreleased
 
+## Adopting existing migration histories
+
+`plan --adopt-through` compares the release you are taking over, not temporary schemas repaired before that point. Intentional comment-only files retain their place in history. PostgreSQL now compares materialized views without refreshing or reading them. Follow the [runner handoff](../DATABASE_MIGRATIONS.md#taking-over-from-another-migration-runner) to keep an old ledger without inventing applied entries. Pending SQL still needs its own approved plan. On SQLite the existing `sqlite_rebuild` sidecar now supports rebuilding a table and adding a related table in the same migration, without giving up row-count or foreign-key checks.
+
 ## PostgreSQL plan failures
 
 A rejected SQL statement on scratch and a lost connection during rehearsal no longer imply the same next step. A confirmed SQL rejection makes the candidate `fail`; an inconclusive rehearsal leaves it `unknown`. Both block approval. For example, an undefined column can now report `Statement 2: undefined column (SQLSTATE 42703)` without exposing the query or data (#424).

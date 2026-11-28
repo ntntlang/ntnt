@@ -535,12 +535,12 @@ role may then have `BYPASSRLS` too. Otherwise, change the check so that it reads
 no such table. A plan without such checks has no `check_warnings`, so its digest
 is the one earlier releases computed.
 
-`plan.check_warnings` holds these entries and the `CHECK_OPERATOR_MISMATCH` and
-`CHECK_VIEW_WRITES` ones above. Every entry has `code`, `source`, `phase`, `check`,
+`plan.check_warnings` holds these entries along with `CHECK_OPERATOR_MISMATCH`,
+`CHECK_VIEW_WRITES`, and `CHECK_MATERIALIZED_VIEW_LOCK`. Every entry has `code`, `source`, `phase`, `check`,
 `relation` and `message`, and `CHECK_ROW_SECURITY` adds `forced`. One check can
 have several entries. They are listed by migration, each migration's `requires`
 before its `ensures`, then by check name, and within one check
-`CHECK_OPERATOR_MISMATCH` and `CHECK_VIEW_WRITES` before `CHECK_ROW_SECURITY`.
+the operator and view warnings come before `CHECK_ROW_SECURITY`.
 That is the order they are shown in, not the order `migrate` refuses them in:
 for each phase, `migrate` first looks for operator and view hazards in every
 check of the phase and refuses the first check that has one with
@@ -623,7 +623,7 @@ Each migration runs with normal row-level security; deferred constraints are che
 
 ### How replay commits and cleans up scratch
 
-Replay owns a dedicated physical connection, not a pool handle. Since 0.6.5 it **commits each migration on scratch**, as `migrate` commits each one on the target: every transactional migration runs in a `READ COMMITTED` transaction with the target's settings (the same `SET LOCAL`s; only `synchronous_commit` is off on scratch), is inspected, and commits. A history therefore replays exactly as the target runs it. A value `ALTER TYPE ... ADD VALUE` adds in one migration can be used by the next one on every supported major, PostgreSQL 16 included, and a migration that adds a value and uses it fails at plan, on 17 and 18 too, with the `DB_ENUM_VALUE_UNCOMMITTED` (SQLSTATE 55P04) that `migrate` would hit on the target. (0.6.4 and earlier replayed the whole history in one rollback-only transaction, where PostgreSQL 16 rejected the first case and 17 and 18 accepted the second.) The authorized per-migration executor reuses that exact captured-SQL primitive.
+Replay owns a dedicated physical connection, not a pool handle. Since 0.6.5 it **commits each migration on scratch**, as `migrate` commits each one on the target: every transactional migration runs in a `READ COMMITTED` transaction with the target's settings (the same `SET LOCAL`s; only `synchronous_commit` is off on scratch), and commits. Catalogs are inspected at each execution boundary; already-adopted history is inspected at its checkpoint. A history therefore replays exactly as the target runs it. A value `ALTER TYPE ... ADD VALUE` adds in one migration can be used by the next one on every supported major, PostgreSQL 16 included, and a migration that adds a value and uses it fails at plan, on 17 and 18 too, with the `DB_ENUM_VALUE_UNCOMMITTED` (SQLSTATE 55P04) that `migrate` would hit on the target. (0.6.4 and earlier replayed the whole history in one rollback-only transaction, where PostgreSQL 16 rejected the first case and 17 and 18 accepted the second.) The authorized per-migration executor reuses that exact captured-SQL primitive.
 
 On **reusable scratch**, NTNT cleans up afterwards and only drops what it can prove it created:
 
@@ -639,6 +639,8 @@ On **reusable scratch**, NTNT cleans up afterwards and only drops what it can pr
 The scratch requirements above are unchanged except for the three marked 0.6.5. NTNT never creates, resets or drops the scratch database itself. Catalog derivation deliberately skips transition contracts: an empty replay cannot establish data-dependent production assertions. Fresh/populated native rehearsal tests invoke the same `migrate` executor on disposable fixtures with representative rows; they are not a second application-level runner or a claim about production data.
 
 ### What PostgreSQL replay runs
+
+On either engine, an authored comment-only migration is a checksummed no-op: its position is retained and retry skips it like any other committed entry. Empty files and the untouched `ntnt db new` scaffold are still unfinished work and cannot be applied.
 
 PostgreSQL migrations are complete SQL scripts. Scratch replay and authorized execution both send each captured script, unchanged, in its own transaction, which commits (above). That includes `DO` blocks, functions, triggers, policies, grants, seed `INSERT`s, `SET CONSTRAINTS` and other transactional SQL a real application history contains. PostgreSQL itself determines the resulting catalog.
 
@@ -864,17 +866,19 @@ Quoted identifier components are unambiguously quoted in composite object keys. 
 
 Plain views, sequences, SQL and PL/pgSQL functions/procedures (full definition, owner and grants), user triggers, RLS policies, declarative partitions in their parent's schema, expression/partial indexes on built-in access methods, `EXCLUDE` constraints, enums (their labels, in order), domains (base type, `NOT NULL`, default, collation and constraints; a domain whose default or constraints call a routine, or use an operator, outside `pg_catalog` and the managed scope that inspection does not compare, an extension's outside the scope included, stays uncovered), composite types (their attributes, as columns, and the type's privileges), operators whose function is covered, and extensions installed in the managed scope (by version) are compared like tables: an out-of-band change is reported as drift on the named object, such as `ALTER TYPE ... ADD VALUE` on `type:order_status`. Columns, domains and arrays of these types are covered. An operator's key carries its argument types, as a routine's does (`other:operator.===(integer,integer)`), and an operator class's or family's its access method (`other:operator_class.citext_ops USING btree`).
 
+Heap-backed materialized views are compared by definition, dependencies, owner and grants, columns, and indexes. An ordinary `REFRESH MATERIALIZED VIEW` changes the cache, not the schema; it does not invalidate a plan. Inspection neither reads the cached rows nor refreshes the view, and matching schemas do not prove matching cached data or population state. For named data checks, use the underlying lockable tables. `CHECK_MATERIALIZED_VIEW_LOCK` identifies a check that reads a materialized view directly or through another view: PostgreSQL cannot take the required `SHARE` lock on it.
+
 An extension's version covers its members: the types, functions, aggregates, operators, operator classes and families, and casts it installs. Their owner and grants are the installer's and are not compared. Indexes, columns and constraints that use them are covered, so `CREATE EXTENSION pg_trgm WITH SCHEMA app` with a `gin_trgm_ops` index, or a `citext` column, plans and migrates, and an out-of-band `ALTER EXTENSION ... UPDATE` is drift on `extension:<name>`.
 
-Materialized views, functions in other languages, aggregates and base or range types other than an extension's, non-partition inheritance or partitions in a different schema from their parent, foreign tables, custom collations/access methods, operator classes and families other than an extension's (only a superuser can create one), extensions in other schemas, event triggers, security labels, other namespace objects and references to routines outside `pg_catalog` and the managed scope expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. Comparison is by definition, not behavior: NTNT does not analyze what a function body or policy expression does. This is not dependency closure, security-policy verification or replication/publication configuration auditing.
+Functions in other languages, aggregates and base or range types other than an extension's, non-partition inheritance or partitions in a different schema from their parent, foreign tables, custom collations/access methods, operator classes and families other than an extension's (only a superuser can create one), extensions in other schemas, event triggers, security labels, other namespace objects and references to routines outside `pg_catalog` and the managed scope expose incomplete coverage. Unreadable objects or unknown ledger shape also block a clean result. Comparison is by definition, not behavior: NTNT does not analyze what a function body or policy expression does. This is not dependency closure, security-policy verification or replication/publication configuration auditing.
 
 Engine-deparsed SQL, defaults, expressions, comments, enum labels and storage option payloads are represented by **definition hashes**, not printed literals: schema definitions can themselves contain credentials. Object names, structural fields, owner/grant facts and object-level differences remain visible. This avoids echoing connection credentials, SQL error payloads or live row samples. It is not an SQL dump; review source SQL separately through appropriately authorized tooling.
 
 Drift compares `observed` with `expected(applied_prefix)`, not repository HEAD. Differences name the affected object and show expected/observed properties or definition fingerprints. An incomplete comparison is `unknown`, never “no drift.” Unsupported pending SQL can block a candidate plan while a separately verified applied prefix still passes. `verify` does not replay pending SQL.
 
-`DB_COVERAGE_INCOMPLETE` names what could not be inspected: its `objects` field lists the uncovered catalog keys, for example `index:"contact_requests_pending"` or `table:"t"`. When the objects are on the target, `catalog.uncovered` lists them too. When replaying a migration produced them, they exist only in the replayed intermediate catalog, and `source` names that migration. The human output prints both fields under the diagnostic.
+`DB_COVERAGE_INCOMPLETE` names what could not be inspected: its `objects` field lists the uncovered catalog keys, for example `index:"contact_requests_pending"` or `table:"t"`. When the objects are on the target, `catalog.uncovered` lists them too. During ordinary replay, `source` identifies the migration whose resulting catalog is uncovered. At a reviewed checkpoint, a diagnostic identifies the boundary inspected rather than guessing which earlier file introduced the object. The human output prints both fields under the diagnostic.
 
-`DB_CATALOG_AMBIGUOUS` means two catalog objects share one key, so neither can be compared: its `objects` field names the key and, when replaying a migration produced them, `source` names that migration. Overloaded operators, and an operator class or family of one name in two access methods, have distinct keys. The one case known to remain is a database-wide default privilege and one in the managed schema for the same role and object type (`ALTER DEFAULT PRIVILEGES` without and with `IN SCHEMA`), which are outside coverage anyway: drop one of them.
+`DB_CATALOG_AMBIGUOUS` means two catalog objects share one key, so neither can be compared: its `objects` field names the key and the diagnostic identifies the inspected migration or checkpoint under the same attribution rule. Overloaded operators, and an operator class or family of one name in two access methods, have distinct keys. The one case known to remain is a database-wide default privilege and one in the managed schema for the same role and object type (`ALTER DEFAULT PRIVILEGES` without and with `IN SCHEMA`), which are outside coverage anyway: drop one of them.
 
 ### Restored databases
 
@@ -919,7 +923,7 @@ CREATE TABLE audit.log (id int PRIMARY KEY, account int REFERENCES app.accounts 
 Objects in `audit` get the same inspection and coverage rules as the managed
 schema's: an out-of-band `DROP TABLE audit.log` or `GRANT SELECT ON audit.log TO
 PUBLIC` is drift on `audit.relation:log`, and an unsupported object there, such as
-a materialized view, makes the result `unknown`. Catalog keys in those schemas
+a foreign table, makes the result `unknown`. Catalog keys in those schemas
 start with the schema name (quoted where PostgreSQL would quote it):
 `audit.relation:log`, `audit.column:log.account`, `audit.index:log_pkey`. A schema
 itself is `schema:audit`. Keys in the managed schema stay unqualified
@@ -1070,7 +1074,7 @@ history/baseline yourself and review it; the tool does not dump the live target 
 then declare that target to be its own reference. The whole selected prefix must
 replay within the adapter's supported grammar in the same isolated scratch used
 for ordinary planning. Only that prefix is replayed; future pending SQL is not
-included in this adoption action. No old migration SQL executes on the target.
+included in this adoption action. An unsupported temporary schema that an old migration repaired before the checkpoint need not be representable at each intermediate position. The checkpoint itself must be fully covered and match the live schema, and the named data checks must pass. No old migration SQL executes on the target. Every pending migration still has its own checked execution boundary.
 
 A refusal (`DB_ADOPTION_INPUT`) says which requirement failed, with advice for it:
 no `[databases.<name>.adoption_checks]` declared; an `--adopt-through` ID that is
@@ -1120,19 +1124,26 @@ transaction. SQL errors, false checks, drift, wrong targets, unknown ledgers and
 failed cleanup cannot become a successful adoption. An adoption plan never also
 applies pending migrations; plan those separately afterward.
 
-For SQLite, adoption compares each object's stored `CREATE` text exactly. SQLite keeps a statement as it was written, so the adopted migrations must create every table, index, view and trigger with the text the file holds, formatting and quoting included; `DB_DRIFT` shows only redacted hashes of the definitions that differ. Write baseline migrations from the database's own `sqlite_master.sql` text, for example the output of `SELECT sql || ';' FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY rowid`, which leaves out SQLite's own tables such as `sqlite_sequence`, rather than from a schema dump that reformats it.
+For SQLite, adoption compares each object's stored `CREATE` text exactly. SQLite keeps a statement as it was written, so the adopted migrations must create every table, index, view and trigger with the text the file holds, formatting and quoting included; `DB_DRIFT` shows only redacted hashes of the definitions that differ. Write baseline migrations from the expected release database's `sqlite_master.sql` text, for example the output of `SELECT sql || ';' FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\_%' ESCAPE '\' ORDER BY rowid`, which leaves out SQLite's own tables such as `sqlite_sequence`, rather than from a schema dump that reformats it.
+
+### Taking over from another migration runner
+
+Use the old application's last release as the reference, not the database you are trying to verify. If you have its forward SQL, keep the file contents and order. If historical upgrades were implemented in application code or depended on a runner-specific session, build a **separate disposable database** with the pinned old release and its native runner. Use the expected schema from that release to author and review a baseline SQL file. For example, use `0017_release_baseline.sql`, followed by `0018_next_change.sql`. Keep the original release and its history in version control. Do not replace an existing NTNT ledger's history with a new baseline.
+
+Run `plan --adopt-through 17` against the existing installation, review the checkpoint and approve its digest. `migrate --plan` compares the expected schema and checks the declared application data conditions before recording the checkpoint; it does **not** execute `0017_release_baseline.sql` on the target. Generate a fresh plan for `0018_next_change.sql`. With a one-file baseline, NTNT reports one adopted source file ending at ID 17, not 17 migrations that NTNT ran.
+
+Stop the previous migration **writer** before handoff. If the application still needs to read its old ledger, include the ledger's real schema in the independently reviewed baseline and use a named `adoption_checks` query for the expected release marker. Its rows stay in place; NTNT neither trusts that table as its own ledger nor writes new entries to it. If the application unconditionally migrates on startup, first arrange a supported way for it to start without running those migrations. Do not fabricate newer version rows to keep it quiet. If the ledger is not needed, the archival alternative below is also supported.
 
 ### Retiring an application's previous migration ledger
 
 An application that ran its own migrations usually recorded them in a ledger table
 of its own in the managed schema, such as `public.schema_migrations` (PostgreSQL)
-or `main.schema_migrations` (SQLite). No migration creates that table, so
+or `main.schema_migrations` (SQLite). If the reviewed baseline does not include that table,
 `plan --adopt-through <last-id>` refuses the adoption with `DB_DRIFT`: the target
 holds an object the history does not create, and such an object is never adopted.
 The refusal's `next_action` names each table the history does not create and, in
 case one is the old ledger, the steps below for the engine. `ntnt db` never moves
-or drops the table itself. Retire the ledger by hand, outside `ntnt db`, then plan
-the adoption again:
+or drops the table itself. If you want to archive it rather than [keep it in the reviewed baseline](#taking-over-from-another-migration-runner), retire the ledger outside `ntnt db`, then plan the adoption again:
 
 1. Stop the old migration runner, and remove it from deploy scripts, so it cannot
    recreate the table or apply a file that `ntnt db` now applies. This is the
@@ -1383,7 +1394,7 @@ no_null_email = "SELECT NOT EXISTS (SELECT 1 FROM main.accounts WHERE email IS N
 The name must be a simple ordinary table identifier. In the already-owned transaction, this mode snapshots table row counts and supported definitions, temporarily disables foreign-key actions through SQLite's **native connection configuration API** (authored `PRAGMA foreign_keys=OFF` is still rejected), and executes the captured mapping. This prevents implicit `ON DELETE CASCADE` during the drop/rebuild from deleting child rows. Before postconditions/ledger/commit, it:
 
 - checks all foreign keys against the rebuilt catalog/data;
-- requires the same set of tables and the same row count in each;
+- requires every existing table to remain with its original row count; the migration may also create and populate new tables, for example to preserve values from a removed column. The new tables are part of the approved schema, and their foreign keys are checked too;
 - preserves every existing named index (partial and expression indexes included, predicate and expressions unchanged), view and trigger definition and every other table's definition;
 - keeps the rebuilt table's AUTOINCREMENT counter: if `sqlite_sequence` held N for it before, it must hold at least N after, in one row, unless the rebuilt table no longer declares AUTOINCREMENT (SQLite reads and updates only the first row for a name, so a second row is refused);
 - keeps every other table's AUTOINCREMENT counter: the first `sqlite_sequence` row of each other table, the one SQLite uses, may not go back or go away (``the AUTOINCREMENT counter of table `jobs` went back from 3 to 2``), since the migration may write `sqlite_sequence`;
@@ -1407,7 +1418,7 @@ Any statement that writes `orders_new` gives it a counter row, even an `INSERT .
 
 Without this sidecar, a migration that drops a table which other tables reference with `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT` is refused with `DB_REBUILD_REQUIRED` before the drop runs, naming each child table and its action. Statements before the drop may already have run; the migration is rolled back, so none of their changes are committed. SQLite deletes every row of a dropped table first, so wherever the table has rows (on the target, or in replay when the history inserted them) the drop would run those actions; the refusal comes before the drop runs, whether or not there are rows. A drop that runs no such action stays allowed: one whose children were dropped first, one whose child foreign keys have no `ON DELETE` action, and a table's reference to itself. Allowed does not mean it works on a target with rows. SQLite still deletes the dropped table's rows first, so when other tables reference them through a foreign key without an `ON DELETE` action, the drop fails there (``Statement 3: FOREIGN KEY constraint failed``), or, for a `DEFERRABLE INITIALLY DEFERRED` key such as Django's, the COMMIT does (``SQLite could not commit the migration: FOREIGN KEY constraint failed``), even though the replacement now has the old name and the same rows. Replay meets only the rows the replayed history inserts, so it shows this failure only when an earlier migration inserted rows on both sides of the key; its `next_action` then says that replay found it and that the migration must change. Replay never commits, so for a deferred key it checks at the end of each migration what the target's COMMIT would (``SQLite would not commit the migration: FOREIGN KEY constraint failed``). Rows added outside the replayed history, such as the application's, meet it only on the target, so a migration that rebuilds a table other tables reference needs the sidecar on a populated target; the `next_action` of both target failures says so.
 
-The sidecar is for a migration that rebuilds the table: it creates the replacement and copies the rows. A migration that retires the table cannot use it, because the guard requires the same set of tables. To retire a table, first remove the foreign keys that reference it from the tables the refusal names, or drop those tables, earlier in the migration or in an earlier one. SQLite removes a foreign key only by rebuilding its table: create the table again without the key, copy its rows, drop the old table and rename the new one. For example, to retire `accounts` while keeping `posts` and dropping `comments`:
+The sidecar is for a migration that rebuilds the table: it creates the replacement and copies the rows. A migration that retires the table cannot use it, because the guard requires every existing table to remain. To retire a table, first remove the foreign keys that reference it from the tables the refusal names, or drop those tables, earlier in the migration or in an earlier one. SQLite removes a foreign key only by rebuilding its table: create the table again without the key, copy its rows, drop the old table and rename the new one. For example, to retire `accounts` while keeping `posts` and dropping `comments`:
 
 ```sql
 CREATE TABLE posts_new(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL);
@@ -1430,7 +1441,7 @@ Plans bind:
 - native cluster/database or file identity, engine and settings, and adapter-specific role/authority facts;
 - managed scope, observed base history/catalog, applied prefix and replayed expected base;
 - adapter/canonicalization version, exact pending migration identities and candidate fingerprint;
-- explicit `execution.format = "postgresql-transactional-v1"` or `"sqlite-transactional-v1"` and ordered engine-specific catalog fingerprints for every migration prefix, including the empty prefix. Old/incomplete artifacts cannot authorize execution;
+- explicit `execution.format = "postgresql-transactional-v1"` or `"sqlite-transactional-v1"` and ordered engine-specific catalog fingerprints at every executable position. Before a reviewed baseline checkpoint, non-executable positions may be `null`; the checkpoint and every later position have a fingerprint. Old/incomplete artifacts cannot authorize execution;
 - the [time limits](#time-limits) `migrate` will use (`execution.limits`): PostgreSQL's effective limits, and SQLite's `statement_seconds` when the manifest declares a limits table.
 
 `plan_digest` hashes that descriptor. Observation time and display filters are not authority inputs. `--against` checks the saved descriptor's digest, pending descriptors and fresh source/target/base binding. It neither executes nor approves the plan.

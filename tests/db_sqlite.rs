@@ -77,7 +77,7 @@ fn sqlite_populated_rebuild_preserves_rows_dependencies_and_foreign_keys() {
         "pass"
     );
     f.target().execute_batch("INSERT INTO accounts VALUES(1,'ALICE','old'),(2,'BOB','old'); INSERT INTO children VALUES(10,1),(11,2)").unwrap();
-    f.sql("0002_rebuild.sql",&format!("CREATE TABLE replacement(id INTEGER PRIMARY KEY,email TEXT NOT NULL); INSERT INTO replacement SELECT id,lower(email) FROM accounts; DROP VIEW account_emails; DROP TABLE accounts; ALTER TABLE replacement RENAME TO accounts; {DEPENDENCIES}"));
+    f.sql("0002_rebuild.sql",&format!("CREATE TABLE account_legacy(account_id INTEGER PRIMARY KEY REFERENCES accounts(id), old_email TEXT); INSERT INTO account_legacy SELECT id,email FROM accounts; CREATE TABLE replacement(id INTEGER PRIMARY KEY,email TEXT NOT NULL); INSERT INTO replacement SELECT id,lower(email) FROM accounts; DROP VIEW account_emails; DROP TABLE accounts; ALTER TABLE replacement RENAME TO accounts; {DEPENDENCIES}"));
     f.sql(
         "0002_rebuild.toml",
         r#"sqlite_rebuild = "accounts"
@@ -101,6 +101,16 @@ retained_rows = "SELECT count(*) = 2 FROM main.accounts"
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(values, vec![(1, "alice".into()), (2, "bob".into())]);
+    // The new table was populated before the old parent was dropped. Its
+    // foreign keys and payload must survive the rebuild along with the old children.
+    let archived = c
+        .prepare("SELECT a.id, l.old_email FROM account_legacy l JOIN accounts a ON a.id=l.account_id ORDER BY a.id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(archived, [(1, "ALICE".into()), (2, "BOB".into())]);
     let children: Vec<(i64, i64)> = c
         .prepare("SELECT id,account_id FROM children ORDER BY id")
         .unwrap()
@@ -929,6 +939,69 @@ fn existing_adoption_fixture(check: &str) -> (Fixture, Value) {
     assert_eq!(plan["outcome"], "pass", "{plan}");
     (f, plan)
 }
+#[test]
+fn sqlite_checkpoint_replay_of_a_transiently_uncovered_prefix() {
+    use std::io::Write;
+    let f = Fixture::new();
+    let child = "CREATE TABLE child(id INTEGER PRIMARY KEY, owner INTEGER REFERENCES parent(id));";
+    let parent = "CREATE TABLE parent(id INTEGER PRIMARY KEY);";
+    f.sql("0010_child.sql", child);
+    f.sql("0020_parent.sql", parent);
+    writeln!(std::fs::OpenOptions::new().append(true).open(f.root.path().join("ntnt.toml")).unwrap(), "\n[databases.app.adoption_checks]\nlinked='SELECT count(*)=1 FROM main.child WHERE owner=5'").unwrap();
+    let refused_at = |r: &Value, name: &str| {
+        assert!(
+            r["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["code"] == "DB_COVERAGE_INCOMPLETE" && d["source"] == name),
+            "{}",
+            r["diagnostics"]
+        );
+    };
+    // This history cannot be installed as ordinary new work. Stopping the
+    // adoption too early cannot establish a covered checkpoint either.
+    refused_at(&f.command("plan", &[]), "0010_child.sql");
+    f.target()
+        .execute_batch(&format!(
+            "{child}{parent} INSERT INTO parent VALUES(5); INSERT INTO child VALUES(2,5);"
+        ))
+        .unwrap();
+    refused_at(
+        &f.command("plan", &["--adopt-through", "10"]),
+        "0010_child.sql",
+    );
+    let adoption = f.command("plan", &["--adopt-through", "20", "--out", "adopt.json"]);
+    assert_eq!(adoption["outcome"], "pass", "{}", adoption["diagnostics"]);
+    assert_eq!(
+        f.command("verify", &["--against", "adopt.json"])["outcome"],
+        "pass"
+    );
+    let recorded = f.apply("adopt.json", adoption["plan_digest"].as_str());
+    assert_eq!(recorded["outcome"], "pass", "{}", recorded["diagnostics"]);
+    assert_eq!(recorded["adopted_count"], 2);
+    assert_eq!(recorded["applied_count"], 0);
+    assert_eq!(recorded["assertions"]["executed"], 1);
+    f.sql("0030_index.sql", "CREATE INDEX by_owner ON child(owner);");
+    let upgrade = f.plan("upgrade.json");
+    let applied = f.apply("upgrade.json", upgrade["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{}", applied["diagnostics"]);
+    let verified = f.command("verify", &["--require-no-pending"]);
+    assert_eq!(verified["outcome"], "pass", "{}", verified["diagnostics"]);
+    assert_eq!(verified["history"]["adopted_count"], 2);
+    assert_eq!(verified["history"]["applied_count"], 1);
+    // A later repair doesn't excuse an uncovered step in the pending suffix.
+    f.sql(
+        "0040_other.sql",
+        "CREATE TABLE other(k REFERENCES missing(id));",
+    );
+    f.sql(
+        "0050_repair.sql",
+        "CREATE TABLE missing(id INTEGER PRIMARY KEY);",
+    );
+    refused_at(&f.command("plan", &[]), "0040_other.sql");
+}
+
 #[test]
 fn sqlite_competing_adopters_record_one_checkpoint() {
     use sqlite_fixture::Running;

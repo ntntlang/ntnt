@@ -1322,11 +1322,16 @@ fn wrong_target(create: fn() -> Fixture) {
 /// writes or a file of comments and semicolons, is refused as empty and named,
 /// instead of as SQL outside the supported subset.
 fn empty_migration(f: Fixture) {
-    for sql in [
-        "-- 0001_initial.sql: database \"app\" (sqlite).\n-- Write the SQL below. Once this migration has been applied anywhere,\n-- never edit or renumber it; add a new migration instead.\n",
-        "/* nothing yet; */ ;\n\n-- SELECT 1;\n;",
+    let created = f.new_migration("initial");
+    assert_eq!(created["migration"]["source"], "0001_initial.sql");
+    for replacement in [
+        None,
+        Some(" \n\t"),
+        Some("/* nothing yet; */ ;\n\n-- SELECT 1;\n;"),
     ] {
-        f.sql("0001_initial.sql", sql);
+        if let Some(sql) = replacement {
+            f.sql("0001_initial.sql", sql);
+        }
         let r = f.command("plan", &[]);
         assert_ne!(r["outcome"], "pass", "{r}");
         assert!(!code(&r, "DB_REPLAY_UNSUPPORTED"), "{r}");
@@ -1338,6 +1343,106 @@ fn empty_migration(f: Fixture) {
             .unwrap_or_else(|| panic!("no DB_MIGRATION_EMPTY in {r}"));
         assert_eq!(d["source"], "0001_initial.sql", "{d}");
     }
+}
+
+/// A superseded version keeps its own checksum and contracts even though the
+/// two catalog fingerprints on either side of it are identical.
+fn comment_only_migration(f: Fixture) {
+    let name = "0001_superseded.sql";
+    let sql = "-- Superseded by a later migration.\n/* No DDL; deliberately retained. */\n";
+    f.sql(name, sql);
+    f.sql(
+        "0001_superseded.toml",
+        "[ensures]\nretained='SELECT true'\n",
+    );
+    let plan = f.plan("noop.json");
+    let approval = plan["plan_digest"].as_str();
+    let pending = &plan["plan"]["pending"][0];
+    assert_eq!(
+        pending["analysis"]["operations"],
+        serde_json::json!(["no_op"])
+    );
+    let fingerprints = plan["plan"]["execution"]["prefix_fingerprints"]
+        .as_array()
+        .unwrap();
+    assert_eq!(fingerprints.len(), 2);
+    assert_eq!(fingerprints[0], fingerprints[1]);
+    let unapproved = f.apply("noop.json", None);
+    assert!(code(&unapproved, "DB_APPROVAL_REQUIRED"), "{unapproved}");
+    f.sql(name, "-- An edit is a different migration.");
+    assert!(code(&f.apply("noop.json", approval), "DB_PLAN_STALE"));
+    f.sql(name, sql);
+    let applied = f.apply("noop.json", approval);
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(applied["assertions"]["executed"], 1);
+    assert_eq!(
+        f.text(&format!("SELECT checksum FROM {}", f.ledger())),
+        pending["checksum"]
+    );
+    let retry = f.apply("noop.json", approval);
+    assert_eq!(retry["outcome"], "pass", "{retry}");
+    assert_eq!(retry["assertions"]["executed"], 0);
+    assert_eq!(f.count(&format!("SELECT count(*) FROM {}", f.ledger())), 1);
+    assert_eq!(
+        f.command("verify", &["--require-no-pending"])["outcome"],
+        "pass"
+    );
+}
+
+#[test]
+fn sqlite_comment_only_migration() {
+    comment_only_migration(Fixture::sqlite());
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_comment_only_migration() {
+    comment_only_migration(Fixture::pg());
+}
+
+/// Both scripts contain the same CREATE. PostgreSQL nests block comments
+/// and ends a line comment at CR; SQLite does neither. Each engine must see
+/// one ordinary migration and one no-op, not skip or execute both CREATEs.
+fn comment_only_boundaries(f: Fixture) {
+    let name = "0001_block.sql";
+    for malformed in ["/* unterminated", "-- done\n'broken", "-- NUL\0inside"] {
+        f.sql(name, malformed);
+        let plan = f.command("plan", &[]);
+        assert_ne!(plan["outcome"], "pass", "{malformed:?}: {plan}");
+        assert_ne!(
+            plan["source"]["migrations"][0]["analysis"]["operations"],
+            serde_json::json!(["no_op"])
+        );
+    }
+    let create = format!("CREATE TABLE {}.items(id INTEGER);", f.schema());
+    f.sql(name, &format!("/* outer /* inner */ {create} -- */"));
+    f.sql("0002_line.sql", &format!("-- deferred\r{create}"));
+    let plan = f.plan("comments.json");
+    let operations = match &f {
+        Fixture::Postgres(_) => ["no_op", "create_table"],
+        Fixture::Sqlite(_) => ["create_table", "no_op"],
+    };
+    for (i, op) in operations.iter().enumerate() {
+        assert_eq!(
+            plan["plan"]["pending"][i]["analysis"]["operations"],
+            serde_json::json!([op])
+        );
+    }
+    let applied = f.apply("comments.json", plan["plan_digest"].as_str());
+    assert_eq!(applied["outcome"], "pass", "{applied}");
+    assert_eq!(
+        f.count(&format!("SELECT count(*) FROM {}.items", f.schema())),
+        0
+    );
+}
+
+#[test]
+fn sqlite_comment_only_boundaries() {
+    comment_only_boundaries(Fixture::sqlite());
+}
+#[test]
+#[ignore = "requires disposable PostgreSQL; mandatory CI conformance"]
+fn postgres_comment_only_boundaries() {
+    comment_only_boundaries(Fixture::pg());
 }
 
 #[test]

@@ -61,14 +61,17 @@ pub(crate) struct History {
 }
 
 impl History {
-    /// Counts source coverage separately from execution/import evidence.
-    pub fn counts(&self) -> Value {
-        let adopted = self
-            .entries
+    /// Number of source files covered by the leading baseline checkpoint.
+    pub fn adopted_count(&self) -> usize {
+        self.entries
             .first()
             .filter(|e| e.state == "adopted")
             .and_then(|e| usize::try_from(e.position).ok())
-            .unwrap_or(0);
+            .unwrap_or(0)
+    }
+    /// Counts source coverage separately from execution/import evidence.
+    pub fn counts(&self) -> Value {
+        let adopted = self.adopted_count();
         let applied = self.entries.iter().filter(|e| e.state == "applied").count();
         let imported = self
             .entries
