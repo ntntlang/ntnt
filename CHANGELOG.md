@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- PostgreSQL `reconcile` can settle a running index build with a 0.6.3 plan that predates outside-scope warnings, without accepting that plan for new builds (#440).
+- PostgreSQL `reconcile` can resolve an interrupted 0.6.3 index build, including histories spanning multiple schemas. Legacy plans with ambiguous catalog scope replay only already-applied migrations on disposable scratch; they cannot start new builds (#440).
 - SQLite plans reject clock-dependent date expressions in indexes and constraints before they can break the first application write (#441).
 - PostgreSQL plans distinguish a rejected migration (`fail`) from an interrupted rehearsal (`unknown`). SQL errors identify the statement when PostgreSQL supplies a position in the submitted file, without quoting server details (#424).
 - PostgreSQL plans rehearse concurrent index builds unchanged on a job-owned private instance. A regular build can no longer stand in for a concurrent one; transactional histories need no new setup.

@@ -6,15 +6,18 @@ use super::model::{Catalog, History, HistoryEntry};
 use super::{Diagnostic, Result};
 use serde_json::{json, Value};
 
-/// A scratch replay's result and its cleanup's, combined: a failed replay
-/// stays the reported cause, and a cleanup that also failed comes back
-/// separately to be reported after it, never instead of it.
-fn replay_outcome(work: Result<()>, cleanup: Result<()>) -> (Result<()>, Option<Diagnostic>) {
-    match (work, cleanup) {
-        (work, Ok(())) => (work, None),
-        (Ok(()), Err(cleanup)) => (Err(cleanup), None),
-        (Err(cause), Err(cleanup)) => (Err(cause), Some(cleanup)),
-    }
+/// Failures in the order they occurred: a cleanup or unlock failure never
+/// obscures a replay failure, and none can authorize recovery.
+fn replay_diagnostics(
+    work: Result<()>,
+    cleanup: Result<()>,
+    unlock: Option<Diagnostic>,
+) -> Vec<Diagnostic> {
+    work.err()
+        .into_iter()
+        .chain(cleanup.err())
+        .chain(unlock)
+        .collect()
 }
 fn inconclusive_rehearsal(verified_private_scratch: bool) -> &'static str {
     if verified_private_scratch {
@@ -23,13 +26,7 @@ fn inconclusive_rehearsal(verified_private_scratch: bool) -> &'static str {
         "The rehearsal was inconclusive. Check scratch connectivity, locks and limits, then rerun inspection. No migration SQL ran on the target."
     }
 }
-/// Add a scratch replay's failures to `report`: the replay's own error first,
-/// then a cleanup that also failed.
-fn record_replay(report: &mut Value, replay: Result<()>, cleanup_failure: Option<Diagnostic>) {
-    for d in replay.err().into_iter().chain(cleanup_failure) {
-        diagnostic(report, d);
-    }
-}
+
 fn diagnostic(report: &mut Value, d: Diagnostic) {
     report["diagnostics"].as_array_mut().unwrap().push(json!(d));
 }
@@ -893,6 +890,242 @@ async fn replay_prefix(
     Ok(())
 }
 
+/// One replay on disposable scratch. Inspection may keep partial results for a report;
+/// recovery consumes them only if work, cleanup and unlock all succeeded.
+struct ScratchReplay<'a> {
+    steps: (usize, usize, bool), // (count, reference, plan), as in replay_prefix
+    probes: &'a [CheckProbe<'a>],
+    native_source: Option<&'a str>,
+    replay_until: Option<tokio::time::Instant>,
+}
+
+async fn scratch_replay(
+    inputs: &CapturedInputs,
+    identity: &Identity,
+    ScratchReplay {
+        steps,
+        probes,
+        native_source,
+        replay_until,
+    }: ScratchReplay<'_>,
+    report: &mut Value,
+    replayed: &mut Replayed,
+) -> Vec<Diagnostic> {
+    let isolated = native_source.is_some();
+    let Some(scratch_config) = &inputs.config.scratch else {
+        return vec![match native_source {
+            Some(source) => {
+                let mut d = super::postgres::isolation_required();
+                d.source = Some(source.to_owned());
+                d
+            }
+            None => Diagnostic::new("DB_REFERENCE_UNAVAILABLE", "No explicitly disposable matching scratch database/file is configured; expected state is unverified."),
+        }];
+    };
+    let connect = async {
+        let name = &scratch_config.endpoint.connection_secret;
+        let secret = crate::stdlib::secrets::require_from_manifest(name, &inputs.document)
+            .map_err(|error| unresolved_secret("scratch", name, &inputs.config.engine, error))?;
+        Adapter::connect(
+            &secret,
+            &scratch_config.endpoint,
+            &inputs.config.engine,
+            Access::Scratch(json!(identity)),
+            inputs.config.declared_extensions(),
+        )
+        .await
+    };
+    let connected = match replay_until {
+        Some(until) => tokio::time::timeout_at(until, connect).await.unwrap_or_else(|_| Err(
+            Diagnostic::new("DB_TIMEOUT", "The scratch connection did not finish within the replay deadline; scratch was not prepared.")
+        )),
+        None => connect.await,
+    };
+    let scratch = match connected {
+        Ok(scratch) => scratch,
+        Err(d) => return vec![d],
+    };
+    report["scratch"]["cleanup"] = json!("unknown");
+    let work = async {
+        let scratch_identity = scratch
+            .prepare_scratch(
+                identity,
+                &scratch_config.endpoint,
+                &inputs.config.schema,
+                inputs.limits().migrator_wait(),
+                isolated,
+            )
+            .await
+            .map_err(|mut d| {
+                if d.code == "DB_REPLAY_ISOLATION_REQUIRED" {
+                    d.source = native_source.map(str::to_owned);
+                }
+                d
+            })?;
+        report["scratch"] =
+            json!({"identity":scratch_identity,"disposable":true,"cleanup":"unknown"});
+        if let Some(recovered) = scratch.scratch_recovered() {
+            report["scratch"]["recovered"] = recovered;
+        }
+
+        replay_prefix(
+            &scratch,
+            inputs,
+            &scratch_config.endpoint.role,
+            steps,
+            probes,
+            replayed,
+        )
+        .await
+        .map_err(|mut d| {
+            // Only after scratch identity/ownership was verified. Leave
+            // setup and cleanup diagnostics their own recovery advice.
+            if inputs.config.engine == "postgresql" && matches!(d.code.as_str(), "DB_POSTGRES" | "DB_TIMEOUT" | "DB_LOCK_CONFLICT") {
+                d.next_action = if d.rejected_migration_sql {
+                    "PostgreSQL rejected this migration on scratch. Check the migration against its predecessors and rerun the plan. No migration SQL ran on the target."
+                } else {
+                    inconclusive_rehearsal(isolated)
+                }.into();
+            }
+            d
+        })
+    };
+    // The replay deadline leaves cleanup its own time. A replay cut
+    // short there, or by a client deadline, has the statement it was
+    // running cancelled, so that cleanup can run.
+    let work = match replay_until {
+        Some(until) => tokio::time::timeout_at(until, work).await.unwrap_or_else(|_| {
+            let mut d = Diagnostic::new("DB_TIMEOUT", "Scratch replay did not finish within the inspection deadline, so NTNT cancelled it; see scratch.cleanup for the cleanup status.");
+            d.next_action = inconclusive_rehearsal(isolated && scratch.external_cleanup_required()).into();
+            Err(d)
+        }),
+        None => work.await,
+    };
+    if work.as_ref().is_err_and(|d| d.code == "DB_TIMEOUT") {
+        scratch.cancel_running().await;
+    }
+    if isolated {
+        // A verified private instance is discarded by its supervisor, never by SQL.
+        report["scratch"]["cleanup"] = json!(if scratch.external_cleanup_required() {
+            "external"
+        } else {
+            "not_needed"
+        });
+        return work.err().into_iter().collect();
+    }
+    let (cleanup, unlock_failure) = scratch.cleanup_scratch().await;
+    report["scratch"]["cleanup"] = json!(match cleanup {
+        Ok(true) => "pass",
+        Ok(false) => "not_needed",
+        Err(_) => "unknown",
+    });
+    if cleanup.is_err() {
+        replayed.expected = None;
+        replayed.candidate = None;
+    }
+    replay_diagnostics(work, cleanup.map(|_| ()), unlock_failure)
+}
+
+/// Execution appends the returned diagnostic. Keep all causes in order,
+/// once each, including an unlock failure after successful replay/cleanup.
+fn require_clean_replay(report: &mut Value, mut failures: Vec<Diagnostic>) -> Result<()> {
+    if let Some(last) = failures.pop() {
+        for d in failures {
+            diagnostic(report, d);
+        }
+        return Err(last);
+    }
+    Ok(())
+}
+
+/// Within execution's existing work deadline, use at most the normal scratch
+/// budget. The time already spent observing the target is not available again.
+fn recovery_replay_until(
+    inputs: &CapturedInputs,
+    work_until: tokio::time::Instant,
+) -> Result<tokio::time::Instant> {
+    let now = tokio::time::Instant::now();
+    let budget = work_until
+        .saturating_duration_since(now)
+        .saturating_sub(SCRATCH_CLEANUP_RESERVE);
+    if budget.is_zero() {
+        return Err(Diagnostic::new(
+            "DB_TIMEOUT",
+            "No work budget with time for scratch cleanup remains; prefix replay was not started.",
+        ));
+    }
+    let inspection_budget =
+        super::inventory::Limits::default().total_deadline() + inputs.limits().migrator_wait();
+    Ok(now + budget.min(inspection_budget))
+}
+
+/// Reference for an ambiguous legacy PostgreSQL attempt. The caller has verified
+/// the ledger and released the target. It must take a
+/// fresh target snapshot after this returns. Neither the attempt at `applied`
+/// nor the pending suffix participates in the replay or its isolation decision.
+pub(super) async fn legacy_recovery_prefix(
+    inputs: &CapturedInputs,
+    identity: &Identity,
+    applied: usize,
+    work_until: tokio::time::Instant,
+    report: &mut Value,
+) -> Result<(Catalog, Vec<String>)> {
+    if inputs.config.engine != "postgresql"
+        || !matches!(identity, Identity::Postgres(_))
+        || applied >= inputs.migrations.len()
+    {
+        return Err(Diagnostic::new(
+            "DB_RECONCILE_MISMATCH",
+            "Legacy prefix recovery requires a PostgreSQL attempt after the applied prefix.",
+        ));
+    }
+    let replay_until = recovery_replay_until(inputs, work_until)?;
+    let native_source = inputs.migrations[..applied]
+        .iter()
+        .find(|m| super::analysis::concurrent_index(&m.sql, &inputs.config.schema).is_some())
+        .map(|m| m.name.as_str());
+    let mut replayed = Replayed::default();
+    let failures = scratch_replay(
+        inputs,
+        identity,
+        ScratchReplay {
+            steps: (applied, applied, false),
+            probes: &[],
+            native_source,
+            replay_until: Some(replay_until),
+        },
+        report,
+        &mut replayed,
+    )
+    .await;
+    let failures = failures.into_iter().map(|mut d| {
+        // A new plan is blocked while this target has a running attempt. The
+        // recovery action is to retry the *same* approval from verified scratch.
+        if d.rejected_migration_sql {
+            d.next_action = "The already-applied prefix was rejected on scratch. Check scratch compatibility and the saved inputs; preserve the target attempt and original plan. No target migration SQL ran.".into();
+        } else if matches!(d.code.as_str(), "DB_TIMEOUT" | "DB_POSTGRES" | "DB_REFERENCE_UNAVAILABLE" | "DB_LOCK_CONFLICT") {
+            d.next_action = "Check the disposable scratch configuration, connectivity and cleanup status. Discard any externally managed private scratch instance before retrying reconcile with the same approved plan. The target attempt was not changed.".into();
+        }
+        d
+    }).collect();
+    require_clean_replay(report, failures)?;
+    let catalog = replayed.expected.ok_or_else(|| {
+        Diagnostic::new(
+            "DB_REFERENCE_UNAVAILABLE",
+            "Replay did not establish the applied prefix catalog.",
+        )
+    })?;
+    if !catalog.uncovered.is_empty() {
+        return Err(super::coverage_incomplete(
+            "The applied prefix exceeds execution coverage.",
+            &catalog.uncovered,
+            &inputs.database_name,
+            inputs.config.declared_extensions(),
+        ));
+    }
+    Ok((catalog, replayed.outside.into_iter().collect()))
+}
+
 /// The report field holding a binding's catalog digests of stored values
 /// (#460), which `ntnt db` removes before it outputs a report.
 pub(super) const STORED_BINDING: &str = "stored_binding";
@@ -1099,142 +1332,47 @@ async fn inspect_observed(
         .find_map(|(i, m)| {
             (inputs.config.engine == "postgresql"
                 && report["source"]["migrations"][i]["analysis"]["non_transactional"] == true)
-                .then_some(&m.name)
+                .then_some(m.name.as_str())
         });
     let isolated = native_source.is_some();
-    let mut rejected = false;
-    if let Some(scratch_config) = &inputs.config.scratch {
-        let mut cleanup_failure = None;
-        let mut unlock_failure = None;
-        let replay = async {
-            let name = &scratch_config.endpoint.connection_secret;
-            let secret = crate::stdlib::secrets::require_from_manifest(name, &inputs.document)
-                .map_err(|error| {
-                    unresolved_secret("scratch", name, &inputs.config.engine, error)
-                })?;
-            let scratch = Adapter::connect(
-                &secret,
-                &scratch_config.endpoint,
-                &inputs.config.engine,
-                Access::Scratch(json!(&identity)),
-                inputs.config.declared_extensions(),
-            )
-            .await?;
-            let work = async {
-                let scratch_identity = scratch
-                    .prepare_scratch(
-                        &identity,
-                        &scratch_config.endpoint,
-                        &inputs.config.schema,
-                        inputs.limits().migrator_wait(),
-                        isolated,
-                    )
-                    .await
-                    .map_err(|mut d| {
-                        if d.code == "DB_REPLAY_ISOLATION_REQUIRED" {
-                            d.source = native_source.cloned();
-                        }
-                        d
-                    })?;
-                report["scratch"] = json!({"identity":scratch_identity,"disposable":true});
-                if let Some(recovered) = scratch.scratch_recovered() {
-                    report["scratch"]["recovered"] = recovered;
-                }
-
-                replay_prefix(
-                    &scratch,
-                    inputs,
-                    &scratch_config.endpoint.role,
-                    (count, reference, command == "plan"),
-                    &probes,
-                    &mut replayed,
-                )
-                .await
-                .map_err(|mut d| {
-                    // Only after scratch identity/ownership was verified. Leave
-                    // setup and cleanup diagnostics their own recovery advice.
-                    if inputs.config.engine == "postgresql" && matches!(d.code.as_str(), "DB_POSTGRES" | "DB_TIMEOUT" | "DB_LOCK_CONFLICT") {
-                        d.next_action = if d.rejected_migration_sql {
-                            "PostgreSQL rejected this migration on scratch. Check the migration against its predecessors and rerun the plan. No migration SQL ran on the target."
-                        } else {
-                            inconclusive_rehearsal(isolated)
-                        }.into();
-                    }
-                    d
-                })
-            };
-            // The replay deadline leaves cleanup its own time. A replay cut
-            // short there, or by a client deadline, has the statement it was
-            // running cancelled, so that cleanup can run.
-            let work = match replay_until {
-                Some(until) => tokio::time::timeout_at(until, work).await.unwrap_or_else(|_| {
-                    let mut d = Diagnostic::new("DB_TIMEOUT", "Scratch replay did not finish within the inspection deadline, so NTNT cancelled it; see scratch.cleanup for the cleanup status.");
-                    d.next_action = inconclusive_rehearsal(isolated && scratch.external_cleanup_required()).into();
-                    Err(d)
-                }),
-                None => work.await,
-            };
-            if work.as_ref().is_err_and(|d| d.code == "DB_TIMEOUT") {
-                scratch.cancel_running().await;
-            }
-            if isolated {
-                // Dropping the connection rolls back any uncommitted work and
-                // releases its session locks. No object-level cleanup or claim
-                // that the external owner has already discarded its storage.
-                report["scratch"]["cleanup"] = json!(if scratch.external_cleanup_required() { "external" } else { "not_needed" });
-                return work;
-            }
-            let (cleanup, unlocked) = scratch.cleanup_scratch().await;
-            unlock_failure = unlocked;
-            report["scratch"]["cleanup"] = json!(match cleanup {
-                Ok(true) => "pass",
-                Ok(false) => "not_needed",
-                Err(_) => "unknown",
-            });
-            let cleanup = cleanup.map(|_| ());
-            if cleanup.is_err() {
-                replayed.expected = None;
-                replayed.candidate = None;
-            }
-            let (outcome, failed_cleanup) = replay_outcome(work, cleanup);
-            cleanup_failure = failed_cleanup;
-            outcome
-        }
-        .await;
-        // Only refine the source classification for syntax/statement-kind
-        // refusals. A supported kind can still be refused by the native
-        // authorizer (DB_SQL_UNSUPPORTED); the diagnostic records that separate
-        // fact and the plan remains blocked.
-        if inputs.config.engine == "sqlite" {
-            if let Err(d) = &replay {
-                if d.code == "DB_REPLAY_UNSUPPORTED" {
-                    if let Some(i) = inputs
-                        .migrations
-                        .iter()
-                        .position(|m| d.source.as_ref() == Some(&m.name))
-                    {
-                        let analysis = &mut report["source"]["migrations"][i]["analysis"];
-                        if analysis["replay_supported"] == true {
-                            analysis["replay_supported"] = json!(false);
-                            analysis["unknowns"] =
-                                json!(["SQLITE_EFFECTS_NOT_INFERRED", "SQL_UNSUPPORTED"]);
-                        }
+    let failures = scratch_replay(
+        inputs,
+        &identity,
+        ScratchReplay {
+            steps: (count, reference, command == "plan"),
+            probes: &probes,
+            native_source,
+            replay_until,
+        },
+        &mut report,
+        &mut replayed,
+    )
+    .await;
+    // Only refine the source classification for syntax/statement-kind
+    // refusals. A supported kind can still be refused by the native
+    // authorizer (DB_SQL_UNSUPPORTED); the diagnostic records that separate
+    // fact and the plan remains blocked.
+    if inputs.config.engine == "sqlite" {
+        if let Some(d) = failures.first() {
+            if d.code == "DB_REPLAY_UNSUPPORTED" {
+                if let Some(i) = inputs
+                    .migrations
+                    .iter()
+                    .position(|m| d.source.as_ref() == Some(&m.name))
+                {
+                    let analysis = &mut report["source"]["migrations"][i]["analysis"];
+                    if analysis["replay_supported"] == true {
+                        analysis["replay_supported"] = json!(false);
+                        analysis["unknowns"] =
+                            json!(["SQLITE_EFFECTS_NOT_INFERRED", "SQL_UNSUPPORTED"]);
                     }
                 }
             }
         }
-        rejected = replay.as_ref().is_err_and(|d| d.rejected_migration_sql);
-        record_replay(&mut report, replay, cleanup_failure);
-        // After cleanup finished, which it does not change.
-        if let Some(d) = unlock_failure {
-            diagnostic(&mut report, d);
-        }
-    } else if let Some(source) = native_source {
-        let mut d = super::postgres::isolation_required();
-        d.source = Some(source.clone());
+    }
+    let rejected = failures.first().is_some_and(|d| d.rejected_migration_sql);
+    for d in failures {
         diagnostic(&mut report, d);
-    } else {
-        diagnostic(&mut report,Diagnostic::new("DB_REFERENCE_UNAVAILABLE","No explicitly disposable matching scratch database/file is configured; expected state is unverified."));
     }
     // Inspect on the target what replay found the history creates outside
     // the managed scope. The first snapshot could not know these objects, so
@@ -1470,18 +1608,22 @@ mod tests {
 
     #[test]
     fn a_failed_cleanup_never_replaces_the_replay_failure() {
-        let (outcome, cleanup) =
-            replay_outcome(Err(failure("DB_TIMEOUT")), Err(failure("DB_CANCELLED")));
-        assert_eq!(outcome.unwrap_err().code, "DB_TIMEOUT");
-        assert_eq!(cleanup.unwrap().code, "DB_CANCELLED");
-        let (outcome, cleanup) = replay_outcome(Ok(()), Err(failure("DB_SQLITE")));
-        assert_eq!(outcome.unwrap_err().code, "DB_SQLITE");
-        assert!(cleanup.is_none());
-        let (outcome, cleanup) = replay_outcome(Err(failure("DB_SCRATCH_MISMATCH")), Ok(()));
-        assert_eq!(outcome.unwrap_err().code, "DB_SCRATCH_MISMATCH");
-        assert!(cleanup.is_none());
-        let (outcome, cleanup) = replay_outcome(Ok(()), Ok(()));
-        assert!(outcome.is_ok() && cleanup.is_none());
+        let codes = |work, cleanup| {
+            replay_diagnostics(work, cleanup, None)
+                .into_iter()
+                .map(|d| d.code)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            codes(Err(failure("DB_TIMEOUT")), Err(failure("DB_CANCELLED"))),
+            ["DB_TIMEOUT", "DB_CANCELLED"]
+        );
+        assert_eq!(codes(Ok(()), Err(failure("DB_SQLITE"))), ["DB_SQLITE"]);
+        assert_eq!(
+            codes(Err(failure("DB_SCRATCH_MISMATCH")), Ok(())),
+            ["DB_SCRATCH_MISMATCH"]
+        );
+        assert!(codes(Ok(()), Ok(())).is_empty());
     }
 
     /// A SQLite project whose migrations are `scripts`, in order, with empty
@@ -1577,6 +1719,58 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn legacy_replay_keeps_cleanup_time_from_the_original_execution_deadline() {
+        let inputs = sqlite_project(&[]).inputs;
+        let work_until = tokio::time::Instant::now() + inputs.limits().work_deadline();
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        let until = recovery_replay_until(&inputs, work_until).unwrap();
+        assert_eq!(until, work_until - SCRATCH_CLEANUP_RESERVE);
+        tokio::time::sleep_until(until).await;
+        assert_eq!(
+            recovery_replay_until(&inputs, work_until).unwrap_err().code,
+            "DB_TIMEOUT"
+        );
+    }
+
+    #[test]
+    fn legacy_reference_requires_isolation_only_for_an_applied_native_step() {
+        let project = sqlite_project(&[
+            "CREATE TABLE t(id integer);".into(),
+            "CREATE INDEX CONCURRENTLY ix ON t(id);".into(),
+            "CREATE INDEX CONCURRENTLY iy ON t(id);".into(),
+        ]);
+        let mut inputs = project.inputs;
+        inputs.config.engine = "postgresql".into();
+        inputs.config.schema = "public".into();
+        inputs.config.scratch = None;
+        let identity = Identity::Postgres(super::super::postgres::Identity {
+            cluster: "fixture".into(),
+            database_oid: 1,
+            database: "app".into(),
+            role: "app".into(),
+            version: 170000,
+            settings: json!({}),
+            authority: json!({}),
+            transport: json!({}),
+        });
+        current_thread().block_on(async {
+            let until = tokio::time::Instant::now() + inputs.limits().work_deadline();
+            for (applied, code, source) in [
+                (1, "DB_REFERENCE_UNAVAILABLE", None),
+                (2, "DB_REPLAY_ISOLATION_REQUIRED", Some("0002_step.sql")),
+            ] {
+                let mut report = json!({"diagnostics": []});
+                let d = legacy_recovery_prefix(&inputs, &identity, applied, until, &mut report)
+                    .await
+                    .unwrap_err();
+                assert_eq!(d.code, code);
+                assert_eq!(d.source.as_deref(), source);
+                assert_eq!(report, json!({"diagnostics": []}));
+            }
+        });
     }
 
     /// Replay `n` migrations, `migration(i)` the SQL of the i-th, on a fresh
@@ -2961,23 +3155,30 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_cleanup_is_reported_after_the_replay_failure() {
-        let codes = |report: &Value| -> Vec<String> {
-            report["diagnostics"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|d| d["code"].as_str().unwrap().to_owned())
-                .collect()
-        };
-        let mut report = json!({ "diagnostics": [] });
-        let (outcome, cleanup) =
-            replay_outcome(Err(failure("DB_TIMEOUT")), Err(failure("DB_CANCELLED")));
-        record_replay(&mut report, outcome, cleanup);
-        assert_eq!(codes(&report), ["DB_TIMEOUT", "DB_CANCELLED"]);
-        let mut report = json!({ "diagnostics": [] });
-        let (outcome, cleanup) = replay_outcome(Ok(()), Ok(()));
-        record_replay(&mut report, outcome, cleanup);
-        assert!(codes(&report).is_empty());
+    fn legacy_reference_refuses_even_a_completed_replay_on_unlock_failure() {
+        let mut report = json!({"diagnostics": []});
+        let failures = replay_diagnostics(Ok(()), Ok(()), Some(failure("DB_SCRATCH_CLEANUP")));
+        assert_eq!(
+            require_clean_replay(&mut report, failures)
+                .unwrap_err()
+                .code,
+            "DB_SCRATCH_CLEANUP"
+        );
+        assert!(report["diagnostics"].as_array().unwrap().is_empty());
+
+        let failures = replay_diagnostics(
+            Err(failure("DB_TIMEOUT")),
+            Err(failure("DB_SCRATCH_CLEANUP")),
+            None,
+        );
+        let last = require_clean_replay(&mut report, failures).unwrap_err();
+        diagnostic(&mut report, last); // Execution appends the returned error.
+        let codes: Vec<_> = report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["DB_TIMEOUT", "DB_SCRATCH_CLEANUP"]);
     }
 }

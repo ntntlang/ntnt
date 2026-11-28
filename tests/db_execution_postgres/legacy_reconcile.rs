@@ -71,6 +71,65 @@ fn compact_partial_index_reconciles_with_its_pre_native_plan_but_cannot_restart(
     assert_eq!(attempt_state(&f), None);
 }
 
+/// Pin the 0.6.3 *scope* without pinning a PG-major-specific digest. The
+/// first fixture supplies exactly the catalog a managed-schema-only reader
+/// saw. The approval, ledger and target identity belong to the second one.
+#[test]
+#[ignore = "requires disposable PostgreSQL and Docker; mandatory CI execution lane"]
+fn legacy_scope_needs_the_whole_applied_prefix_even_for_a_valid_index() {
+    let index = "CREATE INDEX CONCURRENTLY t_id ON app.t(id);";
+    let (_control, narrow) = concurrent_fixture(index);
+    let f = Fixture::new();
+    f.sql("0001_initial.sql", "CREATE TABLE app.t(id INTEGER); CREATE SCHEMA audit; CREATE TABLE audit.log(id INTEGER); DO $$ BEGIN CREATE TABLE public.receipts(id INTEGER); END $$;");
+    let initial = f.plan("initial.json");
+    assert_eq!(
+        f.apply("initial.json", initial["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.sql("0002_index.sql", index);
+    let mut old = f.isolated_plan("upgrade.json");
+    let plan = &mut old["plan"];
+    let execution = plan["execution"].as_object_mut().unwrap();
+    execution.remove("replay").unwrap();
+    execution.remove("outside_objects").unwrap();
+    let prints = &narrow["plan"]["execution"]["prefix_fingerprints"];
+    assert_ne!(execution["prefix_fingerprints"][1], prints[1]);
+    execution.insert("prefix_fingerprints".into(), prints.clone());
+    for key in ["expected_base_digest", "base_catalog_digest"] {
+        plan["binding"][key] = prints[1].clone();
+    }
+    plan["candidate"]["fingerprint"] = prints[2].clone();
+    save(&f.root.path().join("upgrade.json"), &mut old);
+    let mut db = f.target();
+    db.execute("INSERT INTO _ntnt.schema_migrations_v2 VALUES(2,'2','0002_index.sql',$1,'running','app','app')", &[&old["plan"]["pending"][0]["checksum"].as_str().unwrap()]).unwrap();
+    db.batch_execute(index).unwrap();
+    for (drift, repair) in [
+        (
+            "ALTER SCHEMA audit RENAME TO elsewhere",
+            "ALTER SCHEMA elsewhere RENAME TO audit",
+        ),
+        (
+            "ALTER TABLE public.receipts ADD COLUMN extra int",
+            "ALTER TABLE public.receipts DROP COLUMN extra",
+        ),
+    ] {
+        db.batch_execute(drift).unwrap();
+        let refused = reconcile(&f, &old);
+        assert!(code(&refused, "DB_RECONCILE_MISMATCH"), "{refused}");
+        assert_eq!(refused["reconciliation"]["observed_index"], "valid");
+        assert_eq!(attempt_state(&f).as_deref(), Some("running"));
+        assert_eq!(index_state(&f, "t_id"), Some(true));
+        db.batch_execute(repair).unwrap();
+    }
+    let settled = reconcile(&f, &old);
+    assert_eq!(
+        settled["reconciliation"]["resolution"], "completed",
+        "{settled}"
+    );
+    assert_eq!(settled["scratch"]["cleanup"], "pass");
+    assert_eq!(attempt_state(&f).as_deref(), Some("applied"));
+}
+
 /// 0.6.3 reviewed the original SQL and checksums, before adding per-statement
 /// outside-scope notes. An invalid index is real PostgreSQL state; a missing
 /// annotation may not strand it, nor can resolving it authorize a new build.
@@ -127,6 +186,18 @@ fn pre_scope_notes_plan_can_settle_an_invalid_build_but_cannot_start_one() {
         .unwrap();
     let denied: Value = serde_json::from_slice(&denied.stdout).unwrap();
     assert!(code(&denied, "DB_APPROVAL_REQUIRED"), "{denied}");
+    unchanged();
+    // Missing scope evidence requires a scratch reference, never a target
+    // guess or a downgrade, even with exact approval.
+    let unavailable = f
+        .process("reconcile")
+        .env_remove("DB_SCRATCH")
+        .env("DB_APPROVAL", old["plan_digest"].as_str().unwrap())
+        .args(["--plan", "upgrade.json"])
+        .output()
+        .unwrap();
+    let unavailable: Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert!(code(&unavailable, "DB_SECRET"), "{unavailable}");
     unchanged();
     // The fallback is exact; it doesn't discard unexpected historical analysis.
     let mut altered = old.clone();
