@@ -1060,14 +1060,14 @@ pub fn run(args: DbArgs) -> anyhow::Result<()> {
                 Diagnostic::new("DB_PLAN_INVALID", "Invalid saved execution plan JSON.")
             })?;
             // Refuse a stale plan before any I/O, naming what changed (#423).
-            execution::validate_named(&inputs, &saved, files)?;
             let deadline = inputs.limits().total_deadline();
             if command == "reconcile" {
                 database_runtime(
                     deadline,
-                    execution::reconcile_attempt(&inputs, &saved, &rerun, &mut progress),
+                    execution::reconcile_attempt(&inputs, &saved, files, &rerun, &mut progress),
                 )
             } else {
+                execution::validate_named(&inputs, &saved, files)?;
                 database_runtime(
                     deadline,
                     execution::migrate(&inputs, &saved, &rerun, &mut progress),

@@ -53,6 +53,15 @@ pub(super) fn validate_named(
     saved: &Value,
     files: plan_state::Files,
 ) -> Result<usize> {
+    validate_descriptor(inputs, saved, files, false)
+}
+
+fn validate_descriptor(
+    inputs: &CapturedInputs,
+    saved: &Value,
+    files: plan_state::Files,
+    settle_attempt: bool,
+) -> Result<usize> {
     plan_state::intact(saved)?;
     plan_state::selection(inputs, saved, files)?;
     plan_state::policy(inputs, saved, files)?;
@@ -69,28 +78,48 @@ pub(super) fn validate_named(
     let fingerprints = plan["execution"]["prefix_fingerprints"]
         .as_array()
         .ok_or_else(stale)?;
-    let pending: Vec<_> = inputs
-        .migrations
-        .iter()
-        .skip(if action.is_some() {
+    let pre_native = plan["execution"].get("replay").is_none();
+    let pending = |pre_scope: bool| {
+        let start = if action.is_some() {
             inputs.migrations.len()
         } else {
             base
-        })
-        .map(|m| {
-            let mut s = m.summary();
-            // A pre-native descriptor can identify a running attempt, but
-            // is not replay evidence for starting a new concurrent build.
-            s["analysis"] = json!(super::analysis::analyze_descriptor(
-                &inputs.config.engine,
-                &m.sql,
-                &inputs.config.schema,
-                &inputs.history_schemas,
-                plan["execution"].get("replay").is_none()
-            ));
-            s
-        })
-        .collect();
+        };
+        Value::Array(
+            inputs
+                .migrations
+                .iter()
+                .skip(start)
+                .map(|m| {
+                    let mut descriptor = m.summary();
+                    descriptor["analysis"] = json!(if pre_scope {
+                        super::analysis::pre_scope_descriptor(&m.sql, &inputs.config.schema)
+                    } else {
+                        super::analysis::analyze_descriptor(
+                            &inputs.config.engine,
+                            &m.sql,
+                            &inputs.config.schema,
+                            &inputs.history_schemas,
+                            pre_native,
+                        )
+                    });
+                    descriptor
+                })
+                .collect(),
+        )
+    };
+    // Compare the *whole* historical descriptor. Never trust an artifact's
+    // version claim or mix and match its old and current migration summaries.
+    let pre_scope_eligible = settle_attempt
+        && inputs.config.engine == "postgresql"
+        && action.is_none()
+        && pre_native
+        && b["canonicalization_version"] == 1
+        && plan["execution"].get("outside_objects").is_none()
+        && plan["pending"].as_array().is_some_and(|ms| {
+            ms.iter()
+                .any(|m| m["analysis"]["non_transactional"] == true)
+        });
     if saved["format_version"] != 1
         || saved["outcome"] != "pass"
         || saved["plan_digest"] != json_digest(plan)
@@ -132,7 +161,8 @@ pub(super) fn validate_named(
         || b["managed_schema"] != inputs.config.schema
         || !limits_match(inputs, plan)
         || outside_objects(saved).is_err()
-        || plan["pending"] != json!(pending)
+        || (plan["pending"] != pending(false)
+            && !(pre_scope_eligible && plan["pending"] == pending(true)))
         || inputs.migrations.iter().take(end).any(|m| {
             !super::analysis::analyze_for(&inputs.config.engine, &m.sql, &inputs.config.schema)
                 .replay_supported
@@ -906,12 +936,12 @@ async fn build_concurrent(
         return Err(d);
     }
     progress["phase"] = json!("record");
-    let (position, catalog) = locked_attempt(db, inputs, saved).await?;
+    let base = validate(inputs, saved)?;
+    let (position, catalog) = locked_attempt(db, inputs, saved, base).await?;
     if position != applied + 1 {
         // `history` takes covered counts, not ledger positions: the plan
         // was made with `base` covered, and the ledger now covers the
         // migrations before the attempt.
-        let base = validate(inputs, saved)?;
         return Err(plan_state::history(
             inputs,
             base,
@@ -938,8 +968,8 @@ async fn locked_attempt(
     db: &Adapter,
     inputs: &CapturedInputs,
     saved: &Value,
+    base: usize,
 ) -> Result<(usize, super::model::Catalog)> {
-    let base = validate(inputs, saved)?;
     db.begin_migration(&inputs.config.schema).await?;
     let identity = db.identity(&inputs.endpoint).await?;
     // Reconcile accepts a 0.6.1 binding here too. Migrate gets here only after
@@ -984,10 +1014,11 @@ async fn locked_attempt(
 pub(super) async fn reconcile_attempt(
     inputs: &CapturedInputs,
     saved: &Value,
+    files: plan_state::Files<'_>,
     rerun: &str,
     report: &mut Value,
 ) -> Result<()> {
-    validate(inputs, saved)?;
+    let base = validate_descriptor(inputs, saved, files, true)?;
     if Adoption::from_plan(inputs, saved)?.is_some() {
         return Err(Diagnostic::new(
             "DB_CONFIG",
@@ -1000,13 +1031,18 @@ pub(super) async fn reconcile_attempt(
     report["plan_digest"] = saved["plan_digest"].clone();
     report_limits(inputs, report);
     work_deadline(
-        reconcile_owned(inputs, saved, report),
+        reconcile_owned(inputs, saved, base, report),
         inputs.limits().work_deadline(),
     )
     .await
 }
 
-async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Value) -> Result<()> {
+async fn reconcile_owned(
+    inputs: &CapturedInputs,
+    saved: &Value,
+    base: usize,
+    report: &mut Value,
+) -> Result<()> {
     let schema = &inputs.config.schema;
     let fingerprints = &saved["plan"]["execution"]["prefix_fingerprints"];
     let db = connect(inputs, saved).await?;
@@ -1041,7 +1077,9 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
     };
     let source = inputs.migrations[applied].name.clone();
     let index = pending_concurrent_index(inputs, applied).ok_or_else(|| mismatch(&source))?;
-    locked_attempt_scope(applied, inputs, saved)?;
+    if applied < base {
+        return Err(plan_state::history(inputs, base, applied));
+    }
     if db.index_building(schema, &index.name).await? {
         let mut d = Diagnostic::new(
             "DB_ATTEMPT_ACTIVE",
@@ -1100,7 +1138,7 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
                 .await?;
             report["reconciliation"]["dropped_invalid_index"] = json!(true);
             report["reconciliation"]["outcome"] = json!("fail");
-            let (position, after) = locked_attempt(&db, inputs, saved).await?;
+            let (position, after) = locked_attempt(&db, inputs, saved, base).await?;
             if position != applied + 1 || !Fingerprint::of(&after).matches(&fingerprints[applied]) {
                 let mut d = Diagnostic::new(
                     "DB_RECONCILE_INCOMPLETE",
@@ -1138,15 +1176,6 @@ async fn reconcile_owned(inputs: &CapturedInputs, saved: &Value, report: &mut Va
 fn pending_write(report: &mut Value, write: &str) {
     report["reconciliation"]["pending_write"] = json!(write);
     report["reconciliation"]["outcome"] = json!("unknown");
-}
-
-/// The attempt must lie inside the plan's pending range.
-fn locked_attempt_scope(applied: usize, inputs: &CapturedInputs, saved: &Value) -> Result<()> {
-    let base = validate(inputs, saved)?;
-    if applied < base {
-        return Err(plan_state::history(inputs, base, applied));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

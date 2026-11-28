@@ -1733,6 +1733,12 @@ pub(crate) fn analyze_in_scope(
     analyze_descriptor(engine, sql, schema, created, false)
 }
 
+/// The PostgreSQL descriptor before scope notes (#420) and native replay.
+/// Only for matching an approved artifact in reconciliation, never execution.
+pub(super) fn pre_scope_descriptor(sql: &str, schema: &str) -> Analysis {
+    analyze_script("postgresql", sql, schema, true)
+}
+
 pub(super) fn analyze_descriptor(
     engine: &str,
     sql: &str,
