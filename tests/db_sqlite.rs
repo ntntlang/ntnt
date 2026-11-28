@@ -824,12 +824,78 @@ fn sqlite_hot_journal_inspection_is_readonly_and_names_the_recovery_action() {
         assert!(code(&r, "DB_SQLITE_RECOVERY_REQUIRED"), "{r}");
         let action = r["diagnostics"][0]["next_action"].as_str().unwrap();
         assert!(
-            action.contains("approved") && action.contains("migrate"),
+            action.contains("approved")
+                && action.contains("migrate")
+                && action.contains("lost")
+                && action.contains("#sqlite-lost-plan-recovery"),
             "{action}"
         );
         assert_eq!(std::fs::read(&f.target_path).unwrap(), before);
         assert_eq!(std::fs::read(&journal).unwrap(), journal_before);
     }
+    // The writer has exited. Branch this same crash image *offline*, so
+    // testing the lost-plan path cannot recover the retained-plan control.
+    let lost = Fixture::new();
+    for name in ["0001_initial.sql", "0002_bulk.sql"] {
+        std::fs::copy(
+            f.root.path().join("migrations").join(name),
+            lost.root.path().join("migrations").join(name),
+        )
+        .unwrap();
+    }
+    std::fs::write(&lost.target_path, &before).unwrap();
+    let mut sidecar = lost.target_path.as_os_str().to_owned();
+    sidecar.push("-journal");
+    std::fs::write(&sidecar, &journal_before).unwrap();
+    assert!(code(
+        &lost.command("plan", &[]),
+        "DB_SQLITE_RECOVERY_REQUIRED"
+    ));
+    // SQLite's operation in the runbook, using the bundled engine. No
+    // CREATE flag, no user SQL, no NTNT authorization or plan on this copy.
+    {
+        use rusqlite::{Connection, OpenFlags};
+        let c = Connection::open_with_flags(
+            &lost.target_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        c.execute_batch("PRAGMA query_only=ON;").unwrap();
+        c.query_row("PRAGMA main.schema_version;", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+    }
+    // A second writable handle could mask a recovery command that did nothing.
+    let c = rusqlite::Connection::open_with_flags(
+        &lost.target_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let counts = c
+        .query_row(
+            "SELECT (SELECT count(*) FROM a), (SELECT count(*) FROM b),
+                (SELECT count(*) FROM logs), (SELECT count(*) FROM _ntnt_schema_migrations_v2)",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(counts, (1000, 1000, 0, 1));
+    drop(c);
+    assert_eq!(lost.command("verify", &[])["outcome"], "pass");
+    let fresh = lost.plan("fresh.json");
+    assert_eq!(fresh["plan"]["pending"].as_array().unwrap().len(), 1);
+    assert!(code(
+        &lost.apply("fresh.json", None),
+        "DB_APPROVAL_REQUIRED"
+    ));
+    // The actual interrupted target is still hot until its approved migrate.
+    assert_eq!(std::fs::read(&journal).unwrap(), journal_before);
     let recovered = f.apply("upgrade.json", plan["plan_digest"].as_str());
     assert_eq!(recovered["outcome"], "pass", "{recovered}");
     assert_eq!(recovered["progress"][0]["state"], "already_applied");
