@@ -908,6 +908,11 @@ async fn build_concurrent(
         // failed); a valid or unknown index keeps the attempt for reconcile.
         let cleanup = async {
             let mut dropped = false;
+            let planned = &saved["plan"]["execution"]["prefix_fingerprints"];
+            if planned[applied] == planned[applied + 1] {
+                // An IF NOT EXISTS no-op did not own an index to clean up.
+                return Ok(None);
+            }
             if db.index_validity(schema, &index.name).await? == Some(false) {
                 db.drop_invalid_index(schema, &index.name, limit).await?;
                 dropped = true;
@@ -1088,7 +1093,7 @@ async fn reconcile_owned(
         d.source = Some(index.name.clone());
         return Err(d);
     }
-    let mut catalog = db
+    let catalog = db
         .catalog(
             schema,
             &inputs.history_schemas,
@@ -1118,18 +1123,12 @@ async fn reconcile_owned(
             // Treated as finished, the invalid index must make the catalog
             // exactly the planned one; only then is it ours to drop. Its
             // stored value too, when that differs (#460).
-            let key = format!("index:{}", index.name);
-            for object in catalog
-                .objects
-                .get_mut(&key)
-                .into_iter()
-                .chain(catalog.stored.get_mut(&key))
-            {
-                for flag in ["valid", "ready", "live"] {
-                    object[flag] = json!(true);
-                }
-            }
-            if !Fingerprint::of(&catalog).matches(&fingerprints[applied + 1]) {
+            if !invalid_index_transition(
+                catalog,
+                &index.name,
+                &fingerprints[applied],
+                &fingerprints[applied + 1],
+            ) {
                 return Err(mismatch(&index.name));
             }
             db.rollback().await?;
@@ -1171,6 +1170,37 @@ async fn reconcile_owned(
     Ok(())
 }
 
+fn invalid_index_transition(
+    mut catalog: super::model::Catalog,
+    name: &str,
+    before: &Value,
+    after: &Value,
+) -> bool {
+    let key = format!("index:{name}");
+    for object in catalog
+        .objects
+        .get_mut(&key)
+        .into_iter()
+        .chain(catalog.stored.get_mut(&key))
+    {
+        for flag in ["valid", "ready", "live"] {
+            object[flag] = json!(true);
+        }
+    }
+    if !Fingerprint::of(&catalog).matches(after) {
+        return false;
+    }
+    // An index is both a pg_index object and a relation. Test the proposed
+    // removal in memory; IF NOT EXISTS may have planned no addition at all.
+    for key in [key, format!("relation:{name}")] {
+        if catalog.objects.remove(&key).is_none() {
+            return false;
+        }
+        catalog.stored.remove(&key);
+    }
+    Fingerprint::of(&catalog).matches(before)
+}
+
 /// Mark a reconciliation write whose outcome is not yet acknowledged. A lost
 /// commit or interrupted DROP then reports `unknown`, not `fail`.
 fn pending_write(report: &mut Value, write: &str) {
@@ -1181,6 +1211,35 @@ fn pending_write(report: &mut Value, write: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_invalid_index_belongs_to_the_build_only_if_the_plan_added_it() {
+        let mut before = super::super::model::Catalog::default();
+        before
+            .objects
+            .insert("relation:t".into(), json!({"kind":"r"}));
+        let mut completed = before.clone();
+        completed
+            .objects
+            .insert("relation:t_id".into(), json!({"kind":"i"}));
+        completed.objects.insert(
+            "index:t_id".into(),
+            json!({"valid":true,"ready":true,"live":true}),
+        );
+        let mut interrupted = completed.clone();
+        interrupted.objects.get_mut("index:t_id").unwrap()["valid"] = json!(false);
+        let digest = |c: &super::super::model::Catalog| json!(Fingerprint::of(c).stable);
+        let end = digest(&completed);
+        assert!(invalid_index_transition(
+            interrupted.clone(),
+            "t_id",
+            &digest(&before),
+            &end
+        ));
+        // IF NOT EXISTS found the index already present: same approved state
+        // on either side of the step. Its later invalidity is not ours to undo.
+        assert!(!invalid_index_transition(interrupted, "t_id", &end, &end));
+    }
 
     /// Captured inputs for a one-target PostgreSQL manifest plus `extra` TOML.
     fn captured(extra: &str) -> (tempfile::TempDir, CapturedInputs) {
