@@ -24,6 +24,8 @@ needs to run again. The database ledger does not change (#446).
 
 ## SQLite migrations
 
+`ntnt db plan` no longer approves a date expression in an index or constraint just because replay found no rows. The refusal names the migration, statement and date function; timestamp defaults and triggers are unchanged. An already-recorded index can be replaced in a new migration (#441).
+
 `ntnt db plan` used to report syntax errors for SQL that SQLite itself
 accepts, including `WHEN OLD.value IS NOT NEW.value` in a trigger, `GLOB`
 in a `CHECK`, and `STRICT, WITHOUT ROWID` on a table. These migrations can

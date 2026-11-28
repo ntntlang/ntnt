@@ -3,6 +3,7 @@
 //! Source-only reports and saved-plan validation need the same labels without
 //! a live schema: their proposed statement spans are checked against SQLite's
 //! own prepare/tail boundaries before the prepared programs can run.
+pub(super) mod dates;
 use super::analysis::Analysis;
 use super::Diagnostic;
 

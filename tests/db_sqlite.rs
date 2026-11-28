@@ -1261,6 +1261,110 @@ fn sqlite_time_defaults_and_triggers_plan_apply_and_verify() {
     assert_eq!(f.command("verify", &[])["outcome"], "pass");
 }
 
+/// Baseline adoption attests to an existing catalog; it does not install the
+/// original index. Keep that path available to record then repair a legacy DB.
+#[test]
+fn sqlite_adoption_can_record_then_repair_a_legacy_date_index() {
+    use std::io::Write;
+    let f = Fixture::new();
+    let schema = "CREATE TABLE events(expires TEXT); CREATE INDEX active ON events(expires) WHERE expires > datetime('now');";
+    f.sql("0001_events.sql", schema);
+    f.sql(
+        "0002_repair.sql",
+        "DROP INDEX active; CREATE INDEX ix_events_expires ON events(expires);",
+    );
+    f.target().execute_batch(schema).unwrap();
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.root.path().join("ntnt.toml"))
+            .unwrap(),
+        "\n[databases.app.adoption_checks]\nempty='SELECT count(*)=0 FROM main.events'"
+    )
+    .unwrap();
+    let adoption = f.command("plan", &["--adopt-through", "1", "--out", "adopt.json"]);
+    assert_eq!(adoption["outcome"], "pass", "{}", adoption["diagnostics"]);
+    assert_eq!(
+        f.apply("adopt.json", adoption["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    let repair = f.plan("repair.json");
+    assert_eq!(
+        f.apply("repair.json", repair["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute("INSERT INTO events VALUES ('2020-01-01')", [])
+        .unwrap();
+    assert_eq!(f.command("verify", &[])["outcome"], "pass");
+}
+
+/// Empty replay is not evidence that a schema expression will work on first write.
+#[test]
+fn sqlite_clock_dependent_schema_is_refused_on_empty_tables() {
+    let f = Fixture::new();
+    for (ddl, name) in [
+        (
+            "CREATE INDEX active ON events(id) WHERE expires > datetime('NoW');",
+            "datetime",
+        ),
+        ("CREATE INDEX stamp ON events(strftime('%s'));", "strftime"),
+        (
+            r#"CREATE TABLE other(x TEXT CHECK(x <= "current_timestamp"()));"#,
+            "current_timestamp",
+        ),
+        (
+            "CREATE TABLE other(id INT CHECK(julianday() > 0));",
+            "julianday",
+        ),
+        (
+            "ALTER TABLE events ADD COLUMN t TEXT CHECK(date(t) IS NOT NULL);",
+            "date",
+        ),
+        (
+            "CREATE TABLE other(id INT, stamp TEXT AS (time('12:00', 'utc')));",
+            "time",
+        ),
+        (
+            "CREATE INDEX epoch ON events(unixepoch('subsecond'));",
+            "unixepoch",
+        ),
+        (
+            "CREATE INDEX delta ON events(timediff('2020-01-01','now'));",
+            "timediff",
+        ),
+    ] {
+        f.sql(
+            "0001_events.sql",
+            &format!("CREATE TABLE events(id INTEGER, expires TEXT); {ddl}"),
+        );
+        let r = f.command("plan", &[]);
+        assert_ne!(r["outcome"], "pass", "{ddl}");
+        let d = diagnostic(&r, "DB_SQL_UNSUPPORTED");
+        assert_eq!(d["source"], "0001_events.sql");
+        let msg = d["message"].as_str().unwrap();
+        assert!(msg.contains("Statement 2") && msg.contains(name), "{d}");
+        assert_eq!(r["plan"]["classification"], "blocked");
+        assert_eq!(
+            f.target()
+                .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    f.sql("0001_events.sql", "CREATE TABLE events(id INT CHECK(id > unixepoch('1970-01-01')), expires TEXT DEFAULT(datetime('now'))); CREATE INDEX active ON events(expires) WHERE expires > datetime(0, 'unixepoch', 'subsec'); CREATE INDEX fixed_dates ON events(date((('2020-01-01'))), strftime((NULL)), CAST(id AS CURRENT_TIMESTAMP));");
+    let p = f.plan("fixed.json");
+    assert_eq!(
+        f.apply("fixed.json", p["plan_digest"].as_str())["outcome"],
+        "pass"
+    );
+    f.target()
+        .execute("INSERT INTO events(id) VALUES(1)", [])
+        .unwrap();
+    assert_eq!(f.command("verify", &[])["outcome"], "pass");
+}
+
 /// #414: a function outside the allowed set is reported as DB_SQL_UNSUPPORTED
 /// naming the function, the statement and the migration, not as an opaque
 /// DB_SQLITE code -1. Literals in the statement stay out of the report. Since

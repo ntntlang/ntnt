@@ -193,8 +193,8 @@ fn altered_copy(name: &str) -> Option<&str> {
 /// function. Where a function's value lands in the catalog, it lands as text:
 /// a DEFAULT such as `(lower(hex(randomblob(16))))` or `CURRENT_TIMESTAMP` is
 /// stored as its expression, so the catalog stays deterministic, and SQLite
-/// itself refuses a non-deterministic call where determinism is required (a
-/// CHECK constraint, generated column, index expression or predicate).
+/// may defer a date/time purity error until the first write. New schema
+/// date expressions are checked separately in `sqlite_sql::dates`.
 /// Sorted, for `binary_search`; a unit test compares the list with the
 /// bundled SQLite.
 const BUILTIN_FUNCTIONS: &[&str] = &[
